@@ -188,7 +188,14 @@ class NormattivaPipeline:
             # Get all collections from API
             try:
                 collections_data = self.api.get_collection_catalogue()
-                collections = [c['nome'] for c in collections_data]
+                # Deduplicate: catalogue has one entry per variant
+                seen = set()
+                collections = []
+                for c in collections_data:
+                    name = c.get('nomeCollezione', c.get('nome'))
+                    if name and name not in seen:
+                        seen.add(name)
+                        collections.append(name)
             except Exception as e:
                 logger.error(f"Failed to get collections: {e}")
                 collections = ['Cost', 'DPR']  # Fallback
@@ -204,7 +211,7 @@ class NormattivaPipeline:
             
             variant_laws = []
             
-            for collection in collections[:3]:  # Limit to 3 for testing
+            for collection in collections:
                 try:
                     # Download
                     zip_file = self.download_collection(collection, variant)

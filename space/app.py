@@ -22,9 +22,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from collections import Counter
 import logging
+from huggingface_hub import hf_hub_download
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+HF_DATASET_REPO = "diatribe00/normattiva-data-raw"
 
 # PAGE CONFIG
 st.set_page_config(
@@ -41,21 +44,21 @@ st.markdown("Explore Italian jurisprudence: laws, amendments, citations, and leg
 
 @st.cache_resource
 def load_laws():
-    """Load all laws from JSONL."""
+    """Load all laws from HF Dataset."""
     try:
-        jsonl_files = list(Path('data/processed').glob('laws_*.jsonl'))
-        if not jsonl_files:
-            st.warning("No data files found. Run pipeline.py first.")
-            return []
+        local_path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename="data/processed/laws_vigente.jsonl",
+            repo_type="dataset"
+        )
         
         laws = []
-        for jsonl_file in jsonl_files:
-            with open(jsonl_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        laws.append(json.loads(line))
+        with open(local_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    laws.append(json.loads(line))
         
-        st.success(f"✓ Loaded {len(laws)} laws")
+        st.success(f"Loaded {len(laws)} laws")
         return laws
     
     except Exception as e:
@@ -64,13 +67,15 @@ def load_laws():
 
 @st.cache_resource
 def load_citations():
-    """Load citation index."""
+    """Load citation index from HF Dataset."""
     try:
-        index_files = list(Path('data/indexes').glob('*_citations.json'))
-        if not index_files:
-            return {}
+        local_path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename="data/indexes/laws_vigente_citations.json",
+            repo_type="dataset"
+        )
         
-        with open(index_files[0], 'r', encoding='utf-8') as f:
+        with open(local_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         st.error(f"Error loading citations: {e}")
@@ -78,13 +83,15 @@ def load_citations():
 
 @st.cache_resource
 def load_metrics():
-    """Load metrics."""
+    """Load metrics from HF Dataset."""
     try:
-        metric_files = list(Path('data/indexes').glob('*_metrics.json'))
-        if not metric_files:
-            return {}
+        local_path = hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            filename="data/indexes/laws_vigente_metrics.json",
+            repo_type="dataset"
+        )
         
-        with open(metric_files[0], 'r', encoding='utf-8') as f:
+        with open(local_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         st.error(f"Error loading metrics: {e}")
