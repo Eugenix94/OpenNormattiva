@@ -1,0 +1,19 @@
+# HF integration
+huggingface-hub>=0.21.0
+
+# XML parsing (AKN/Akoma Ntoso)
+lxml>=4.9.0
+
+# Data processing
+pandas>=2.0.0
+
+# Frontend (HF Space)
+streamlit>=1.32.0
+streamlit-aggrid>=0.3.4
+plotly>=5.18.0
+pyvis>=0.3.2
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.66.0
+datasets>=2.18.0

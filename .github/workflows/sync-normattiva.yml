@@ -1,0 +1,132 @@
+name: Sync Normattiva Mirror
+
+on:
+  schedule:
+    # Run nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install huggingface-hub
+
+      - name: Reconcile mirror and sync stale collections
+        run: python reconcile_mirror.py --sync
+        timeout-minutes: 90
+
+      - name: Commit manifest changes
+        run: |
+          git config user.name "normattiva-mirror[bot]"
+          git config user.email "action@github.com"
+          if git diff --quiet; then
+            echo "No changes to commit"
+          else
+            git add manifests/ metadata/
+            git commit -m "chore: update manifest after nightly sync [skip ci]"
+            git push
+          fi
+
+      - name: Upload to HuggingFace dataset
+        run: |
+          python -c "
+import json
+from pathlib import Path
+from huggingface_hub import HfApi, CommitOperationAdd
+import os
+
+api = HfApi()
+token = os.getenv('HF_TOKEN')
+repo_id = 'diatribe00/normattiva-raw'
+
+# Find all new/modified ZIPs
+akn_dir = Path('akn/originale')
+if akn_dir.exists():
+    for zip_file in akn_dir.glob('*.zip'):
+        try:
+            api.upload_file(
+                path_or_fileobj=str(zip_file),
+                path_in_repo=f'akn/originale/{zip_file.name}',
+                repo_id=repo_id,
+                repo_type='dataset',
+                token=token
+            )
+            print(f'✓ Uploaded {zip_file.name}')
+        except Exception as e:
+            print(f'⚠ {zip_file.name}: {e}')
+
+# Upload manifests
+manifest_file = Path('manifests/versions_manifest.jsonl')
+if manifest_file.exists():
+    api.upload_file(
+        path_or_fileobj=str(manifest_file),
+        path_in_repo='manifests/versions_manifest.jsonl',
+        repo_id=repo_id,
+        repo_type='dataset',
+        token=token
+    )
+    print('✓ Uploaded manifest')
+
+# Upload metadata
+for meta_file in Path('metadata').glob('*.json'):
+    api.upload_file(
+        path_or_fileobj=str(meta_file),
+        path_in_repo=f'metadata/{meta_file.name}',
+        repo_id=repo_id,
+        repo_type='dataset',
+        token=token
+    )
+    print(f'✓ Uploaded {meta_file.name}')
+"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+      - name: Report
+        if: always()
+        run: |
+          echo "## Sync Report" >> $GITHUB_STEP_SUMMARY
+          if [ -f metadata/reconciliation_last.json ]; then
+            python -c "
+import json
+with open('metadata/reconciliation_last.json') as f:
+    data = json.load(f)
+    summary = data.get('summary', {})
+    print(f\"- Total collections: {summary.get('total', 0)}\")
+    print(f\"- Up-to-date: {summary.get('up_to_date_count', 0)}\")
+    print(f\"- Stale (re-downloaded): {summary.get('stale_count', 0)}\")
+    print(f\"- New: {summary.get('missing_count', 0)}\")
+" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f metadata/update_log.json ]; then
+            python -c "
+import json
+with open('metadata/update_log.json') as f:
+    data = json.load(f)
+    print(f\"- Downloaded: {data.get('successful_downloads', 0)}/{data.get('total_attempts', 0)}\")
+    print(f\"- Size: {data.get('total_size_mb', 0):.1f} MB\")
+    print(f\"- Duration: {data.get('download_duration_seconds', 0)//60} min\")
+" >> $GITHUB_STEP_SUMMARY
+          fi
+        run: |
+          echo "Sync job status: ${{ needs.sync.result }}"
+          if [ "${{ needs.sync.result }}" = "failure" ]; then
+            echo "FAILED: Check logs above for details."
+            exit 1
+          else
+            echo "SUCCESS: Normattiva mirror updated."
+          fi

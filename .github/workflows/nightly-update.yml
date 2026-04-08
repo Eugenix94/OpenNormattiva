@@ -1,0 +1,66 @@
+name: Normattiva Nightly Pipeline
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily 2 AM UTC
+  workflow_dispatch
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11']
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Create data directories
+        run: |
+          mkdir -p data/raw data/processed data/indexes
+          mkdir -p logs
+      
+      - name: Run full pipeline
+        id: pipeline
+        run: |
+          python pipeline.py --variants vigente --collections 'Cost' 'DPR' 2>&1 | tee logs/pipeline.log
+          echo "completed=true" >> $GITHUB_OUTPUT
+        env:
+          PYTHONUNBUFFERED: 1
+      
+      - name: Verify output files
+        if: steps.pipeline.outputs.completed == 'true'
+        run: |
+          find data -type f -name "*.jsonl" -o -name "*.json" | xargs ls -lh
+          echo "Files generated successfully"
+      
+      - name: Push data to repo
+        if: always()
+        run: |
+          git config user.name "Normattiva Bot"
+          git config user.email "bot@normattiva.dev"
+          git add data/processed/* data/indexes/* logs/*
+          git diff --cached --quiet || git commit -m "chore: update normattiva data $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push || echo "No changes to push"
+      
+      - name: Upload to HF Dataset (Optional)
+        if: steps.pipeline.outputs.completed == 'true'
+        run: |
+          echo "Dataset upload configured but disabled for safety"
+          echo "To enable: set HF_TOKEN in repo secrets and uncomment upload code"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}

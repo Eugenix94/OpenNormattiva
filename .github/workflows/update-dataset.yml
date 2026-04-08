@@ -1,0 +1,79 @@
+name: Update Normattiva Dataset
+
+on:
+  schedule:
+    # Run at 2 AM UTC daily (adjust timezone as needed)
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install sentence-transformers faiss-cpu groq huggingface-hub
+      
+      - name: Download dataset from HF
+        run: |
+          mkdir -p data/
+          # Download laws.jsonl, embeddings, FAISS index from HF Dataset
+          python -c "
+          from huggingface_hub import hf_hub_download
+          import os
+          
+          token = os.getenv('HF_TOKEN')
+          repo = 'YOUR_USERNAME/normattiva'
+          
+          for filename in ['laws.jsonl', 'embeddings.npy', 'faiss_index.bin', 'embeddings_metadata.json', 'manifest.json']:
+            try:
+              hf_hub_download(repo_id=repo, filename=filename, repo_type='dataset', local_dir='data/', token=token)
+            except:
+              print(f'Note: {filename} not found, will be created')
+          "
+      
+      - name: Run update pipeline
+        run: |
+          python update_dataset.py \
+            --laws-jsonl data/laws.jsonl \
+            --output-embeddings data/embeddings.npy \
+            --output-index data/faiss_index.bin \
+            --hf-repo YOUR_USERNAME/normattiva \
+            --push \
+            --sample 0  # Remove for full dataset
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: update-logs
+          path: |
+            data/laws.jsonl
+            data/manifest.json
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Update pipeline failed. Check logs."
+          # Optionally send email/Slack notification
+    
+    permissions:
+      contents: read
+      repository-projects: read
