@@ -57,10 +57,19 @@ jobs:
           git diff --cached --quiet || git commit -m "chore: update normattiva data $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push || echo "No changes to push"
       
-      - name: Upload to HF Dataset (Optional)
-        if: steps.pipeline.outputs.completed == 'true'
+      - name: Upload to HF Dataset
+        if: steps.pipeline.outputs.completed == 'true' && env.HF_TOKEN != ''
         run: |
-          echo "Dataset upload configured but disabled for safety"
-          echo "To enable: set HF_TOKEN in repo secrets and uncomment upload code"
+          python -c "
+          from huggingface_hub import HfApi
+          import os, glob
+          api = HfApi()
+          token = os.environ['HF_TOKEN']
+          repo_id = 'diatribe00/normattiva-data-raw'
+          for f in glob.glob('data/processed/*.jsonl') + glob.glob('data/indexes/*.json'):
+              print(f'Uploading {f}...')
+              api.upload_file(path_or_fileobj=f, path_in_repo=os.path.basename(f), repo_id=repo_id, repo_type='dataset', token=token)
+          print('Upload complete')
+          "
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
