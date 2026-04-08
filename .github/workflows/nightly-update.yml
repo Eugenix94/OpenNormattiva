@@ -3,7 +3,7 @@ name: Normattiva Nightly Pipeline
 on:
   schedule:
     - cron: '0 2 * * *'  # Daily 2 AM UTC
-  workflow_dispatch
+  workflow_dispatch:
 
 jobs:
   pipeline:
