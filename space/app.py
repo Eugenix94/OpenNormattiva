@@ -102,12 +102,30 @@ def _run_full_pipeline():
             _pipeline_state["collections_done"] = i
 
         _log(f"[{i+1}/{len(collections)}] Downloading {coll_name}...")
+        
+        # Try AKN first, then fall back to XML
+        data = None
+        format_used = None
+        for fmt in ["AKN", "XML"]:
+            try:
+                data, etag, ct = api.get_collection(coll_name, variant="V", format=fmt)
+                format_used = fmt
+                _log(f"  Downloaded via {fmt}: {len(data)/1e6:.1f} MB")
+                break
+            except Exception as fmt_err:
+                _log(f"  {fmt} unavailable: {fmt_err}")
+                continue
+        
+        if not data:
+            _log(f"  ERROR: Neither AKN nor XML available")
+            with _pipeline_lock:
+                _pipeline_state["errors"].append(f"{coll_name}: No AKN or XML format available")
+            continue
+        
         try:
-            data, etag, ct = api.get_collection(coll_name, variant="V", format="AKN")
-            zip_path = raw_dir / f"{coll_name}_vigente.zip"
+            zip_path = raw_dir / f"{coll_name}_vigente_{format_used.lower()}.zip"
             with open(zip_path, "wb") as f:
                 f.write(data)
-            _log(f"  Downloaded {len(data)/1e6:.1f} MB")
 
             laws = parser.parse_zip_file(zip_path)
             for law in laws:
@@ -115,13 +133,13 @@ def _run_full_pipeline():
             all_laws.extend(laws)
             with _pipeline_lock:
                 _pipeline_state["laws_parsed"] = len(all_laws)
-            _log(f"  Parsed {len(laws)} laws (total: {len(all_laws)})")
+            _log(f"  Parsed {len(laws)} laws ({format_used}) (total: {len(all_laws)})")
 
             # Clean up raw ZIP to save disk
             zip_path.unlink(missing_ok=True)
 
         except Exception as e:
-            _log(f"  ERROR on {coll_name}: {e}")
+            _log(f"  ERROR parsing {coll_name}: {e}")
             with _pipeline_lock:
                 _pipeline_state["errors"].append(f"{coll_name}: {e}")
             continue
