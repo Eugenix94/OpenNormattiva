@@ -2,74 +2,193 @@ name: Normattiva Nightly Pipeline
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Daily 2 AM UTC
+    - cron: '0 2 * * *'   # Daily 2 AM UTC — incremental update
+    - cron: '0 2 * * 0'   # Weekly Sunday 2 AM UTC — full rebuild with all collections
   workflow_dispatch:
+    inputs:
+      full_rebuild:
+        description: 'Full rebuild (all collections)'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  HF_DATASET_REPO: diatribe00/normattiva-data
+  HF_SPACE_REPO: diatribe00/normattiva-search
+  PYTHON_VERSION: '3.11'
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.11']
-    
+    timeout-minutes: 360
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-      
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
-      - name: Create data directories
+
+      - name: Prepare directories
+        run: mkdir -p data/raw data/processed logs
+
+      - name: Download & parse laws
+        id: parse
         run: |
-          mkdir -p data/raw data/processed data/indexes
-          mkdir -p logs
-      
-      - name: Run full pipeline
-        id: pipeline
-        run: |
-          python pipeline.py --variants vigente --collections 'Cost' 'DPR' 2>&1 | tee logs/pipeline.log
-          echo "completed=true" >> $GITHUB_OUTPUT
+          set -o pipefail
+          if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" == "0 2 * * 0" ]] || \
+             [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
+            echo "Running FULL rebuild (all collections)..."
+            python pipeline.py --variants vigente 2>&1 | tee logs/download.log
+          else
+            echo "Running incremental update (main collections)..."
+            python pipeline.py --variants vigente \
+              --collections "Leggi" "Decreti Legislativi" "Decreti Legge" \
+              "DPR" "DPCM" "DM" "Cost" 2>&1 | tee logs/download.log
+          fi
+          echo "parse_done=true" >> "$GITHUB_OUTPUT"
         env:
-          PYTHONUNBUFFERED: 1
-      
-      - name: Verify output files
-        if: steps.pipeline.outputs.completed == 'true'
+          PYTHONUNBUFFERED: '1'
+
+      - name: Build DB + insert citations
+        if: steps.parse.outputs.parse_done == 'true'
         run: |
-          find data -type f -name "*.jsonl" -o -name "*.json" | xargs ls -lh
-          echo "Files generated successfully"
-      
-      - name: Push data to repo
-        if: always()
-        run: |
-          git config user.name "Normattiva Bot"
-          git config user.email "bot@normattiva.dev"
-          git add data/processed/* data/indexes/* logs/*
-          git diff --cached --quiet || git commit -m "chore: update normattiva data $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git push || echo "No changes to push"
-      
-      - name: Upload to HF Dataset
-        if: steps.pipeline.outputs.completed == 'true' && env.HF_TOKEN != ''
+          python insert_citations.py --rebuild 2>&1 | tee logs/insert_citations.log
+        env:
+          PYTHONUNBUFFERED: '1'
+
+      - name: Enrich DB (PageRank, domains, export)
+        if: steps.parse.outputs.parse_done == 'true'
         run: |
           python -c "
+          import json
+          from pathlib import Path
+          from core.db import LawDatabase
+
+          db = LawDatabase('data/laws.db')
+          print('PageRank...')
+          db.compute_importance_scores()
+          print('Domains...')
+          db.detect_law_domains()
+          print('Export CSV...')
+          db.export_csv(Path('data/laws_summary.csv'))
+          print('Export citation graph...')
+          db.export_graph_json(Path('data/citation_graph.json'))
+          db.close()
+          print('Enrichment done')
+          " 2>&1 | tee logs/enrichment.log
+        env:
+          PYTHONUNBUFFERED: '1'
+
+      - name: Report stats
+        if: steps.parse.outputs.parse_done == 'true'
+        run: |
+          python -c "
+          import sqlite3, json
+          conn = sqlite3.connect('data/laws.db')
+          laws   = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
+          cits   = conn.execute('SELECT COUNT(*) FROM citations').fetchone()[0]
+          scored = conn.execute('SELECT COUNT(*) FROM laws WHERE importance_score > 0').fetchone()[0]
+          conn.close()
+          print(f'Laws: {laws:,}  |  Citations: {cits:,}  |  PageRank scored: {scored:,}')
+          size_mb = round(__import__(\"os\").path.getsize(\"data/laws.db\") / 1e6, 1)
+          print(f'DB size: {size_mb} MB')
+          "
+
+      - name: Upload JSONL to HF Dataset
+        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
+        run: |
+          python -c "
+          import os
+          from pathlib import Path
           from huggingface_hub import HfApi
-          import os, glob
-          api = HfApi()
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          repo_id = os.environ['HF_DATASET_REPO']
+
+          # Upload JSONL
+          jsonl = Path('data/processed/laws_vigente.jsonl')
+          if jsonl.exists():
+              print(f'Uploading {jsonl} ({jsonl.stat().st_size/1e6:.0f} MB)...')
+              api.upload_file(
+                  path_or_fileobj=str(jsonl),
+                  path_in_repo='data/processed/laws_vigente.jsonl',
+                  repo_id=repo_id, repo_type='dataset',
+                  commit_message='Nightly update: laws JSONL',
+              )
+              print('JSONL uploaded')
+          " 2>&1 | tee logs/upload_jsonl.log
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+      - name: Upload DB to HF Dataset
+        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
+        run: |
+          python -c "
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          repo_id = os.environ['HF_DATASET_REPO']
+
+          db = Path('data/laws.db')
+          if db.exists():
+              print(f'Uploading DB ({db.stat().st_size/1e6:.0f} MB)...')
+              api.upload_file(
+                  path_or_fileobj=str(db),
+                  path_in_repo='data/laws.db',
+                  repo_id=repo_id, repo_type='dataset',
+                  commit_message='Nightly update: pre-built SQLite DB',
+              )
+              print('DB uploaded')
+
+          # Summary CSV + citation graph
+          for f, repo_path in [
+              ('data/laws_summary.csv', 'data/laws_summary.csv'),
+              ('data/citation_graph.json', 'data/citation_graph.json'),
+          ]:
+              p = Path(f)
+              if p.exists():
+                  api.upload_file(
+                      path_or_fileobj=str(p),
+                      path_in_repo=repo_path,
+                      repo_id=repo_id, repo_type='dataset',
+                      commit_message='Nightly supplemental files',
+                  )
+                  print(f'Uploaded {f}')
+          " 2>&1 | tee logs/upload_db.log
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+      - name: Restart HF Space
+        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
+        run: |
+          python -c "
+          import os, requests
           token = os.environ['HF_TOKEN']
-          repo_id = 'diatribe00/normattiva-data-raw'
-          for f in glob.glob('data/processed/*.jsonl') + glob.glob('data/indexes/*.json'):
-              print(f'Uploading {f}...')
-              api.upload_file(path_or_fileobj=f, path_in_repo=os.path.basename(f), repo_id=repo_id, repo_type='dataset', token=token)
-          print('Upload complete')
+          space = os.environ['HF_SPACE_REPO']
+          r = requests.post(
+              f'https://huggingface.co/api/spaces/{space}/restart',
+              headers={'Authorization': f'Bearer {token}'},
+          )
+          print(f'Space restart: {r.status_code} {r.text[:200]}')
           "
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+      - name: Upload logs to artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7

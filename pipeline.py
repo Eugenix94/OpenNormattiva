@@ -185,17 +185,36 @@ class NormattivaPipeline:
     def run_pipeline(self, variants: List[str], collections: List[str] = None):
         """Run full pipeline."""
         if collections is None:
-            # Get all collections from API
+            # Get all collections from API, filtering by available variants
             try:
                 collections_data = self.api.get_collection_catalogue()
-                # Deduplicate: catalogue has one entry per variant
-                seen = set()
-                collections = []
+                
+                # Build dict: collection_name -> set of available variants
+                available = {}
                 for c in collections_data:
                     name = c.get('nomeCollezione', c.get('nome'))
-                    if name and name not in seen:
-                        seen.add(name)
+                    fmt = c.get('formatoCollezione', c.get('formato'))
+                    if name and fmt:
+                        if name not in available:
+                            available[name] = set()
+                        available[name].add(fmt)
+                
+                # Get variant codes for requested variants
+                variant_codes = {
+                    'originale': 'O',
+                    'vigente': 'V',
+                    'multivigente': 'M'
+                }
+                requested_codes = set(variant_codes.get(v, v) for v in variants)
+                
+                # Only include collections that have at least one requested variant
+                collections = []
+                for name, variants_available in available.items():
+                    if variants_available & requested_codes:  # intersection
                         collections.append(name)
+                
+                logger.info(f"Found {len(collections)} collections with variants {variants}")
+                
             except Exception as e:
                 logger.error(f"Failed to get collections: {e}")
                 collections = ['Cost', 'DPR']  # Fallback

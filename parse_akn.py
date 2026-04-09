@@ -175,22 +175,118 @@ class AKNParser:
         logger.info(f"✓ Parsed {len(laws)} laws from ZIP")
         return laws
 
-    def extract_citations(self, text: str) -> List[str]:
-        """Extract law citations from text."""
+    # Short-code type → URN type mappings
+    TYPE_MAP = {
+        'legge': 'legge',
+        'l': 'legge',
+        'l.': 'legge',
+        'decreto': 'decreto',
+        'decr': 'decreto',
+        'decr.': 'decreto',
+        'd.lgs': 'decreto.legislativo',
+        'd.lgs.': 'decreto.legislativo',
+        'd.l': 'decreto.legge',
+        'd.l.': 'decreto.legge',
+        'dpr': 'decreto.del.presidente.della.repubblica',
+        'd.p.r': 'decreto.del.presidente.della.repubblica',
+        'd.p.r.': 'decreto.del.presidente.della.repubblica',
+        'dpcm': 'decreto.del.presidente.del.consiglio.dei.ministri',
+        'd.p.c.m': 'decreto.del.presidente.del.consiglio.dei.ministri',
+        'd.p.c.m.': 'decreto.del.presidente.del.consiglio.dei.ministri',
+        'd.m': 'decreto.ministeriale',
+        'd.m.': 'decreto.ministeriale',
+        'r.d': 'regio.decreto',
+        'r.d.': 'regio.decreto',
+        'l.cost': 'legge.costituzionale',
+        'l.cost.': 'legge.costituzionale',
+    }
+
+    def _make_urn(self, doc_type_raw: str, number: str, year: str) -> str:
+        """Convert short citation parts (type, number, year) to a NiR-style URN.
+
+        Examples:
+            ('legge', '290', '2006')   -> 'urn:nir:stato:legge:2006;290'
+            ('d.lgs.', '50', '2016')   -> 'urn:nir:stato:decreto.legislativo:2016;50'
+        """
+        key = doc_type_raw.strip().rstrip('.').lower()
+        # Normalise with dotted variant too
+        urn_type = self.TYPE_MAP.get(key) or self.TYPE_MAP.get(key + '.') or 'legge'
+        # Ensure 4-digit year
+        if len(year) == 2:
+            year = ('19' if int(year) > 50 else '20') + year
+        return f"urn:nir:stato:{urn_type}:{year};{number}"
+
+    def extract_citations(self, text: str) -> List[Dict[str, str]]:
+        """Extract law citations from text and resolve to full URNs.
+
+        Returns list of dicts:
+            [{"target_urn": "urn:nir:stato:legge:2006;290",
+              "ref": "legge 290/2006",
+              "article": "5"}, ...]
+        """
+        seen = set()
         citations = []
-        
-        # Pattern: "articolo 1 della legge 123/2021"
-        pattern = r"(?:articolo|art\.?)\s+(\d+)\s+(?:della|del|di|dei)\s+(?:legge|decreto|decr\.?|d\.lgs\.?|d\.l\.?)\s+(\d+/\d{2,4})"
-        
-        for match in re.finditer(pattern, text, re.IGNORECASE):
-            citations.append(f"art.{match.group(1)} L.{match.group(2)}")
-        
-        # Also catch just law citations: "legge 123/2021"
-        pattern2 = r"(?:legge|decreto|d\.lgs\.?|d\.l\.?)\s+(\d+/\d{2,4})"
-        for match in re.finditer(pattern2, text, re.IGNORECASE):
-            citations.append(f"L.{match.group(1)}")
-        
-        return list(set(citations))
+
+        # 1) Article-level: "articolo 5 della legge 290/2006"
+        pattern_art = (
+            r'(?:articol[oi]|art\.?)\s+(\d+(?:\s*(?:bis|ter|quater|quinquies|sexies|septies|octies))?)'
+            r'\s+(?:della|del|di|dei|dello)\s+'
+            r'(legge|decreto|decr\.?|d\.lgs\.?|d\.l\.?|d\.p\.r\.?|d\.p\.c\.m\.?|d\.m\.?|r\.d\.?|l\.cost\.?)\s+'
+            r'(\d{1,5})\s*/\s*(\d{2,4})'
+        )
+        for m in re.finditer(pattern_art, text, re.IGNORECASE):
+            article, dtype, num, year = m.group(1).strip(), m.group(2), m.group(3), m.group(4)
+            urn = self._make_urn(dtype, num, year)
+            key = (urn, article)
+            if key not in seen:
+                seen.add(key)
+                citations.append({
+                    "target_urn": urn,
+                    "ref": m.group(0).strip(),
+                    "article": article,
+                })
+
+        # 2) Standalone law refs: "legge 290/2006", "d.lgs. 50/2016"
+        pattern_law = (
+            r'\b(legge|decreto|decr\.?|d\.lgs\.?|d\.l\.?|d\.p\.r\.?|d\.p\.c\.m\.?|d\.m\.?|r\.d\.?|l\.cost\.?)'
+            r'\s+(?:n\.?\s*)?(\d{1,5})\s*/\s*(\d{2,4})\b'
+        )
+        for m in re.finditer(pattern_law, text, re.IGNORECASE):
+            dtype, num, year = m.group(1), m.group(2), m.group(3)
+            urn = self._make_urn(dtype, num, year)
+            key = (urn, None)
+            if key not in seen:
+                seen.add(key)
+                citations.append({
+                    "target_urn": urn,
+                    "ref": m.group(0).strip(),
+                })
+
+        # 3) Date-based refs: "legge 27 dicembre 2006, n. 290"
+        months = {
+            'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
+            'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08',
+            'settembre': '09', 'ottobre': '10', 'novembre': '11', 'dicembre': '12',
+        }
+        months_pat = '|'.join(months.keys())
+        pattern_date = (
+            r'\b(legge|decreto|d\.lgs\.?|d\.l\.?|d\.p\.r\.?)\s+'
+            r'(\d{1,2})\s+(' + months_pat + r')\s+(\d{4})\s*,?\s*n\.?\s*(\d{1,5})\b'
+        )
+        for m in re.finditer(pattern_date, text, re.IGNORECASE):
+            dtype = m.group(1)
+            day, month_name, year, num = m.group(2), m.group(3).lower(), m.group(4), m.group(5)
+            mm = months.get(month_name, '01')
+            urn = self._make_urn(dtype, num, year)
+            key = (urn, None)
+            if key not in seen:
+                seen.add(key)
+                citations.append({
+                    "target_urn": urn,
+                    "ref": m.group(0).strip(),
+                })
+
+        return citations
 
     def enrich_with_metadata(self, law: Dict) -> Dict:
         """Add computed metadata."""
