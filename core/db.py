@@ -34,7 +34,8 @@ class LawDatabase:
     def __init__(self, db_path: Path = Path('data/laws.db')):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
+        # check_same_thread=False allows Streamlit's multi-threaded execution
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -58,9 +59,20 @@ class LawDatabase:
                 source_collection TEXT,
                 parsed_at TEXT,
                 importance_score REAL DEFAULT 0.0,
-                subject_tags TEXT DEFAULT '[]'
+                subject_tags TEXT DEFAULT '[]',
+                legislature_id INTEGER,
+                government TEXT,
+                era TEXT
             )
         ''')
+        
+        # Migrate: add legislature columns if missing (for existing DBs)
+        try:
+            self.conn.execute('SELECT legislature_id FROM laws LIMIT 1')
+        except sqlite3.OperationalError:
+            self.conn.execute('ALTER TABLE laws ADD COLUMN legislature_id INTEGER')
+            self.conn.execute('ALTER TABLE laws ADD COLUMN government TEXT')
+            self.conn.execute('ALTER TABLE laws ADD COLUMN era TEXT')
         
         # FTS5 virtual table for full-text search with BM25
         self.conn.execute('''
@@ -132,6 +144,34 @@ class LawDatabase:
             )
         ''')
         
+        # API change detection tracking
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS api_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collection TEXT NOT NULL,
+                old_etag TEXT,
+                new_etag TEXT,
+                detected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'pending',
+                preview_data TEXT,
+                processed_at TEXT
+            )
+        ''')
+
+        # Manual update log — tracks when user manually updates the dataset
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS update_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                action TEXT NOT NULL,
+                description TEXT,
+                laws_before INTEGER,
+                laws_after INTEGER,
+                collections_affected TEXT,
+                user_note TEXT
+            )
+        ''')
+        
         # Create indexes for performance
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_year ON laws(year)')
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_type ON laws(type)')
@@ -142,6 +182,10 @@ class LawDatabase:
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_amendments_urn ON amendments(urn)')
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_amendments_date ON amendments(date_effective)')
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_metadata_pagerank ON law_metadata(pagerank)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_legislature ON laws(legislature_id)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_government ON laws(government)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_api_changes_status ON api_changes(status)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_api_changes_collection ON api_changes(collection)')
         
         self.conn.commit()
         logger.info("Schema initialized")
@@ -149,11 +193,25 @@ class LawDatabase:
     def insert_law(self, law: Dict) -> bool:
         """Insert or update single law."""
         try:
+            # Auto-compute legislature metadata from year if not provided
+            legislature_id = law.get('legislature_id')
+            government = law.get('government')
+            era = law.get('era')
+            year = law.get('year')
+            if year and not legislature_id:
+                try:
+                    from core.legislature import LegislatureMetadata
+                    legislature_id = LegislatureMetadata.get_legislature_from_year(year)
+                    government = LegislatureMetadata.get_government_from_year(year)
+                    era = LegislatureMetadata.get_era_from_year(year)
+                except Exception:
+                    pass
+            
             self.conn.execute('''
                 INSERT OR REPLACE INTO laws 
                 (urn, title, type, date, year, text, text_length, article_count, 
-                 source_collection, parsed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source_collection, parsed_at, legislature_id, government, era)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 law.get('urn'),
                 law.get('title'),
@@ -164,7 +222,10 @@ class LawDatabase:
                 law.get('text_length', 0),
                 law.get('article_count', 0),
                 law.get('source_collection', ''),
-                datetime.now().isoformat()
+                datetime.now().isoformat(),
+                legislature_id,
+                government,
+                era,
             ))
             
             # Index for FTS

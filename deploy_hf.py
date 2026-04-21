@@ -67,34 +67,125 @@ def main():
                 "---\n\n"
                 "# OpenNormattiva — Italian Law Research Platform\n\n"
                 "Search, browse, and analyse 160,000+ Italian laws with "
-                "full-text search, citation graphs, and domain classification.\n",
+                "full-text search, citation graphs, and domain classification.\n\n"
+                "## Deployment\n\n"
+                "This Space automatically downloads the laws database (~970MB) from HF Dataset on first run.\n"
+                "Subsequent restarts use the cached copy.\n\n"
+                "### Environment Variables\n\n"
+                "- `HF_DATASET_OWNER`: Owner of the dataset repo (default: `diatribe00`)\n"
+                "- `HF_DATASET_NAME`: Name of the dataset repo (default: `normattiva-data`)\n"
+                "- `HF_TOKEN`: HuggingFace API token (auto-set if deploying to your Space)\n\n"
+                "### Logs\n\n"
+                "Check container logs for startup progress:\n"
+                "```\n"
+                "[startup] Downloading database (attempt 1/3, ~970MB)...\n"
+                "[download_db] Fetching diatribe00/normattiva-data/data/laws.db...\n"
+                "[startup] Database ready: 969MB\n"
+                "[startup] Starting Streamlit...\n"
+                "```\n",
                 encoding="utf-8",
             )
 
-            # Dockerfile for Streamlit
+            # Dockerfile for Streamlit (DB pre-downloads on first run)
             (staging / "Dockerfile").write_text(
                 "FROM python:3.11-slim\n"
                 "WORKDIR /app\n"
+                "ENV PYTHONUNBUFFERED=1 \\\n"
+                "    PYTHONDONTWRITEBYTECODE=1 \\\n"
+                "    PIP_NO_CACHE_DIR=1\n"
                 "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
-                "    libxml2-dev libxslt-dev gcc && rm -rf /var/lib/apt/lists/*\n"
+                "    libxml2-dev libxslt-dev gcc git && rm -rf /var/lib/apt/lists/*\n"
                 "COPY requirements.txt .\n"
-                "RUN pip install --no-cache-dir -r requirements.txt\n"
+                "RUN pip install -r requirements.txt\n"
                 "COPY . .\n"
+                "RUN chmod +x startup.sh download_db.py\n"
                 "EXPOSE 8501\n"
-                'CMD ["streamlit", "run", "app.py", \\\n'
-                '     "--server.port=8501", \\\n'
-                '     "--server.address=0.0.0.0", \\\n'
-                '     "--server.headless=true", \\\n'
-                '     "--browser.gatherUsageStats=false"]\n',
+                'CMD ["/bin/bash", "-c", "exec ./startup.sh"]\n',
                 encoding="utf-8",
             )
+
+            # Startup script: production-ready DB pre-download with error handling
+            # Uses LF line endings and proper shell quoting for reliability
+            startup_sh_content = (
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                "trap 'echo \"[startup] FATAL: Script failed (exit $?)\" >&2' EXIT\n"
+                "trap 'exit 130' INT TERM\n"
+                "\n"
+                "DB_PATH=\"/app/data/laws.db\"\n"
+                "MIN_DB_SIZE=100000000  # 100MB threshold\n"
+                "MAX_RETRIES=3\n"
+                "RETRY_DELAY=5\n"
+                "\n"
+                "# Ensure data directory exists\n"
+                "mkdir -p /app/data\n"
+                "cd /app\n"
+                "\n"
+                "# Check if DB exists and is large enough\n"
+                "check_db() {\n"
+                "  [ -f \"$DB_PATH\" ] && [ $(stat -c%s \"$DB_PATH\" 2>/dev/null || echo 0) -ge $MIN_DB_SIZE ]\n"
+                "}\n"
+                "\n"
+                "# Download database with retry logic\n"
+                "download_db() {\n"
+                "  local attempt=1\n"
+                "  while [ $attempt -le $MAX_RETRIES ]; do\n"
+                "    if [ $attempt -gt 1 ]; then\n"
+                "      echo \"[startup] Retry $attempt/$MAX_RETRIES (waiting ${RETRY_DELAY}s)...\"\n"
+                "      sleep $RETRY_DELAY\n"
+                "    fi\n"
+                "    \n"
+                "    echo \"[startup] Downloading database (attempt $attempt/$MAX_RETRIES, ~970MB)...\"\n"
+                "    \n"
+                "    # Use Python to handle download with proper error messages\n"
+                "    if python3 /app/download_db.py \"$DB_PATH\"; then\n"
+                "      if check_db; then\n"
+                "        local size_mb=$(( $(stat -c%s \"$DB_PATH\" 2>/dev/null || echo 0) / 1000000 ))\n"
+                "        echo \"[startup] Database ready: ${size_mb}MB\"\n"
+                "        return 0\n"
+                "      else\n"
+                "        echo \"[startup] ERROR: Downloaded DB is too small (corrupted?)\" >&2\n"
+                "        rm -f \"$DB_PATH\"\n"
+                "      fi\n"
+                "    fi\n"
+                "    \n"
+                "    attempt=$((attempt + 1))\n"
+                "  done\n"
+                "  \n"
+                "  echo \"[startup] FATAL: Failed to download database after $MAX_RETRIES attempts\" >&2\n"
+                "  return 1\n"
+                "}\n"
+                "\n"
+                "# Main startup logic\n"
+                "if check_db; then\n"
+                "  echo \"[startup] Database already present, skipping download\"\n"
+                "else\n"
+                "  if ! download_db; then\n"
+                "    echo \"[startup] FATAL: Cannot start without database\" >&2\n"
+                "    exit 1\n"
+                "  fi\n"
+                "fi\n"
+                "\n"
+                "# Start Streamlit\n"
+                "echo \"[startup] Starting Streamlit...\"\n"
+                "exec streamlit run app.py \\\n"
+                "  --server.port=8501 \\\n"
+                "  --server.address=0.0.0.0 \\\n"
+                "  --server.headless=true \\\n"
+                "  --browser.gatherUsageStats=false\n"
+            )
+            (staging / "startup.sh").write_text(startup_sh_content, encoding="utf-8", newline="\n")
 
             # The main Streamlit app (flat, at root)
             shutil.copy("space/app.py", staging / "app.py")
 
+            # Helper scripts
+            shutil.copy("download_db.py", staging / "download_db.py")
+            
             # Dependencies the app imports
             shutil.copy("normattiva_api_client.py", staging / "normattiva_api_client.py")
-            shutil.copy("parse_akn.py", staging / "parse_akn.py")
+            if Path("parse_akn.py").exists():
+                shutil.copy("parse_akn.py", staging / "parse_akn.py")
 
             # core package
             core_dst = staging / "core"
@@ -104,6 +195,21 @@ def main():
             if not (core_dst / "__init__.py").exists():
                 (core_dst / "__init__.py").write_text("")
 
+            # Pre-built database — NOT included in Space (too large, avoids 1GB limit)
+            # App will download from HF Dataset on first run
+            db_path = Path("data/laws.db")
+            if db_path.exists():
+                print(f"  Note: Local DB {db_path.stat().st_size / 1e6:.1f}MB will NOT be uploaded to Space")
+                print(f"        App will download it from HF Dataset on first load")
+            
+            # But DO include ETag cache if present (small file)
+            etag_path = Path("data/.etag_cache.json")
+            if etag_path.exists():
+                data_dst = staging / "data"
+                data_dst.mkdir(parents=True, exist_ok=True)
+                shutil.copy(etag_path, data_dst / ".etag_cache.json")
+                print(f"  [OK] Including ETag cache")
+
             # Patch app.py sys.path hack: on Space, files are at root
             app_text = (staging / "app.py").read_text(encoding="utf-8")
             app_text = app_text.replace(
@@ -111,29 +217,23 @@ def main():
                 "sys.path.insert(0, str(Path(__file__).parent))\n",
                 "# paths already at root in Docker container\n"
             )
-            # Update dataset repo reference
-            app_text = app_text.replace(
-                'HF_DATASET_REPO = "diatribe00/normattiva-data-raw"',
-                f'HF_DATASET_REPO = "{dataset_id}"',
-            )
             (staging / "app.py").write_text(app_text, encoding="utf-8")
 
             # requirements.txt for the Space
             reqs = (
-                "streamlit>=1.56.0\n"
+                "streamlit>=1.36.0\n"
                 "plotly\n"
                 "pandas\n"
                 "lxml\n"
-                "huggingface-hub\n"
-                "python-dotenv\n"
                 "tqdm\n"
                 "requests\n"
+                "huggingface_hub>=0.20.0\n"
             )
             (staging / "requirements.txt").write_text(reqs, encoding="utf-8")
 
-            # .gitignore
+            # .gitignore — do NOT exclude *.db, the DB ships with the Space
             (staging / ".gitignore").write_text(
-                "data/\n__pycache__/\n*.pyc\n.DS_Store\n*.db\n",
+                "__pycache__/\n*.pyc\n.DS_Store\n",
                 encoding="utf-8",
             )
 
@@ -218,7 +318,7 @@ def main():
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    print("\n✓ Deployment complete!")
+    print("\n[OK] Deployment complete!")
     if not args.skip_space:
         print(f"  Space: https://huggingface.co/spaces/{space_id}")
     if not args.skip_dataset:

@@ -1,0 +1,94 @@
+name: Normattiva Change Monitor
+
+# Read-only API polling — detects new/updated collections and reports.
+# Does NOT auto-rebuild or upload data. The user decides when to update.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'    # Daily 6 AM UTC
+  workflow_dispatch:        # Manual trigger
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install minimal deps
+        run: pip install lxml tqdm
+
+      - name: Check Normattiva API for changes
+        id: check
+        run: |
+          python -c "
+          import json
+          from pathlib import Path
+          from normattiva_api_client import NormattivaAPI
+
+          api = NormattivaAPI(timeout_s=15, retries=2)
+          catalogue = api.get_collection_catalogue()
+
+          # Load existing ETags
+          etag_path = Path('data/.etag_cache.json')
+          etag_cache = {}
+          if etag_path.exists():
+              etag_cache = json.loads(etag_path.read_text())
+
+          changes = []
+          seen = set()
+          for c in catalogue:
+              name = c.get('nomeCollezione', c.get('nome'))
+              if not name or name in seen:
+                  continue
+              seen.add(name)
+              try:
+                  new_etag = api.check_collection_etag(name, variant='V', format='AKN')
+                  if not new_etag:
+                      continue
+                  old_etag = etag_cache.get(name)
+                  if old_etag and old_etag == new_etag:
+                      continue
+                  changes.append({
+                      'collection': name,
+                      'is_new': old_etag is None,
+                      'num_acts': c.get('numeroAtti', 0),
+                  })
+                  print(f'  CHANGED: {name} (acts={c.get(\"numeroAtti\",0)}, new={old_etag is None})')
+              except Exception as e:
+                  print(f'  ERROR checking {name}: {e}')
+
+          print(f'Checked {len(seen)} collections: {len(changes)} changed')
+
+          # Write summary
+          summary = {
+              'checked': len(seen),
+              'changed': len(changes),
+              'changes': changes,
+          }
+          Path('change_report.json').write_text(json.dumps(summary, indent=2))
+
+          if changes:
+              print('::warning::New Normattiva changes detected! Review and update manually.')
+          else:
+              print('All collections up to date.')
+          "
+
+      - name: Upload change report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-report-${{ github.run_id }}
+          path: change_report.json
+          retention-days: 30

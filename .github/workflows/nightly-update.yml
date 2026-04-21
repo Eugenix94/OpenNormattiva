@@ -1,4 +1,4 @@
-name: Normattiva Nightly Pipeline
+﻿name: Normattiva Nightly Pipeline
 
 on:
   schedule:
@@ -42,6 +42,40 @@ jobs:
       - name: Prepare directories
         run: mkdir -p data/raw data/processed logs
 
+      - name: Download existing DB from HF Dataset
+        run: |
+          python - <<'PYEOF'
+          import os, sys
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+          token = os.environ.get('HF_TOKEN')
+          repo_id = os.environ['HF_DATASET_REPO']
+          print(f'Downloading existing DB from {repo_id}...')
+          try:
+              cached = hf_hub_download(
+                  repo_id=repo_id,
+                  filename='data/laws.db',
+                  repo_type='dataset',
+                  token=token,
+                  local_dir='data',
+              )
+              size = Path(cached).stat().st_size
+              print(f'Downloaded: {size/1e9:.2f} GB at {cached}')
+              if size < 100_000_000:
+                  print(f'WARNING: Downloaded DB too small ({size} bytes), starting fresh')
+                  Path(cached).unlink(missing_ok=True)
+              else:
+                  import sqlite3
+                  conn = sqlite3.connect(cached)
+                  count = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
+                  conn.close()
+                  print(f'Existing DB has {count:,} laws - incremental update will build on top')
+          except Exception as e:
+              print(f'Could not download existing DB ({e}), starting fresh')
+          PYEOF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
       - name: Download & parse laws
         id: parse
         run: |
@@ -63,14 +97,14 @@ jobs:
       - name: Build DB + insert citations
         if: steps.parse.outputs.parse_done == 'true'
         run: |
-          python insert_citations.py --rebuild 2>&1 | tee logs/insert_citations.log
+          python insert_citations.py 2>&1 | tee logs/insert_citations.log
         env:
           PYTHONUNBUFFERED: '1'
 
       - name: Enrich DB (PageRank, domains, export)
         if: steps.parse.outputs.parse_done == 'true'
         run: |
-          python -c "
+          python - <<'PYEOF'
           import json
           from pathlib import Path
           from core.db import LawDatabase
@@ -86,36 +120,43 @@ jobs:
           db.export_graph_json(Path('data/citation_graph.json'))
           db.close()
           print('Enrichment done')
-          " 2>&1 | tee logs/enrichment.log
+          PYEOF
         env:
           PYTHONUNBUFFERED: '1'
 
-      - name: Report stats
+      - name: Validate DB before upload
         if: steps.parse.outputs.parse_done == 'true'
         run: |
-          python -c "
-          import sqlite3, json
-          conn = sqlite3.connect('data/laws.db')
-          laws   = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
-          cits   = conn.execute('SELECT COUNT(*) FROM citations').fetchone()[0]
+          python - <<'PYEOF'
+          import sqlite3, sys
+          from pathlib import Path
+          db_path = Path('data/laws.db')
+          size = db_path.stat().st_size
+          print(f'DB size: {size/1e9:.3f} GB ({size:,} bytes)')
+          if size < 100_000_000:
+              print(f'ERROR: DB too small ({size} bytes) - refusing to upload', file=sys.stderr)
+              sys.exit(1)
+          conn = sqlite3.connect(str(db_path))
+          laws = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
+          cits = conn.execute('SELECT COUNT(*) FROM citations').fetchone()[0]
           scored = conn.execute('SELECT COUNT(*) FROM laws WHERE importance_score > 0').fetchone()[0]
           conn.close()
           print(f'Laws: {laws:,}  |  Citations: {cits:,}  |  PageRank scored: {scored:,}')
-          size_mb = round(__import__(\"os\").path.getsize(\"data/laws.db\") / 1e6, 1)
-          print(f'DB size: {size_mb} MB')
-          "
+          if laws < 10000:
+              print(f'ERROR: Too few laws ({laws:,}) - incomplete run, refusing to upload', file=sys.stderr)
+              sys.exit(1)
+          print('Validation passed: DB is safe to upload')
+          PYEOF
 
       - name: Upload JSONL to HF Dataset
         if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
         run: |
-          python -c "
+          python - <<'PYEOF'
           import os
           from pathlib import Path
           from huggingface_hub import HfApi
           api = HfApi(token=os.environ['HF_TOKEN'])
           repo_id = os.environ['HF_DATASET_REPO']
-
-          # Upload JSONL
           jsonl = Path('data/processed/laws_vigente.jsonl')
           if jsonl.exists():
               print(f'Uploading {jsonl} ({jsonl.stat().st_size/1e6:.0f} MB)...')
@@ -126,20 +167,19 @@ jobs:
                   commit_message='Nightly update: laws JSONL',
               )
               print('JSONL uploaded')
-          " 2>&1 | tee logs/upload_jsonl.log
+          PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Upload DB to HF Dataset
         if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
         run: |
-          python -c "
+          python - <<'PYEOF'
           import os
           from pathlib import Path
           from huggingface_hub import HfApi
           api = HfApi(token=os.environ['HF_TOKEN'])
           repo_id = os.environ['HF_DATASET_REPO']
-
           db = Path('data/laws.db')
           if db.exists():
               print(f'Uploading DB ({db.stat().st_size/1e6:.0f} MB)...')
@@ -150,8 +190,6 @@ jobs:
                   commit_message='Nightly update: pre-built SQLite DB',
               )
               print('DB uploaded')
-
-          # Summary CSV + citation graph
           for f, repo_path in [
               ('data/laws_summary.csv', 'data/laws_summary.csv'),
               ('data/citation_graph.json', 'data/citation_graph.json'),
@@ -165,14 +203,14 @@ jobs:
                       commit_message='Nightly supplemental files',
                   )
                   print(f'Uploaded {f}')
-          " 2>&1 | tee logs/upload_db.log
+          PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Restart HF Space
         if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
         run: |
-          python -c "
+          python - <<'PYEOF'
           import os, requests
           token = os.environ['HF_TOKEN']
           space = os.environ['HF_SPACE_REPO']
@@ -181,7 +219,7 @@ jobs:
               headers={'Authorization': f'Bearer {token}'},
           )
           print(f'Space restart: {r.status_code} {r.text[:200]}')
-          "
+          PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
