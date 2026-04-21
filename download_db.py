@@ -40,6 +40,11 @@ def download_database(output_path: str) -> bool:
     token = os.environ.get("HF_TOKEN")
     max_retries = 3
     min_db_size = 100_000_000  # 100MB
+    max_backoff_seconds = 6
+    
+    def _cleanup_output():
+        if output_path_obj.exists():
+            output_path_obj.unlink(missing_ok=True)
     
     if not token:
         print(
@@ -50,7 +55,7 @@ def download_database(output_path: str) -> bool:
     for attempt in range(1, max_retries + 1):
         try:
             if attempt > 1:
-                wait_s = 2 ** attempt
+                wait_s = min(2 ** (attempt - 1), max_backoff_seconds)
                 print(f"[download_db] Retry {attempt}/{max_retries} after {wait_s}s...", flush=True)
                 time.sleep(wait_s)
             
@@ -99,13 +104,13 @@ def download_database(output_path: str) -> bool:
             
         except ValueError as e:
             print(f"[download_db] ERROR: Validation failed - {e}", file=sys.stderr)
-            if output_path_obj.exists():
-                output_path_obj.unlink(missing_ok=True)
+            _cleanup_output()
             if attempt == max_retries:
                 return False
             
         except Exception as e:
             print(f"[download_db] ERROR: Download failed - {type(e).__name__}: {e}", file=sys.stderr)
+            _cleanup_output()
             if attempt == max_retries:
                 return False
     

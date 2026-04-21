@@ -33,6 +33,7 @@ from collections import Counter
 import logging
 import threading
 import math
+import re
 
 # Setup paths for imports
 _app_dir = Path(__file__).parent
@@ -202,9 +203,11 @@ def load_laws_from_live_api():
                 continue
             seen.add(collection)
             created_at = item.get("dataCreazione", "") or ""
-            year = created_at[:4] if len(created_at) >= 4 else None
+            year_match = re.search(r"\b(\d{4})\b", created_at)
+            year = int(year_match.group(1)) if year_match else None
+            urn_suffix = re.sub(r"[^a-z0-9_]+", "_", collection.lower())
             laws.append({
-                "urn": f"urn:normattiva:collection:{collection.lower().replace(' ', '_')}",
+                "urn": f"urn:normattiva:collection:{urn_suffix.strip('_')}",
                 "title": f"{collection} (Live API)",
                 "type": "collection",
                 "year": year,
@@ -1464,7 +1467,8 @@ def _render_law_card(law: dict, db, key_prefix: str = "", key_suffix: str = ""):
     """Render a compact law card with nav button and citation count."""
     urn = law.get("urn", "")
     title = law.get("title", "N/A")
-    year = law.get("year", "")
+    year_value = law.get("year")
+    year = str(year_value) if year_value else ""
     law_type = law.get("type", "")
     importance = law.get("importance_score", 0) or 0
 
@@ -1833,7 +1837,7 @@ def main():
         st.sidebar.error("Database: ✗ Non trovato")
         laws = _get_laws()
         if laws:
-            if laws and laws[0].get("status") == "live_api":
+            if laws[0].get("status") == "live_api":
                 st.sidebar.metric("Live API collections", f"{len(laws):,}")
             else:
                 st.sidebar.metric("Leggi (JSONL)", f"{len(laws):,}")
