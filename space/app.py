@@ -33,6 +33,7 @@ from collections import Counter
 import logging
 import threading
 import math
+import re
 
 # Setup paths for imports
 _app_dir = Path(__file__).parent
@@ -83,27 +84,39 @@ def download_database_from_hf():
         logger.error("huggingface_hub not installed — cannot download DB")
         return None
     
-    try:
-        logger.info("Downloading database from HF Dataset (this may take ~5 min)...")
-        cached = hf_hub_download(
-            repo_id="diatribe00/normattiva-data",
-            filename="data/laws.db",
-            repo_type="dataset",
-        )
-        logger.info(f"Downloaded to HF cache: {cached}")
-        # Also copy to /app/data/laws.db so next startup is instant
-        dest = Path('/app/data/laws.db')
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        logger.warning("HF_TOKEN not set; HF downloads may be slower or rate-limited")
+    
+    for attempt in range(1, 4):
         try:
-            import shutil
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(cached, dest)
-            logger.info(f"Copied to {dest}")
-        except Exception:
-            pass
-        return Path(cached)
-    except Exception as e:
-        logger.warning(f"Could not download from HF Dataset: {e}")
-        return None
+            logger.info(f"Downloading database from HF Dataset (attempt {attempt}/3)...")
+            cached = hf_hub_download(
+                repo_id="diatribe00/normattiva-data",
+                filename="data/laws.db",
+                repo_type="dataset",
+                token=token,
+                force_download=(attempt > 1),
+                resume_download=True,
+            )
+            cached_path = Path(cached)
+            size_bytes = cached_path.stat().st_size
+            if size_bytes < 100_000_000:
+                raise ValueError(f"Downloaded DB too small: {size_bytes} bytes")
+            logger.info(f"Downloaded to HF cache: {cached}")
+            # Also copy to /app/data/laws.db so next startup is instant
+            dest = Path('/app/data/laws.db')
+            try:
+                import shutil
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(cached, dest)
+                logger.info(f"Copied to {dest}")
+            except Exception:
+                pass
+            return cached_path
+        except Exception as e:
+            logger.warning(f"Could not download from HF Dataset (attempt {attempt}/3): {e}")
+    return None
 
 
 def get_db():
@@ -171,6 +184,46 @@ def load_laws_from_jsonl():
         except Exception as e:
             logger.debug(f"Error loading {p}: {e}")
     return []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_laws_from_live_api():
+    """Last-resort fallback: fetch lightweight catalogue from live Normattiva API."""
+    try:
+        from normattiva_api_client import NormattivaAPI
+        api = NormattivaAPI(timeout_s=15, retries=2)
+        catalogue = api.get_collection_catalogue()
+        if not isinstance(catalogue, list):
+            return []
+        laws = []
+        seen = set()
+        for item in catalogue:
+            collection = item.get("nomeCollezione") or item.get("nome")
+            if not collection or collection in seen:
+                continue
+            seen.add(collection)
+            created_at = item.get("dataCreazione", "") or ""
+            year_match = re.search(r"\b(\d{4})\b", created_at)
+            year = int(year_match.group(1)) if year_match else None
+            urn_suffix = re.sub(r"[^a-z0-9_]+", "_", collection.lower())
+            laws.append({
+                "urn": f"urn:normattiva:collection:{urn_suffix.strip('_')}",
+                "title": f"{collection} (Live API)",
+                "type": "collection",
+                "year": year,
+                "date": created_at,
+                "status": "live_api",
+                "article_count": item.get("numeroAtti", 0) or 0,
+                "importance_score": 0.0,
+                "text": (
+                    f"Live API fallback entry for collection '{collection}'. "
+                    "The local database is unavailable."
+                ),
+            })
+        return laws
+    except Exception as e:
+        logger.warning(f"Live API fallback unavailable: {e}")
+        return []
 
 
 # API change monitoring (read-only, background)
@@ -283,7 +336,7 @@ def _get_laws_cached(db_path: str):
 
 
 def _get_laws():
-    """Return list of law dicts from DB or JSONL fallback."""
+    """Return list of law dicts from DB, JSONL, or live API fallback."""
     db = load_db()
     if db:
         try:
@@ -298,7 +351,10 @@ def _get_laws():
             return [dict(r) for r in rows]
         except Exception as e:
             logger.error(f"Error loading laws from DB: {e}")
-    return load_laws_from_jsonl()
+    laws = load_laws_from_jsonl()
+    if laws:
+        return laws
+    return load_laws_from_live_api()
 
 
 def _render_graph_plotly(nodes, edges, title="Citation Graph"):
@@ -421,6 +477,11 @@ def page_dashboard():
             "\n".join(f"- {p}" for p in get_db_paths())
         )
         return
+    if laws and laws[0].get("status") == "live_api":
+        st.warning(
+            "Using Live API fallback because the local database is unavailable. "
+            "Results are limited to API collection metadata."
+        )
 
     # Notification badge
     with _monitor_lock:
@@ -563,7 +624,7 @@ def page_search():
         except Exception as e:
             st.error(f"Search error: {e}")
     else:
-        laws = load_laws_from_jsonl()
+        laws = _get_laws()
         q = query.lower()
         results = [l for l in laws
                    if q in l.get("title", "").lower()
@@ -967,7 +1028,7 @@ def page_citations():
         except Exception:
             pass
     else:
-        laws = load_laws_from_jsonl()
+        laws = _get_laws()
         if not laws:
             st.info("No data available.")
             return
@@ -1258,7 +1319,7 @@ def page_export():
                 except Exception as e:
                     st.error(f"Export error: {e}")
             else:
-                laws = load_laws_from_jsonl()
+                laws = _get_laws()
                 if laws:
                     df = pd.DataFrame(laws)
                     st.download_button(
@@ -1402,11 +1463,12 @@ def _find_constitution_urn(_db_path: str) -> str | None:
     return row[0] if row else None
 
 
-def _render_law_card(law: dict, db, key_prefix: str = ""):
+def _render_law_card(law: dict, db, key_prefix: str = "", key_suffix: str = ""):
     """Render a compact law card with nav button and citation count."""
     urn = law.get("urn", "")
     title = law.get("title", "N/A")
-    year = law.get("year", "")
+    year_value = law.get("year")
+    year = str(year_value) if year_value else ""
     law_type = law.get("type", "")
     importance = law.get("importance_score", 0) or 0
 
@@ -1425,7 +1487,7 @@ def _render_law_card(law: dict, db, key_prefix: str = ""):
             if incoming:
                 st.caption(f"📎 Citata da {incoming:,} leggi")
         with c2:
-            if st.button("Apri →", key=f"{key_prefix}-open-{urn}"):
+            if st.button("Apri →", key=f"{key_prefix}-open-{urn}-{year}-{key_suffix}"):
                 st.session_state["detail_urn"] = urn
                 st.session_state["goto_page"] = "📖 Law Detail"
                 st.rerun()
@@ -1568,8 +1630,13 @@ def page_costituzione():
                 (const_urn,)
             ).fetchall()
             if cited_by:
-                for row in cited_by:
-                    _render_law_card(dict(row), db, key_prefix="const-cited")
+                for idx, row in enumerate(cited_by):
+                    _render_law_card(
+                        dict(row),
+                        db,
+                        key_prefix="const-cited",
+                        key_suffix=str(idx),
+                    )
             else:
                 st.info("Nessuna citazione diretta trovata per la Costituzione.")
 
@@ -1703,8 +1770,13 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
                         (f"%{law_type}%", year_from, year_to)
                     ).fetchall()
                     if rows:
-                        for r in rows:
-                            _render_law_card(dict(r), db, key_prefix=f"impl-{year_from}")
+                        for idx, r in enumerate(rows):
+                            _render_law_card(
+                                dict(r),
+                                db,
+                                key_prefix=f"impl-{year_from}",
+                                key_suffix=f"{domain_label}-{idx}",
+                            )
                     else:
                         st.info("Nessuna legge trovata con questi criteri.")
                 except Exception as e:
@@ -1763,9 +1835,12 @@ def main():
         st.sidebar.success("Database: ✓ Caricato")
     else:
         st.sidebar.error("Database: ✗ Non trovato")
-        laws = load_laws_from_jsonl()
+        laws = _get_laws()
         if laws:
-            st.sidebar.metric("Leggi (JSONL)", f"{len(laws):,}")
+            if laws[0].get("status") == "live_api":
+                st.sidebar.metric("Live API collections", f"{len(laws):,}")
+            else:
+                st.sidebar.metric("Leggi (JSONL)", f"{len(laws):,}")
 
     # Last update
     if db:
@@ -1785,4 +1860,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
