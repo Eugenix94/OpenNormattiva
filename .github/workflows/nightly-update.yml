@@ -101,13 +101,31 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+      - name: Detect whether full lab seed is needed
+        id: seedcheck
+        run: |
+          python - <<'PYEOF'
+          from pathlib import Path
+
+          needed = not all([
+              Path('data/processed/laws_vigente.jsonl').exists(),
+              Path('data/processed/laws_originale.jsonl').exists(),
+              Path('data/processed/laws_multivigente.jsonl').exists(),
+              Path('data/processed/normattiva_lab_sync_report.json').exists(),
+          ])
+          with open('seedcheck_output.txt', 'w', encoding='utf-8') as f:
+              f.write(f'bootstrap_needed={str(needed).lower()}\n')
+          print(f'bootstrap_needed={needed}')
+          PYEOF
+          cat seedcheck_output.txt >> "$GITHUB_OUTPUT"
+
       - name: Download and parse variants
         id: parse
         run: |
           set -o pipefail
 
-          if [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
-            echo "Running FORCED FULL rebuild for vigente+originale+multivigente (all collections)..."
+          if [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]] || [[ "${{ steps.seedcheck.outputs.bootstrap_needed }}" == "true" ]]; then
+            echo "Running FULL rebuild for vigente+originale+multivigente (all collections)..."
             python pipeline.py --variants vigente originale multivigente 2>&1 | tee logs/pipeline_full.log
           else
             echo "Running ETag incremental updates for changed collections only..."
@@ -133,7 +151,7 @@ jobs:
         if: steps.parse.outputs.parse_done == 'true'
         run: |
           SNAPSHOT_MODE=incremental
-          if [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
+          if [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]] || [[ "${{ steps.seedcheck.outputs.bootstrap_needed }}" == "true" ]]; then
             SNAPSHOT_MODE=full
           fi
           python sync_normattiva_lab_dataset.py \
@@ -218,9 +236,11 @@ jobs:
 
           uploads = [
               ('data/laws.db', 'data/laws.db', 'Nightly lab update: SQLite DB'),
+              ('data/.etag_cache.json', 'data/.etag_cache.json', 'Nightly lab update: etag cache'),
               ('data/processed/laws_vigente.jsonl', 'data/processed/laws_vigente.jsonl', 'Nightly lab update: vigente JSONL'),
               ('data/processed/laws_originale.jsonl', 'data/processed/laws_originale.jsonl', 'Nightly lab update: originale JSONL'),
               ('data/processed/laws_multivigente.jsonl', 'data/processed/laws_multivigente.jsonl', 'Nightly lab update: multivigente JSONL'),
+              ('data/processed/amendments.jsonl', 'data/processed/amendments.jsonl', 'Nightly lab update: amendment log'),
               ('data/processed/laws_lab_bundle.jsonl', 'data/processed/laws_lab_bundle.jsonl', 'Nightly lab update: all variants bundle'),
               ('data/processed/normattiva_lab_sync_report.json', 'data/processed/normattiva_lab_sync_report.json', 'Nightly lab update: sync report'),
               ('data/laws_summary.csv', 'data/laws_summary.csv', 'Nightly lab update: summary CSV'),

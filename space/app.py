@@ -15,9 +15,10 @@ Pages:
   5. Citations         - network explorer
   6. Domains           - legal domain analysis
     7. History Lab       - observed law-state timeline / wayback
-    8. Notifications     - API change detection (read-only)
-    9. Update Log        - manual update history
- 10. Export            - CSV, JSON, JSONL downloads
+    8. Dataset Updates   - recently changed laws and sync activity
+    9. Notifications     - API change detection (read-only)
+ 10. Update Log        - manual update history
+ 11. Export            - CSV, JSON, JSONL downloads
 """
 
 import streamlit as st
@@ -1195,7 +1196,7 @@ def page_history_lab():
     )
     st.plotly_chart(fig, width='stretch')
 
-    tab1, tab2, tab3 = st.tabs(["📈 Snapshot Runs", "📜 Law Timeline", "🔥 Recent Changes"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Snapshot Runs", "📜 Law Timeline", "🪦 Abrogations", "🔥 Recent Changes"])
 
     with tab1:
         display_df = runs_df[[
@@ -1240,6 +1241,32 @@ def page_history_lab():
             st.dataframe(pd.DataFrame([dict(r) for r in history]), width='stretch', hide_index=True)
 
     with tab3:
+        abrog_df = pd.DataFrame([
+            dict(r) for r in db.conn.execute(
+                """
+                SELECT observed_at, urn, previous_status, status, title, changed_fields
+                FROM law_snapshot_events
+                WHERE status = 'abrogated' OR previous_status = 'abrogated'
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 500
+                """
+            ).fetchall()
+        ])
+        if abrog_df.empty:
+            st.info("No abrogation transitions recorded yet.")
+        else:
+            abrog_df["observed_day"] = pd.to_datetime(abrog_df["observed_at"], errors="coerce").dt.date
+            agg = abrog_df.groupby("observed_day").size().reset_index(name="changes")
+            fig_abrog = px.bar(
+                agg,
+                x="observed_day",
+                y="changes",
+                title="Abrogation-related changes observed over time",
+            )
+            st.plotly_chart(fig_abrog, width='stretch')
+            st.dataframe(abrog_df.drop(columns=["observed_day"]), width='stretch', hide_index=True)
+
+    with tab4:
         recent = db.conn.execute(
             """
             SELECT observed_at, urn, change_type, previous_status, status, changed_fields, title
@@ -1249,6 +1276,83 @@ def page_history_lab():
             """
         ).fetchall()
         st.dataframe(pd.DataFrame([dict(r) for r in recent]), width='stretch', hide_index=True)
+
+
+def page_dataset_updates():
+    st.header("📡 Dataset Updates")
+    st.caption(
+        "Tracks which laws were recently updated in the lab dataset and how the nightly sync is evolving."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for dataset update tracking.")
+        return
+
+    try:
+        runs = pd.DataFrame([
+            dict(r) for r in db.conn.execute(
+                """
+                SELECT id, snapshot_at, source_mode, laws_count, abrogated_count,
+                       variants_count, multivigente_count
+                FROM law_snapshot_runs
+                ORDER BY snapshot_at DESC
+                LIMIT 60
+                """
+            ).fetchall()
+        ])
+        events = pd.DataFrame([
+            dict(r) for r in db.conn.execute(
+                """
+                SELECT observed_at, urn, change_type, previous_status, status,
+                       changed_fields, title
+                FROM law_snapshot_events
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1000
+                """
+            ).fetchall()
+        ])
+    except Exception as e:
+        st.info(f"Dataset update tracking not available yet: {e}")
+        return
+
+    if runs.empty:
+        st.info("No sync runs recorded yet.")
+        return
+
+    run_metrics = st.columns(4)
+    run_metrics[0].metric("Recorded runs", f"{len(runs):,}")
+    run_metrics[1].metric("Latest mode", str(runs.iloc[0]["source_mode"]))
+    run_metrics[2].metric("Latest laws", f"{int(runs.iloc[0]['laws_count']):,}")
+    run_metrics[3].metric("Latest variant rows", f"{int(runs.iloc[0]['variants_count']):,}")
+
+    tab1, tab2, tab3 = st.tabs(["🚀 Sync Runs", "⚡ Live Updated Laws", "🧾 Change Types"])
+
+    with tab1:
+        runs_df = runs.copy()
+        runs_df["snapshot_at"] = pd.to_datetime(runs_df["snapshot_at"], errors="coerce")
+        st.dataframe(runs_df, width='stretch', hide_index=True)
+
+    with tab2:
+        if events.empty:
+            st.info("No law-level update events recorded yet.")
+        else:
+            filter_text = st.text_input("Filter updated laws by URN/title", key="updates-filter")
+            filtered = events
+            if filter_text:
+                mask = filtered["urn"].fillna("").str.contains(filter_text, case=False) | filtered["title"].fillna("").str.contains(filter_text, case=False)
+                filtered = filtered[mask]
+            st.dataframe(filtered, width='stretch', hide_index=True)
+
+    with tab3:
+        if events.empty:
+            st.info("No change events recorded yet.")
+        else:
+            change_counts = events.groupby("change_type").size().reset_index(name="count")
+            fig_changes = px.pie(change_counts, names="change_type", values="count", title="Observed change types")
+            st.plotly_chart(fig_changes, width='stretch')
+            status_counts = events.groupby(["previous_status", "status"]).size().reset_index(name="count")
+            st.dataframe(status_counts, width='stretch', hide_index=True)
 
 
 def page_update_log():
@@ -1841,6 +1945,7 @@ def main():
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
         "🕰️ History Lab": page_history_lab,
+        "📡 Dataset Updates": page_dataset_updates,
         "🔔 Notifications": page_notifications,
         "📝 Update Log": page_update_log,
         "📥 Export": page_export,
