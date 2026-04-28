@@ -74,6 +74,7 @@ def main():
                 "### Environment Variables\n\n"
                 "- `HF_DATASET_OWNER`: Owner of the dataset repo (default: `diatribe00`)\n"
                 "- `HF_DATASET_NAME`: Name of the dataset repo (default: `normattiva-data`)\n"
+                "- `MAX_LAWS_IN_MEMORY`: Optional browse/dashboard in-memory cap (`0` or unset = all rows)\n"
                 "- `HF_TOKEN`: HuggingFace API token (auto-set if deploying to your Space)\n\n"
                 "### Logs\n\n"
                 "Check container logs for startup progress:\n"
@@ -231,7 +232,7 @@ def main():
             )
             (staging / "requirements.txt").write_text(reqs, encoding="utf-8")
 
-            # .gitignore — do NOT exclude *.db, the DB ships with the Space
+            # .gitignore — DB is downloaded at runtime from dataset
             (staging / ".gitignore").write_text(
                 "__pycache__/\n*.pyc\n.DS_Store\n",
                 encoding="utf-8",
@@ -312,7 +313,7 @@ def main():
             api.upload_folder(
                 repo_id=dataset_id, repo_type="dataset",
                 folder_path=str(staging),
-                commit_message=f"Dataset update: 164K laws, 253K citations with full URNs",
+                commit_message=f"Dataset update: 190K laws, 194K citations with full URNs",
             )
             print(f"  Dataset uploaded: https://huggingface.co/datasets/{dataset_id}")
         finally:

@@ -186,7 +186,107 @@ class LawDatabase:
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_government ON laws(government)')
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_api_changes_status ON api_changes(status)')
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_api_changes_collection ON api_changes(collection)')
-        
+
+        # Articles table (structured article-level breakdown of law text)
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                law_urn TEXT NOT NULL,
+                article_num TEXT,
+                heading TEXT,
+                text TEXT,
+                char_count INTEGER DEFAULT 0,
+                FOREIGN KEY (law_urn) REFERENCES laws(urn)
+            )
+        ''')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_articles_law_urn ON articles(law_urn)')
+
+        # Corte Costituzionale decisions (sentenze & ordinanze)
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS sentenze (
+                ecli TEXT PRIMARY KEY,
+                numero INTEGER NOT NULL,
+                anno INTEGER NOT NULL,
+                tipo TEXT,
+                data_deposito TEXT,
+                oggetto TEXT,
+                esito TEXT,
+                articoli_cost TEXT DEFAULT '[]',
+                norme_censurate TEXT DEFAULT '[]',
+                testo TEXT,
+                comunicato_url TEXT,
+                scraped_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_sentenze_anno ON sentenze(anno)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_sentenze_tipo ON sentenze(tipo)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_sentenze_esito ON sentenze(esito)')
+
+        # CC massime (headnotes) linked to sentenze
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS sentenze_massime (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ecli TEXT NOT NULL,
+                anno INTEGER NOT NULL,
+                numero_pronuncia INTEGER NOT NULL,
+                tipo_pronuncia TEXT,
+                data_deposito TEXT,
+                numero_massima TEXT,
+                titolo_massima TEXT,
+                testo_massima TEXT,
+                norme TEXT DEFAULT '[]',
+                parametri TEXT DEFAULT '[]',
+                source_file TEXT,
+                imported_at TEXT
+            )
+        ''')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_massime_ecli ON sentenze_massime(ecli)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_massime_anno ON sentenze_massime(anno)')
+
+        # OpenGA – dataset catalog (one row per CKAN package)
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS openga_catalog (
+                package_id TEXT PRIMARY KEY,
+                title TEXT,
+                court TEXT,
+                dataset_type TEXT,
+                resource_url TEXT,
+                resource_format TEXT,
+                record_count INTEGER DEFAULT 0,
+                last_updated TEXT,
+                license TEXT,
+                fetched_at TEXT
+            )
+        ''')
+
+        # OpenGA – administrative court decisions
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS openga_sentenze (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                package_id TEXT,
+                court TEXT,
+                anno INTEGER,
+                numero TEXT,
+                data_deposito TEXT,
+                sezione TEXT,
+                oggetto TEXT,
+                esito TEXT,
+                source_url TEXT,
+                raw_json TEXT,
+                imported_at TEXT
+            )
+        ''')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_openga_court ON openga_sentenze(court)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_openga_anno ON openga_sentenze(anno)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_openga_pkg ON openga_sentenze(package_id)')
+
+        # Migrate citations table: add article-level columns if missing
+        try:
+            self.conn.execute('SELECT citing_article FROM citations LIMIT 1')
+        except sqlite3.OperationalError:
+            self.conn.execute('ALTER TABLE citations ADD COLUMN citing_article TEXT')
+            self.conn.execute('ALTER TABLE citations ADD COLUMN cited_article TEXT')
+
         self.conn.commit()
         logger.info("Schema initialized")
     
@@ -494,7 +594,8 @@ class LawDatabase:
         """Get laws that this law cites."""
         try:
             sql = '''
-                SELECT c.cited_urn as urn, l.title, l.year, l.type, c.count
+                SELECT c.cited_urn as urn, l.title, l.year, l.type, c.count, c.context,
+                       c.citing_article, c.cited_article
                 FROM citations c
                 LEFT JOIN laws l ON c.cited_urn = l.urn
                 WHERE c.citing_urn = ?
@@ -515,7 +616,8 @@ class LawDatabase:
         """Get laws that cite this law."""
         try:
             sql = '''
-                SELECT c.citing_urn as urn, l.title, l.year, l.type, c.count
+                SELECT c.citing_urn as urn, l.title, l.year, l.type, c.count, c.context,
+                       c.citing_article, c.cited_article
                 FROM citations c
                 LEFT JOIN laws l ON c.citing_urn = l.urn
                 WHERE c.cited_urn = ?
@@ -531,7 +633,105 @@ class LawDatabase:
         except Exception as e:
             logger.error(f"Error getting incoming citations: {e}")
             return []
-    
+
+    # ── ARTICLES ─────────────────────────────────────────────────────────────
+
+    def get_articles(self, law_urn: str) -> List[Dict]:
+        """Get structured articles for a law, ordered by article number."""
+        try:
+            rows = self.conn.execute(
+                'SELECT id, article_num, heading, text, char_count FROM articles '
+                'WHERE law_urn = ? ORDER BY id',
+                (law_urn,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"Error getting articles for {law_urn}: {e}")
+            return []
+
+    def insert_article(self, law_urn: str, article_num: str, heading: str, text: str) -> bool:
+        """Insert a structured article record."""
+        try:
+            self.conn.execute(
+                'INSERT INTO articles (law_urn, article_num, heading, text, char_count) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (law_urn, article_num, heading, text, len(text or ''))
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error inserting article: {e}")
+            return False
+
+    def parse_and_insert_articles(self, law_urn: str, text: str) -> int:
+        """Parse law text into structured articles and store them. Returns count inserted."""
+        if not text or not law_urn:
+            return 0
+        # Keep per-law parsing bounded for predictable runtime.
+        text = text[:300000]
+        # Delete existing articles for this law first (idempotent)
+        self.conn.execute('DELETE FROM articles WHERE law_urn = ?', (law_urn,))
+
+        # Fast line-based parser: avoids pathological regex backtracking
+        # on very large law texts.
+        header_re = re.compile(
+            r'^\s*Art(?:icolo)?\.?\s*(\d+(?:[a-z]|-\w+)?)\b[.\s\-]*(.{0,200})',
+            re.IGNORECASE,
+        )
+
+        current_num = None
+        current_heading = ""
+        current_lines = []
+        count = 0
+
+        for line in text.splitlines():
+            m = header_re.match(line)
+            if m:
+                if current_num is not None:
+                    body = '\n'.join(current_lines).strip()
+                    self.insert_article(law_urn, current_num, current_heading, body)
+                    count += 1
+                current_num = m.group(1).strip()
+                current_heading = (m.group(2) or "").strip()[:200]
+                current_lines = []
+            elif current_num is not None:
+                current_lines.append(line)
+
+        if current_num is not None:
+            body = '\n'.join(current_lines).strip()
+            self.insert_article(law_urn, current_num, current_heading, body)
+            count += 1
+
+        self.conn.commit()
+        return count
+
+    def backfill_article_columns_from_context(self) -> int:
+        """Parse existing context field in citations to extract article references.
+
+        Context is stored as "art. X | ref_text" — extract X into citing_article.
+        Returns number of rows updated.
+        """
+        art_pattern = re.compile(r'^art\.\s*(\w+)', re.IGNORECASE)
+        rows = self.conn.execute(
+            "SELECT citing_urn, cited_urn, context FROM citations "
+            "WHERE context IS NOT NULL AND context != '' "
+            "AND (citing_article IS NULL OR citing_article = '')"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            ctx = row['context'] or ''
+            m = art_pattern.match(ctx)
+            if m:
+                art = m.group(1)
+                self.conn.execute(
+                    "UPDATE citations SET citing_article = ? "
+                    "WHERE citing_urn = ? AND cited_urn = ?",
+                    (art, row['citing_urn'], row['cited_urn'])
+                )
+                updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
     def get_most_cited_laws(self, limit: int = 50) -> List[Dict]:
         """Get the most influential laws by incoming citation count."""
         results = self.conn.execute('''

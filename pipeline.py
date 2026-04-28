@@ -17,6 +17,7 @@ import json
 import sys
 import argparse
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict
@@ -47,7 +48,9 @@ class NormattivaPipeline:
         for d in [self.raw_dir, self.processed_dir, self.indexes_dir]:
             d.mkdir(exist_ok=True)
         
-        self.api = NormattivaAPI()
+        timeout_s = int(os.environ.get('NORMATTIVA_TIMEOUT_S', '30'))
+        retries = int(os.environ.get('NORMATTIVA_RETRIES', '2'))
+        self.api = NormattivaAPI(timeout_s=timeout_s, retries=retries)
         self.parser = AKNParser()
 
     def download_collection(self, collection_name: str, variant: str = 'O') -> Path:

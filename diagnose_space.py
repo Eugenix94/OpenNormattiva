@@ -75,7 +75,7 @@ else:
 # Check for app.py issues
 app_path = Path("space/app.py")
 if app_path.exists():
-    with open(app_path, 'r') as f:
+    with open(app_path, 'r', encoding='utf-8') as f:
         content = f.read()
         if 'key="page-nav"' not in content:
             issues.append("⚠️ app.py may not have the radio key fix")

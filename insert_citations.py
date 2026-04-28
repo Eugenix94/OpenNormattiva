@@ -35,6 +35,12 @@ def insert_citations(db_path: Path, jsonl: Path):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
 
+    # Schema compatibility: newer DBs include article-level columns.
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(citations)").fetchall()
+    }
+    has_article_cols = "citing_article" in cols and "cited_article" in cols
+
     print("Inserting citations (FK checks off)...")
     inserted = 0
 
@@ -52,15 +58,25 @@ def insert_citations(db_path: Path, jsonl: Path):
                     context = cit.get("ref", "")
                     art = cit.get("article")
                     if art:
-                        context = f"art. {art} -- {context}"
+                        # Keep a stable prefix so DB backfill tools can parse article refs.
+                        context = f"art. {art} | {context}"
                 else:
                     cited_urn = str(cit)
                     context = ""
+                    art = None
                 if cited_urn:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO citations (citing_urn, cited_urn, count, context) VALUES (?, ?, 1, ?)",
-                        (citing_urn, cited_urn, context),
-                    )
+                    if has_article_cols:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO citations "
+                            "(citing_urn, cited_urn, count, context, citing_article, cited_article) "
+                            "VALUES (?, ?, 1, ?, ?, NULL)",
+                            (citing_urn, cited_urn, context, str(art) if art is not None else None),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO citations (citing_urn, cited_urn, count, context) VALUES (?, ?, 1, ?)",
+                            (citing_urn, cited_urn, context),
+                        )
                     inserted += 1
             if (i + 1) % 10000 == 0:
                 conn.commit()

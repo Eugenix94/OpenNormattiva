@@ -2,9 +2,13 @@
 """
 Normattiva Jurisprudence Research Platform
 
-Fully static Streamlit app - DB ships with the Space, always available.
+Streamlit app with resilient database loading:
+- Uses local pre-downloaded DB when available
+- Falls back to HF Dataset download if DB is missing
+- Falls back to JSONL when DB is unavailable
+
 NO automatic pipeline writes. Normattiva API is used READ-ONLY to detect
-new/changed collections and show notifications.  The user decides when
+new/changed collections and show notifications. The user decides when
 to manually pull updates into the dataset.
 
 Pages:
@@ -33,6 +37,7 @@ from collections import Counter
 import logging
 import threading
 import math
+import requests
 
 # Setup paths for imports
 _app_dir = Path(__file__).parent
@@ -43,7 +48,14 @@ sys.path.insert(0, str(_app_dir))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# Database connection (static - pre-built DB ships with the Space)
+# Database connection and fallback configuration
+
+
+def get_dataset_repo() -> str:
+    """Resolve dataset repo from env vars with safe defaults."""
+    owner = os.environ.get("HF_DATASET_OWNER", "diatribe00")
+    name = os.environ.get("HF_DATASET_NAME", "normattiva-data")
+    return f"{owner}/{name}"
 
 def get_db_paths():
     """Generate database search paths (works in Docker, local dev, and HF Spaces)."""
@@ -53,10 +65,13 @@ def get_db_paths():
     
     hf_cache_hub = Path.home() / '.cache' / 'huggingface' / 'hub'
     
-    # Scan HF hub cache for any normattiva dataset snapshot that has laws.db
+    # Scan HF hub cache for the configured dataset snapshot that has laws.db
     hf_cached_paths = []
+    dataset_repo = get_dataset_repo()
+    dataset_cache_name = f"datasets--{dataset_repo.replace('/', '--')}"
     if hf_cache_hub.exists():
-        for snap in hf_cache_hub.glob('datasets--diatribe00--normattiva-data/snapshots/*/data/laws.db'):
+        pattern = f"{dataset_cache_name}/snapshots/*/data/laws.db"
+        for snap in hf_cache_hub.glob(pattern):
             hf_cached_paths.append(snap)
     
     base_paths = [
@@ -84,11 +99,14 @@ def download_database_from_hf():
         return None
     
     try:
+        repo_id = get_dataset_repo()
+        token = os.environ.get("HF_TOKEN")
         logger.info("Downloading database from HF Dataset (this may take ~5 min)...")
         cached = hf_hub_download(
-            repo_id="diatribe00/normattiva-data",
+            repo_id=repo_id,
             filename="data/laws.db",
             repo_type="dataset",
+            token=token,
         )
         logger.info(f"Downloaded to HF cache: {cached}")
         # Also copy to /app/data/laws.db so next startup is instant
@@ -171,6 +189,119 @@ def load_laws_from_jsonl():
         except Exception as e:
             logger.debug(f"Error loading {p}: {e}")
     return []
+
+
+def _multivigente_paths() -> List[Path]:
+    """Candidate paths for multivigente JSONL artifacts."""
+    return [
+        Path('data/processed/laws_multivigente.jsonl'),
+        Path('data/processed/laws_with_amendments.jsonl'),
+        Path('/app/data/processed/laws_multivigente.jsonl'),
+        Path('/app/data/processed/laws_with_amendments.jsonl'),
+        Path(__file__).parent.parent / 'data' / 'processed' / 'laws_multivigente.jsonl',
+        Path(__file__).parent.parent / 'data' / 'processed' / 'laws_with_amendments.jsonl',
+        Path('/tmp/normattiva_data/processed/laws_multivigente.jsonl'),
+        Path('/tmp/normattiva_data/processed/laws_with_amendments.jsonl'),
+    ]
+
+
+def _find_multivigente_file() -> Path:
+    """Return first available multivigente JSONL file path."""
+    for p in _multivigente_paths():
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                return p
+        except Exception:
+            continue
+    return Path("")
+
+
+def _parse_iso_date_safe(value: str):
+    """Best-effort parser for YYYY-MM-DD-like strings."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    s = s[:10]
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _mv_version_bounds(law: Dict):
+    """Extract likely validity start/end fields from heterogeneous schemas."""
+    start = (
+        law.get("valid_from")
+        or law.get("date_in_force")
+        or law.get("published_date")
+        or law.get("version_date")
+        or law.get("date")
+        or ""
+    )
+    end = law.get("valid_to") or law.get("date_out_of_force") or ""
+    return str(start), str(end)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _mv_find_versions(file_path: str, urn_query: str, max_matches: int = 5000) -> List[Dict]:
+    """Scan multivigente JSONL and return version rows matching a URN query."""
+    out = []
+    q = (urn_query or "").strip().lower()
+    if not file_path or not q:
+        return out
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    law = json.loads(line)
+                except Exception:
+                    continue
+
+                urn = str(law.get("urn") or law.get("id") or "")
+                if not urn:
+                    continue
+
+                urn_l = urn.lower()
+                if q not in urn_l and q != urn_l:
+                    continue
+
+                start, end = _mv_version_bounds(law)
+                out.append({
+                    "urn": urn,
+                    "title": law.get("title", ""),
+                    "type": law.get("type", ""),
+                    "date": law.get("date", ""),
+                    "valid_from": start,
+                    "valid_to": end,
+                    "is_current": law.get("is_current", False),
+                    "article_count": law.get("article_count", 0),
+                    "text_length": law.get("text_length", 0),
+                })
+
+                if len(out) >= max_matches:
+                    break
+    except Exception:
+        return []
+
+    out.sort(key=lambda r: (r.get("valid_from") or r.get("date") or "", r.get("valid_to") or ""))
+    return out
+
+
+def _mv_is_active_on(row: Dict, as_of_date) -> bool:
+    """Return True if a version row is active at the selected date."""
+    d_from = _parse_iso_date_safe(row.get("valid_from") or row.get("date") or "")
+    d_to = _parse_iso_date_safe(row.get("valid_to") or "")
+
+    if d_from and as_of_date < d_from:
+        return False
+    if d_to and as_of_date > d_to:
+        return False
+    return True
 
 
 # API change monitoring (read-only, background)
@@ -265,16 +396,21 @@ st.markdown("Explore Italian law: search, citations, domains, and legal evolutio
 # HELPERS
 
 @st.cache_data(ttl=3600, show_spinner="Loading laws...")
-def _get_laws_cached(db_path: str):
+def _get_laws_cached(db_path: str, limit: int | None = None):
     """Cached law loading — separated from session state for cache key."""
     try:
         import sqlite3
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
+        query = (
             "SELECT urn, title, type, date, year, status, article_count, "
-            "text_length, importance_score FROM laws ORDER BY year DESC LIMIT 100000"
-        ).fetchall()
+            "text_length, importance_score FROM laws ORDER BY year DESC"
+        )
+        params = ()
+        if limit and limit > 0:
+            query += " LIMIT ?"
+            params = (limit,)
+        rows = conn.execute(query, params).fetchall()
         conn.close()
         return [dict(r) for r in rows]
     except Exception as e:
@@ -282,19 +418,137 @@ def _get_laws_cached(db_path: str):
         return []
 
 
+def _get_max_laws_limit() -> int | None:
+    """
+    Return max number of laws to load into memory.
+
+    Configure with env var MAX_LAWS_IN_MEMORY:
+    - 0 or unset: no limit (load all)
+    - >0: cap rows in memory for constrained hardware
+    """
+    raw = (os.environ.get("MAX_LAWS_IN_MEMORY") or "0").strip()
+    try:
+        value = int(raw)
+        return value if value > 0 else None
+    except Exception:
+        logger.warning(
+            "Invalid MAX_LAWS_IN_MEMORY=%r; using unlimited mode", raw
+        )
+        return None
+
+
+def _count_total_laws(db) -> int | None:
+    """Return exact law count from DB when available."""
+    if not db:
+        return None
+    try:
+        return int(db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=1800)
+def _get_db_integrity_snapshot(db_path: str) -> Dict:
+    """Compute integrity metrics directly from SQLite base tables."""
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        out: Dict[str, float | int] = {}
+        out["total_laws"] = conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+        out["total_citations"] = conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
+        out["total_articles"] = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        out["total_amendments"] = conn.execute("SELECT COUNT(*) FROM amendments").fetchone()[0]
+
+        out["laws_with_any_citation"] = conn.execute(
+            """
+            SELECT COUNT(DISTINCT u.urn)
+            FROM (
+                SELECT citing_urn AS urn FROM citations
+                UNION
+                SELECT cited_urn AS urn FROM citations
+            ) u
+            JOIN laws l ON l.urn = u.urn
+            """
+        ).fetchone()[0]
+
+        out["valid_citation_edges"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM citations c
+            JOIN laws l1 ON l1.urn = c.citing_urn
+            JOIN laws l2 ON l2.urn = c.cited_urn
+            """
+        ).fetchone()[0]
+
+        out["orphan_citing"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM citations c
+            LEFT JOIN laws l ON l.urn = c.citing_urn
+            WHERE l.urn IS NULL
+            """
+        ).fetchone()[0]
+
+        out["orphan_cited"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM citations c
+            LEFT JOIN laws l ON l.urn = c.cited_urn
+            WHERE l.urn IS NULL
+            """
+        ).fetchone()[0]
+
+        out["domains_nonempty"] = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM law_metadata
+            WHERE domain_cluster IS NOT NULL AND domain_cluster != ''
+            """
+        ).fetchone()[0]
+
+        out["refs_detected_in_text_laws"] = conn.execute(
+            "SELECT COUNT(*) FROM laws WHERE text LIKE '%urn:nir:%'"
+        ).fetchone()[0]
+
+        total_laws = out["total_laws"] or 0
+        total_citations = out["total_citations"] or 0
+        out["pct_laws_with_any_citation"] = (
+            round((out["laws_with_any_citation"] / total_laws) * 100, 2)
+            if total_laws else 0.0
+        )
+        out["pct_valid_citation_edges"] = (
+            round((out["valid_citation_edges"] / total_citations) * 100, 2)
+            if total_citations else 0.0
+        )
+        out["domain_coverage_pct"] = (
+            round((out["domains_nonempty"] / total_laws) * 100, 2)
+            if total_laws else 0.0
+        )
+        return out
+    finally:
+        conn.close()
+
+
 def _get_laws():
     """Return list of law dicts from DB or JSONL fallback."""
     db = load_db()
     if db:
         try:
+            limit = _get_max_laws_limit()
             db_path = str(db.db_path) if hasattr(db, 'db_path') else ""
             if db_path:
-                return _get_laws_cached(db_path)
+                return _get_laws_cached(db_path, limit)
             # Fallback: direct query without cache
-            rows = db.conn.execute(
+            query = (
                 "SELECT urn, title, type, date, year, status, article_count, "
-                "text_length, importance_score FROM laws ORDER BY year DESC LIMIT 100000"
-            ).fetchall()
+                "text_length, importance_score FROM laws ORDER BY year DESC"
+            )
+            params = ()
+            if limit and limit > 0:
+                query += " LIMIT ?"
+                params = (limit,)
+            rows = db.conn.execute(query, params).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
             logger.error(f"Error loading laws from DB: {e}")
@@ -403,12 +657,68 @@ def _record_update_log(db, action, description, laws_before=None, laws_after=Non
         logger.warning(f"Failed to record update log: {e}")
 
 
+@st.cache_data(ttl=900)
+def _get_nightly_pipeline_runs(limit: int = 8) -> List[Dict]:
+    """Fetch recent GitHub nightly workflow runs with lightweight failure details."""
+    runs_url = (
+        "https://api.github.com/repos/Eugenix94/OpenNormattiva/"
+        "actions/workflows/nightly-update.yml/runs"
+    )
+    try:
+        r = requests.get(runs_url, params={"per_page": max(1, min(limit, 20))}, timeout=10)
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        logger.warning("Could not fetch nightly workflow runs: %s", e)
+        return []
+
+    results: List[Dict] = []
+    for run in payload.get("workflow_runs", [])[:limit]:
+        row = {
+            "created_at": run.get("created_at", ""),
+            "event": run.get("event", ""),
+            "status": run.get("status", ""),
+            "conclusion": run.get("conclusion", ""),
+            "run_id": run.get("id"),
+            "run_number": run.get("run_number"),
+            "html_url": run.get("html_url", ""),
+            "failed_job": "",
+            "failed_step": "",
+        }
+
+        # Pull compact failure details only for failed runs.
+        if row["conclusion"] == "failure" and row["run_id"]:
+            jobs_url = (
+                f"https://api.github.com/repos/Eugenix94/OpenNormattiva/"
+                f"actions/runs/{row['run_id']}/jobs"
+            )
+            try:
+                jr = requests.get(jobs_url, timeout=10)
+                if jr.status_code == 200:
+                    jobs = jr.json().get("jobs", [])
+                    failed_jobs = [j for j in jobs if j.get("conclusion") == "failure"]
+                    if failed_jobs:
+                        fj = failed_jobs[0]
+                        row["failed_job"] = fj.get("name", "")
+                        for step in fj.get("steps", []):
+                            if step.get("conclusion") == "failure":
+                                row["failed_step"] = step.get("name", "")
+                                break
+            except Exception:
+                pass
+
+        results.append(row)
+
+    return results
+
+
 # PAGES
 
 def page_dashboard():
     st.header("\U0001f4ca Dashboard")
     db = load_db()
     laws = _get_laws()
+    total_laws = _count_total_laws(db)
     
     if not laws:
         st.error(
@@ -433,12 +743,18 @@ def page_dashboard():
 
     # Top metrics
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Laws", f"{len(laws):,}")
+    c1.metric("Total Laws", f"{(total_laws if total_laws is not None else len(laws)):,}")
     types = set(l.get("type", "unknown") for l in laws)
     c2.metric("Document Types", len(types))
     years = [l.get("year") for l in laws if l.get("year")]
     c3.metric("Year Range", f"{min(years)}-{max(years)}" if years else "N/A")
-    total_articles = sum(l.get("article_count", 0) for l in laws)
+    if db:
+        try:
+            total_articles = db.conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+        except Exception:
+            total_articles = sum(l.get("article_count", 0) for l in laws)
+    else:
+        total_articles = sum(l.get("article_count", 0) for l in laws)
     c4.metric("Total Articles", f"{total_articles:,}")
 
     # DB info
@@ -454,6 +770,24 @@ def page_dashboard():
             )
         except Exception:
             pass
+
+    if db and hasattr(db, "db_path"):
+        try:
+            snap = _get_db_integrity_snapshot(str(db.db_path))
+            with st.expander("🔎 Data Integrity Snapshot"):
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Laws Linked", f"{snap['laws_with_any_citation']:,}")
+                s2.metric("Linked %", f"{snap['pct_laws_with_any_citation']:.2f}%")
+                s3.metric("Valid Citation Edges", f"{snap['valid_citation_edges']:,}")
+                s4.metric("Valid Edge %", f"{snap['pct_valid_citation_edges']:.2f}%")
+                st.caption(
+                    f"Orphan citing: {snap['orphan_citing']:,} | "
+                    f"Orphan cited: {snap['orphan_cited']:,} | "
+                    f"Domain coverage: {snap['domain_coverage_pct']:.2f}% | "
+                    f"Laws with URN refs in text: {snap['refs_detected_in_text_laws']:,}"
+                )
+        except Exception as e:
+            logger.warning("Could not compute integrity snapshot: %s", e)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -483,6 +817,9 @@ def page_dashboard():
                 df["Title"] = df["Title"].str[:60]
                 df["Importance"] = df["Importance"].round(4)
                 st.dataframe(df, width='stretch', hide_index=True)
+                st.caption("Quick open from dashboard")
+                for law_d in [dict(r) for r in top[:5]]:
+                    _render_law_card(law_d, db, key_prefix="dashboard-top")
         except Exception:
             pass
 
@@ -552,6 +889,8 @@ def page_search():
                         st.write(f"**Status**: {'⚡ In vigore' if status == 'in_force' else '🚫 Abrogato'}")
                         if r.get("importance_score"):
                             st.write(f"**Importance**: {r['importance_score']:.4f}")
+                        if st.button("📖 Apri legge →", key=f"search-open-{r.get('urn','')}"):
+                            _open_law(r.get("urn"), source_tab="search", source_context=query)
                     with c2:
                         snippet = r.get("snippet", "")
                         if snippet:
@@ -560,6 +899,7 @@ def page_search():
                             st.text_area("Preview", r.get("text", "")[:800],
                                          height=150, disabled=True,
                                          key=f"search_{r.get('urn','')}")
+                        _render_law_linkage_summary(db, r.get("urn", ""), key_prefix="search")
         except Exception as e:
             st.error(f"Search error: {e}")
     else:
@@ -581,7 +921,9 @@ def page_search():
 
 def page_browse():
     st.header("\U0001f4cb Browse Laws")
+    db = load_db()
     laws = _get_laws()
+    total_laws = _count_total_laws(db)
     if not laws:
         st.info("No data loaded.")
         return
@@ -620,7 +962,15 @@ def page_browse():
     elif sort_by == "Articles":
         filtered.sort(key=lambda x: x.get("article_count", 0), reverse=True)
 
-    st.write(f"**Showing {len(filtered)} of {len(laws)} laws**")
+    shown_total = total_laws if total_laws is not None else len(laws)
+    st.write(f"**Showing {len(filtered)} of {shown_total} laws**")
+
+    effective_limit = _get_max_laws_limit()
+    if effective_limit:
+        st.caption(
+            f"In-memory analysis cap active: {effective_limit:,} rows "
+            "(set MAX_LAWS_IN_MEMORY=0 for full dataset)."
+        )
 
     page_size = 25
     total_pages = max(1, math.ceil(len(filtered) / page_size))
@@ -642,6 +992,8 @@ def page_browse():
                 st.write(f"**Articles**: {law.get('article_count', 0)}")
                 if imp:
                     st.write(f"**Importance**: {imp:.6f}")
+                if st.button("📖 Apri legge", key=f"browse-open-{law.get('urn','')}"):
+                    _open_law(law.get("urn", ""), source_tab="browse")
             with c2:
                 db = load_db()
                 if db:
@@ -659,6 +1011,8 @@ def page_browse():
                            else "No text")
                 st.text_area("Text preview", txt, height=250, disabled=True,
                              key=f"browse_{law.get('urn', start)}")
+                if db:
+                    _render_law_linkage_summary(db, law.get("urn", ""), key_prefix="browse")
 
 
 def page_law_detail():
@@ -668,28 +1022,54 @@ def page_law_detail():
         st.info("Database required for detailed law view.")
         return
 
-    laws = _get_laws()
-    urn_options = [
-        f"{l.get('title', '')[:60]} ({l.get('urn', '')})"
-        for l in laws[:500]
-    ]
-    selected = st.selectbox(
-        "Select a law:", urn_options if urn_options else ["No laws available"],
-        key="law-detail-select"
-    )
-    if not selected or selected == "No laws available":
+    # Navigation priority: session_state (card/citation buttons) > query_params > UI inputs
+    nav_urn = st.session_state.pop("detail_urn", None)
+    if not nav_urn:
+        nav_urn = st.query_params.get("urn")
+    if nav_urn:
+        # Pre-fill the text input via session_state key
+        st.session_state["law-detail-urn-input"] = nav_urn
+
+    c_nav1, c_nav2 = st.columns([2, 3])
+    with c_nav1:
+        direct_urn = st.text_input(
+            "URN diretto:",
+            placeholder="urn:nir:stato:legge:2020-01-01;1",
+            key="law-detail-urn-input",
+        )
+    with c_nav2:
+        laws = _get_laws()
+        urn_options = [
+            f"{l.get('title', '')[:60]} ({l.get('urn', '')})"
+            for l in laws[:500]
+        ]
+        selected = st.selectbox(
+            "Oppure seleziona dalla lista (prime 500):",
+            [""] + (urn_options if urn_options else ["No laws available"]),
+            index=0,
+            key="law-detail-select",
+        )
+
+    # Resolve active URN: direct input takes priority over selectbox
+    urn = direct_urn.strip() if direct_urn and direct_urn.strip() else ""
+    if not urn and selected and selected not in ("", "No laws available"):
+        urn = selected.split("(")[-1].rstrip(")")
+
+    if not urn:
+        st.info("Inserisci un URN diretto oppure seleziona una legge dalla lista.")
         return
 
-    urn = selected.split("(")[-1].rstrip(")")
     law_row = db.conn.execute(
         "SELECT * FROM laws WHERE urn = ?", (urn,)
     ).fetchone()
     if not law_row:
-        st.warning("Law not found.")
+        st.warning(f"Legge non trovata per URN: `{urn}`")
         return
 
     law = dict(law_row)
-    st.subheader(law.get("title", "Untitled"))
+    status_label = " 🚫 *ABROGATO*" if law.get("status") == "abrogated" else ""
+    st.subheader(f"{law.get('title', 'Untitled')}{status_label}")
+    _render_law_linkage_summary(db, urn, key_prefix="detail")
 
     # Quick metadata in columns
     col1, col2, col3, col4 = st.columns(4)
@@ -700,12 +1080,13 @@ def page_law_detail():
         col4.metric("Importance (PageRank)", f"{law['importance_score']:.4f}")
 
     # Main tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📄 Full Text", 
         "🔗 Citation Links", 
         "📚 Related Laws",
         "⚖️ Amendments",
-        "🎯 Context Graph"
+        "🎯 Context Graph",
+        "§ Articles"
     ])
 
     with tab1:
@@ -735,11 +1116,11 @@ def page_law_detail():
                     "Content:", text, height=400, 
                     disabled=True, key="law-text"
                 )
-                # Show URN reference table below text
-                ref_table = _urn_inline_links(text, db)
-                if ref_table:
-                    with st.expander("📎 Leggi citate nel testo (URN references)"):
-                        st.markdown(ref_table)
+                # Show clickable URN reference panel below text
+                with st.expander("📎 Leggi citate nel testo (URN references)"):
+                    found_refs = _urn_inline_links(text, db, key_prefix="lawdetail")
+                    if not found_refs:
+                        st.caption("Nessun URN normativo rilevato nel testo.")
             else:
                 st.info("No text content available.")
 
@@ -761,15 +1142,24 @@ def page_law_detail():
                     with st.expander(f"📌 {cited_urn[:50]}{context_preview}"):
                         try:
                             cited_law = db.get_law(cited_urn)
-                            st.write(f"**{cited_law.get('title', 'N/A')}**")
-                            st.write(f"Type: {cited_law.get('type')}")
-                            st.write(f"Year: {cited_law.get('year')}")
-                            st.button(
-                                f"View full law →", 
+                            if cited_law:
+                                status_badge = " 🚫 ABROGATO" if cited_law.get("status") == "abrogated" else ""
+                                st.write(f"**{cited_law.get('title', 'N/A')}**{status_badge}")
+                                st.write(f"Type: {cited_law.get('type')}")
+                                st.write(f"Year: {cited_law.get('year')}")
+                            else:
+                                st.write("Dettagli non disponibili nel DB locale.")
+                            if cit.get("citing_article"):
+                                st.caption(f"Articolo citante: {cit.get('citing_article')}")
+                            if context:
+                                st.caption(f"Contesto: {context[:250]}")
+                            if st.button(
+                                "View full law →",
                                 key=f"btn-view-{cited_urn}",
-                                on_click=lambda u=cited_urn: st.query_params.update({"urn": u})
-                            )
-                        except:
+                            ):
+                                _open_law(cited_urn, source_tab="detail_citations", source_context="incoming")
+                        except Exception as e:
+                            logger.warning("Failed rendering incoming citation %s: %s", cited_urn, e)
                             st.write(f"Details not available")
                 if len(cited_by) > 20:
                     st.caption(f"... and {len(cited_by) - 20} more")
@@ -788,15 +1178,24 @@ def page_law_detail():
                     with st.expander(f"📌 {cited_urn[:50]}{context_preview}"):
                         try:
                             ref_law = db.get_law(cited_urn)
-                            st.write(f"**{ref_law.get('title', 'N/A')}**")
-                            st.write(f"Type: {ref_law.get('type')}")
-                            st.write(f"Year: {ref_law.get('year')}")
-                            st.button(
-                                f"View dependency →", 
+                            if ref_law:
+                                status_badge = " 🚫 ABROGATO" if ref_law.get("status") == "abrogated" else ""
+                                st.write(f"**{ref_law.get('title', 'N/A')}**{status_badge}")
+                                st.write(f"Type: {ref_law.get('type')}")
+                                st.write(f"Year: {ref_law.get('year')}")
+                            else:
+                                st.write("Dettagli non disponibili nel DB locale.")
+                            if cit.get("cited_article"):
+                                st.caption(f"Articolo citato: {cit.get('cited_article')}")
+                            if context:
+                                st.caption(f"Contesto: {context[:250]}")
+                            if st.button(
+                                "View dependency →",
                                 key=f"btn-dep-{cited_urn}",
-                                on_click=lambda u=cited_urn: st.query_params.update({"urn": u})
-                            )
-                        except:
+                            ):
+                                _open_law(cited_urn, source_tab="detail_citations", source_context="outgoing")
+                        except Exception as e:
+                            logger.warning("Failed rendering outgoing citation %s: %s", cited_urn, e)
                             st.write(f"Details not available")
                 if len(cites) > 20:
                     st.caption(f"... and {len(cites) - 20} more")
@@ -826,11 +1225,11 @@ def page_law_detail():
                     ).fetchall()
                     if same_domain:
                         for law_ref in same_domain:
-                            col1.button(
+                            if col1.button(
                                 f"📖 {law_ref[1][:50]} ({law_ref[2]})",
                                 key=f"domain-{law_ref[0]}",
-                                on_click=lambda u=law_ref[0]: st.query_params.update({"urn": u})
-                            )
+                            ):
+                                _open_law(law_ref[0], source_tab="detail_related", source_context="domain")
                     else:
                         st.info("No other laws in this domain.")
                 else:
@@ -844,16 +1243,17 @@ def page_law_detail():
                 related = db.find_related_laws(urn, limit=15)
                 if related:
                     for r in related[:10]:
-                        col2.button(
+                        if col2.button(
                             f"📖 {r.get('title', 'N/A')[:50]}",
                             key=f"related-{r['urn']}",
-                            on_click=lambda u=r['urn']: st.query_params.update({"urn": u})
-                        )
+                        ):
+                            _open_law(r['urn'], source_tab="detail_related", source_context="co_citation")
                     if len(related) > 10:
                         st.caption(f"... and {len(related) - 10} more co-cited laws")
                 else:
                     st.info("No related laws found via co-citation.")
-            except:
+            except Exception as e:
+                logger.warning("Co-citation analysis failed for %s: %s", urn, e)
                 st.info("Co-citation analysis not available yet.")
 
     with tab4:
@@ -894,6 +1294,56 @@ def page_law_detail():
         except Exception as e:
             st.info(f"Graph visualization not available: {e}")
 
+    with tab6:
+        """Structured article view"""
+        st.subheader("§ Articoli Estratti")
+        try:
+            articles = db.get_articles(urn)
+        except Exception:
+            articles = []
+
+        if not articles:
+            st.info("Nessun articolo strutturato disponibile per questa legge.")
+            if st.button("Estrai articoli ora", key=f"extract-articles-{urn}"):
+                extracted = db.parse_and_insert_articles(urn, law.get("text", "") or "")
+                st.success(f"Articoli estratti: {extracted}")
+                st.rerun()
+        else:
+            st.caption(f"Articoli strutturati disponibili: {len(articles)}")
+            search_article = st.text_input(
+                "Filtra per numero articolo (es. 1, 2-bis):",
+                key=f"article-filter-{urn}",
+                placeholder="Inserisci numero articolo"
+            ).strip().lower()
+            visible = articles
+            if search_article:
+                visible = [
+                    a for a in articles
+                    if str(a.get("article_num", "")).lower() == search_article
+                ]
+            if not visible:
+                st.info("Nessun articolo corrisponde al filtro.")
+            for a in visible[:80]:
+                art_num = a.get("article_num", "?")
+                heading = a.get("heading", "")
+                label = f"Art. {art_num}"
+                if heading:
+                    label += f" - {heading[:80]}"
+                with st.expander(label):
+                    body = a.get("text", "")
+                    if body:
+                        st.text_area(
+                            f"Art. {art_num}",
+                            body,
+                            height=220,
+                            disabled=True,
+                            key=f"article-body-{urn}-{a.get('id')}"
+                        )
+                    else:
+                        st.caption("Contenuto articolo non disponibile.")
+            if len(visible) > 80:
+                st.caption(f"Mostrati primi 80 articoli su {len(visible)}.")
+
 
 def page_citations():
     st.header("\U0001f517 Citation Network")
@@ -903,10 +1353,11 @@ def page_citations():
         st.subheader("Most Cited Laws")
         try:
             top = db.conn.execute(
-                "SELECT l.urn, l.title, l.year, m.citation_count_incoming "
-                "FROM laws l JOIN law_metadata m ON l.urn = m.urn "
-                "WHERE m.citation_count_incoming > 0 "
-                "ORDER BY m.citation_count_incoming DESC LIMIT 25"
+                "SELECT l.urn, l.title, l.year, COUNT(*) AS cited_by "
+                "FROM citations c "
+                "JOIN laws l ON l.urn = c.cited_urn "
+                "GROUP BY l.urn, l.title, l.year "
+                "ORDER BY cited_by DESC LIMIT 25"
             ).fetchall()
             if top:
                 df = pd.DataFrame([dict(r) for r in top])
@@ -917,6 +1368,13 @@ def page_citations():
                              hover_data=["URN", "Year"])
                 st.plotly_chart(fig, width='stretch')
                 st.dataframe(df, width='stretch', hide_index=True)
+                top_urn = st.selectbox(
+                    "Apri una legge citata:",
+                    [r["URN"] for r in df.to_dict("records")],
+                    key="cit-top-open-urn"
+                )
+                if st.button("📖 Open selected cited law", key="cit-top-open-btn"):
+                    _open_law(top_urn, source_tab="citations", source_context="top_cited")
         except Exception as e:
             st.warning(f"Error loading citation data: {e}")
 
@@ -964,8 +1422,9 @@ def page_citations():
                     title="How Legal Domains Reference Each Other"
                 )
                 st.plotly_chart(fig, width='stretch')
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Cross-domain citation view failed: %s", e)
+            st.info("Cross-domain citation view temporarily unavailable.")
     else:
         laws = load_laws_from_jsonl()
         if not laws:
@@ -1009,6 +1468,24 @@ def page_domains():
     domain_names = [d[0] for d in domains]
     domain_counts = [d[1] for d in domains]
 
+    total_laws = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+    covered = sum(domain_counts)
+    coverage_pct = (covered / total_laws * 100) if total_laws else 0
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Classified Laws", f"{covered:,}")
+    m2.metric("Total Laws", f"{total_laws:,}")
+    m3.metric("Domain Coverage", f"{coverage_pct:.2f}%")
+    if coverage_pct < 95:
+        st.warning(
+            "Domain coverage is below expected range. Recompute domains to align "
+            "labels with current DB text/title content."
+        )
+    if st.button("♻️ Recompute Domains From DB"):
+        with st.spinner("Recomputing domains from DB text/title..."):
+            db.detect_law_domains()
+        st.success("Domain recomputation completed.")
+        st.rerun()
+
     col1, col2 = st.columns(2)
     with col1:
         fig = px.pie(names=domain_names, values=domain_counts,
@@ -1021,6 +1498,10 @@ def page_domains():
 
     selected_domain = st.selectbox("Explore domain:", domain_names)
     if selected_domain:
+        total_domain = db.conn.execute(
+            "SELECT COUNT(*) FROM law_metadata WHERE domain_cluster = ?",
+            (selected_domain,),
+        ).fetchone()[0]
         laws_in_domain = db.conn.execute("""
             SELECT l.urn, l.title, l.year, l.type, l.importance_score
             FROM laws l JOIN law_metadata m ON l.urn = m.urn
@@ -1036,10 +1517,13 @@ def page_domains():
                 lambda x: f"{x:.4f}" if x else "N/A"
             )
             st.write(
-                f"**{len(laws_in_domain)} laws** in domain "
+                f"**Showing {len(laws_in_domain)} of {total_domain} laws** in domain "
                 f"_{selected_domain}_:"
             )
             st.dataframe(df, width='stretch', hide_index=True)
+            st.markdown("**Top linked laws in this domain**")
+            for law_d in [dict(r) for r in laws_in_domain[:8]]:
+                _render_law_card(law_d, db, key_prefix=f"domain-{selected_domain}")
 
 
 def page_notifications():
@@ -1147,6 +1631,50 @@ def page_update_log():
     if not db:
         st.warning("Database required for update log.")
         return
+
+    # Nightly automation status (GitHub Actions)
+    st.subheader("🌙 Nightly Pipeline Status")
+    cbtn, csum = st.columns([1, 3])
+    with cbtn:
+        if st.button("Refresh nightly status"):
+            _get_nightly_pipeline_runs.clear()
+            st.rerun()
+
+    nightly = _get_nightly_pipeline_runs(limit=8)
+    if nightly:
+        failed = sum(1 for r in nightly if r.get("conclusion") == "failure")
+        success = sum(1 for r in nightly if r.get("conclusion") == "success")
+        with csum:
+            st.caption(
+                f"Recent runs: {len(nightly)} | ✅ {success} success | ❌ {failed} failure"
+            )
+
+        nrows = []
+        for r in nightly:
+            failure_detail = ""
+            if r.get("failed_step"):
+                failure_detail = f"{r.get('failed_job','')} -> {r.get('failed_step','')}"
+            elif r.get("failed_job"):
+                failure_detail = r.get("failed_job", "")
+            nrows.append({
+                "Date": r.get("created_at", ""),
+                "Event": r.get("event", ""),
+                "Status": r.get("status", ""),
+                "Conclusion": r.get("conclusion", ""),
+                "Failure Detail": failure_detail,
+                "Run": r.get("html_url", ""),
+            })
+        st.dataframe(pd.DataFrame(nrows), width='stretch', hide_index=True)
+        latest = nightly[0]
+        if latest.get("conclusion") == "failure":
+            detail = ""
+            if latest.get("failed_step"):
+                detail = f" (step: {latest.get('failed_step')})"
+            st.warning(
+                f"Latest nightly run failed: {latest.get('failed_job', 'unknown job')}{detail}"
+            )
+    else:
+        st.info("Nightly pipeline status temporarily unavailable.")
 
     # Show existing log entries
     log_entries = _get_update_log(db)
@@ -1402,6 +1930,59 @@ def _find_constitution_urn(_db_path: str) -> str | None:
     return row[0] if row else None
 
 
+def _open_law(urn: str, source_tab: str = "", source_context: str = ""):
+    """Global router: open a law in the canonical Law Detail hub."""
+    if not urn:
+        return
+    st.session_state["detail_urn"] = urn
+    st.session_state["goto_page"] = "📖 Law Detail"
+    if source_tab:
+        st.session_state["law_nav_source_tab"] = source_tab
+    if source_context:
+        st.session_state["law_nav_source_context"] = source_context
+    try:
+        st.query_params.update({"urn": urn})
+    except Exception:
+        pass
+    st.rerun()
+
+
+def _render_law_linkage_summary(db, urn: str, key_prefix: str = "linkage"):
+    """Small reusable linkage summary for any law across tabs."""
+    if not db or not urn:
+        return
+    try:
+        incoming = db.conn.execute(
+            "SELECT COUNT(*) FROM citations WHERE cited_urn = ?", (urn,)
+        ).fetchone()[0]
+        outgoing = db.conn.execute(
+            "SELECT COUNT(*) FROM citations WHERE citing_urn = ?", (urn,)
+        ).fetchone()[0]
+        amendments = db.conn.execute(
+            "SELECT COUNT(*) FROM amendments WHERE urn = ?", (urn,)
+        ).fetchone()[0]
+        articles = db.conn.execute(
+            "SELECT COUNT(*) FROM articles WHERE law_urn = ?", (urn,)
+        ).fetchone()[0]
+    except Exception as e:
+        logger.warning("Linkage summary failed for %s: %s", urn, e)
+        return
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Cited by", f"{incoming:,}")
+    m2.metric("Cites", f"{outgoing:,}")
+    m3.metric("Amendments", f"{amendments:,}")
+    m4.metric("Articles", f"{articles:,}")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("↗ Explore Incoming", key=f"{key_prefix}-incoming-{urn}"):
+            _open_law(urn, source_tab="linkage", source_context="incoming")
+    with c2:
+        if st.button("↘ Explore Outgoing", key=f"{key_prefix}-outgoing-{urn}"):
+            _open_law(urn, source_tab="linkage", source_context="outgoing")
+
+
 def _render_law_card(law: dict, db, key_prefix: str = ""):
     """Render a compact law card with nav button and citation count."""
     urn = law.get("urn", "")
@@ -1409,6 +1990,8 @@ def _render_law_card(law: dict, db, key_prefix: str = ""):
     year = law.get("year", "")
     law_type = law.get("type", "")
     importance = law.get("importance_score", 0) or 0
+    status = law.get("status", "")
+    status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
 
     try:
         incoming = db.conn.execute(
@@ -1420,44 +2003,48 @@ def _render_law_card(law: dict, db, key_prefix: str = ""):
     with st.container(border=True):
         c1, c2 = st.columns([4, 1])
         with c1:
-            st.write(f"**{title}**")
+            st.write(f"**{title}**{status_badge}")
             st.caption(f"`{urn}` | {law_type} | {year}")
             if incoming:
                 st.caption(f"📎 Citata da {incoming:,} leggi")
         with c2:
             if st.button("Apri →", key=f"{key_prefix}-open-{urn}"):
-                st.session_state["detail_urn"] = urn
-                st.session_state["goto_page"] = "📖 Law Detail"
-                st.rerun()
+                _open_law(urn, source_tab="card", source_context=key_prefix)
 
 
-def _urn_inline_links(text: str, db, max_links: int = 30) -> str:
+def _urn_inline_links(text: str, db, max_links: int = 30, key_prefix: str = "urnref") -> bool:
     """
-    Find all URN references in law text and return a Markdown string
-    with a lookup table of referenced laws displayed below the text.
+    Find all URN references in law text and render a navigable reference panel
+    with a clickable button for each cited law.
+    Returns True if any references were found and rendered.
     """
     import re
     pattern = r'urn:nir:[a-zA-Z0-9\.\:\;\-]+'
     found = list(dict.fromkeys(re.findall(pattern, text)))[:max_links]
     if not found:
-        return ""
+        return False
     rows = []
-    for urn in found:
+    for ref_urn in found:
         try:
             row = db.conn.execute(
-                "SELECT title, year, type FROM laws WHERE urn = ?", (urn,)
+                "SELECT title, year, type, status FROM laws WHERE urn = ?", (ref_urn,)
             ).fetchone()
             if row:
-                rows.append((urn, row[0], row[1], row[2]))
+                rows.append((ref_urn, row[0], row[1], row[2], row[3]))
         except Exception:
             pass
     if not rows:
-        return ""
-    md = "**Leggi citate nel testo** (" + str(len(rows)) + " trovate):\n\n"
-    md += "| URN | Titolo | Anno | Tipo |\n|---|---|---|---|\n"
-    for urn, title, year, ltype in rows:
-        md += f"| `{urn}` | {title[:60]} | {year} | {ltype} |\n"
-    return md
+        return False
+    st.write(f"**Leggi citate nel testo** ({len(rows)} trovate):")
+    for ref_urn, title, year, ltype, ref_status in rows:
+        abr = " 🚫" if ref_status == "abrogated" else ""
+        c1, c2 = st.columns([5, 1])
+        with c1:
+            st.caption(f"`{ref_urn}` — **{title[:65]}**{abr} | {ltype} | {year}")
+        with c2:
+            if st.button("Apri", key=f"{key_prefix}-{ref_urn}"):
+                _open_law(ref_urn, source_tab="inline_refs", source_context=key_prefix)
+    return True
 
 
 def page_costituzione():
@@ -1500,11 +2087,12 @@ def page_costituzione():
         "agli organi dello Stato, dal diritto di difesa alla tutela del lavoro."
     )
 
-    tab_cost, tab_hier, tab_codici, tab_implement = st.tabs([
+    tab_cost, tab_hier, tab_codici, tab_implement, tab_leggi_cost = st.tabs([
         "📜 Testo & Citazioni",
         "🏛️ Gerarchia delle Fonti",
         "📚 I Principali Codici",
         "🔗 Leggi di Attuazione",
+        "⚖️ Leggi Costituzionali",
     ])
 
     with tab_cost:
@@ -1515,11 +2103,9 @@ def page_costituzione():
             with c1:
                 if text:
                     st.text_area("Testo completo", text, height=500, disabled=True, key="const-text")
-                    # Show URN reference table
-                    ref_table = _urn_inline_links(text, db)
-                    if ref_table:
-                        with st.expander("📎 Leggi richiamate nel testo della Costituzione"):
-                            st.markdown(ref_table)
+                    # Show clickable URN reference panel
+                    with st.expander("📎 Leggi richiamate nel testo della Costituzione"):
+                        _urn_inline_links(text, db, key_prefix="costituzione")
                 else:
                     st.info("Testo non disponibile nel database.")
             with c2:
@@ -1528,6 +2114,9 @@ def page_costituzione():
                 st.write(f"**Tipo**: {law.get('type')}")
                 st.write(f"**Data**: {law.get('date')}")
                 st.write(f"**Importanza (PageRank)**: {law.get('importance_score', 0):.4f}")
+                if law.get("urn") and st.button("📖 Apri in Law Detail", key="open-constitution-detail"):
+                    _open_law(law.get("urn"), source_tab="costituzione", source_context="main")
+                _render_law_linkage_summary(db, law.get("urn", ""), key_prefix="costituzione-main")
 
                 st.subheader("Principali Parti")
                 st.markdown("""
@@ -1660,9 +2249,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
                             pass
 
                         if st.button(f"Apri {name} →", key=f"codice-{urn}"):
-                            st.session_state["detail_urn"] = law_d["urn"]
-                            st.session_state["goto_page"] = "📖 Law Detail"
-                            st.rerun()
+                            _open_law(law_d["urn"], source_tab="costituzione_codici", source_context=name)
                     else:
                         st.warning(f"Non trovato nel database: `{urn}`")
                         # Fuzzy search
@@ -1710,6 +2297,699 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
                 except Exception as e:
                     st.info(f"Query non disponibile: {e}")
 
+    with tab_leggi_cost:
+        st.subheader("⚖️ Leggi Costituzionali (art. 138 Cost.)")
+        st.markdown(
+            "Le leggi costituzionali modificano o integrano la Costituzione e richiedono "
+            "una procedura aggravata: doppia approvazione parlamentare a maggioranza assoluta "
+            "(o 2/3 per evitare il referendum). Comprendono statuti delle Regioni speciali, "
+            "trattati di rango costituzionale e revisioni della Carta."
+        )
+        try:
+            lc_rows = db.conn.execute("""
+                SELECT l.urn, l.title, l.year, l.date, l.article_count,
+                       l.text_length, l.status, l.importance_score,
+                       COALESCE(cit.cnt, 0) AS cited_by
+                FROM laws l
+                LEFT JOIN (
+                    SELECT cited_urn, COUNT(*) AS cnt
+                    FROM citations GROUP BY cited_urn
+                ) cit ON cit.cited_urn = l.urn
+                WHERE UPPER(l.type) = 'LEGGE COSTITUZIONALE'
+                ORDER BY l.year DESC
+            """).fetchall()
+        except Exception as e:
+            st.error(f"Errore: {e}")
+            lc_rows = []
+
+        if lc_rows:
+            lc_df = pd.DataFrame([dict(r) for r in lc_rows])
+            total_lc = len(lc_df)
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Leggi costituzionali", total_lc)
+            c2.metric("Vigenti", int((lc_df["status"] == "in_force").sum()))
+            c3.metric("Citazioni ricevute", int(lc_df["cited_by"].sum()))
+            c4.metric("Dalla", f"{int(lc_df['year'].min())} – {int(lc_df['year'].max())}")
+
+            st.divider()
+
+            # Timeline
+            year_lc = lc_df.groupby("year")["urn"].count().reset_index()
+            year_lc.columns = ["Anno", "Leggi"]
+            fig_lc = px.bar(year_lc, x="Anno", y="Leggi",
+                            title="Leggi costituzionali per anno",
+                            color="Leggi", color_continuous_scale="Reds")
+            st.plotly_chart(fig_lc, width='stretch')
+
+            st.divider()
+
+            # Citation leaders
+            st.subheader("Le più citate dal corpus")
+            top_lc = lc_df.nlargest(10, "cited_by")[["title", "year", "cited_by", "article_count", "status"]]
+            top_lc["label"] = top_lc["title"].str[:55] + " (" + top_lc["year"].astype(str) + ")"
+            top_lc["stato"] = top_lc["status"].map(
+                {"in_force": "Vigente", "abrogated": "Abrogata"}
+            ).fillna(top_lc["status"])
+            fig_lct = px.bar(
+                top_lc, x="cited_by", y="label", orientation="h",
+                color="stato",
+                color_discrete_map={"Vigente": "#4CAF50", "Abrogata": "#f44336"},
+                title="Top 10 leggi costituzionali per citazioni ricevute",
+                labels={"cited_by": "Citazioni", "label": ""},
+            )
+            fig_lct.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_lct, width='stretch')
+
+            st.divider()
+
+            # Full table
+            st.subheader("Elenco completo")
+            lc_display = lc_df[["title", "year", "article_count", "cited_by", "status", "urn"]].copy()
+            lc_display["status"] = lc_display["status"].map(
+                {"in_force": "✅ Vigente", "abrogated": "❌ Abrogata"}
+            ).fillna(lc_display["status"])
+            lc_display.columns = ["Titolo", "Anno", "Articoli", "Citazioni", "Stato", "URN"]
+            st.dataframe(lc_display.drop(columns=["URN"]), width='stretch', hide_index=True)
+
+            sel_lc = st.selectbox(
+                "Apri in Law Detail:",
+                lc_df["urn"].tolist(),
+                format_func=lambda u: next(
+                    (f"{r['year']} — {r['title'][:65]}" for r in lc_df.to_dict("records") if r["urn"] == u), u
+                ),
+                key="lc-open-sel",
+            )
+            if st.button("📖 Apri legge costituzionale", key="lc-open-btn"):
+                _open_law(sel_lc, source_tab="costituzione_leggi_cost", source_context="table")
+        else:
+            st.info("Nessuna legge costituzionale trovata nel database.")
+
+
+# ─────────────────────────────────────────────────────────────────
+# CORTE COSTITUZIONALE — JURISPRUDENCE TAB
+# ─────────────────────────────────────────────────────────────────
+
+def page_corte_cost():
+    """Corte Costituzionale jurisprudence analytics."""
+    st.header("⚖️ Corte Costituzionale — Giurisprudenza Costituzionale")
+
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    conn = db.conn
+
+    # Check if data exists
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM sentenze").fetchone()[0]
+    except Exception:
+        count = 0
+
+    if count == 0:
+        st.warning(
+            "Il database delle sentenze della Corte Costituzionale è vuoto. "
+            "Importa le decisioni eseguendo localmente:"
+        )
+        st.code("python download_sentenze.py --from-index --resume", language="bash")
+        st.info(
+            "Il downloader usa gli endpoint pubblici di elenco pronunce e scheda pronuncia "
+            "del sito ufficiale [cortecostituzionale.it](https://www.cortecostituzionale.it). "
+            "Se l'origine blocca il traffico automatico (captcha/anti-bot), esegui da una rete "
+            "consentita e poi rideploya il database su HuggingFace con `deploy_hf.py`."
+        )
+        st.subheader("Anteprima: ultime decisioni pubblicate")
+        # Show a live link to the CC website instead
+        st.markdown("""
+| Decisione | Tipo | Anno |
+|---|---|---|
+| [55/2026](https://www.cortecostituzionale.it/actionSchedaPronuncia.do?param_ecli=ECLI:IT:COST:2026:55) | Sentenza | 2026 |
+| [54/2026](https://www.cortecostituzionale.it/actionSchedaPronuncia.do?param_ecli=ECLI:IT:COST:2026:54) | Sentenza | 2026 |
+| [52/2026](https://www.cortecostituzionale.it/actionSchedaPronuncia.do?param_ecli=ECLI:IT:COST:2026:52) | Sentenza | 2026 |
+""")
+        return
+
+    # ── KPI ROW ──────────────────────────────────────────────────
+    try:
+        stats = conn.execute("""
+            SELECT
+                COUNT(*) AS tot,
+                SUM(tipo = 'Sentenza') AS sentenze,
+                SUM(tipo = 'Ordinanza') AS ordinanze,
+                SUM(esito = 'illegittimità') AS illegittimita,
+                MIN(anno) AS first_year,
+                MAX(anno) AS last_year
+            FROM sentenze
+        """).fetchone()
+        tot, sent, ordin, illegit, first_y, last_y = (
+            stats[0], stats[1] or 0, stats[2] or 0,
+            stats[3] or 0, stats[4], stats[5]
+        )
+    except Exception as e:
+        st.error(f"Errore lettura dati: {e}")
+        return
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📋 Decisioni totali", f"{tot:,}")
+    c2.metric("📜 Sentenze", f"{sent:,}")
+    c3.metric("📄 Ordinanze", f"{ordin:,}")
+    c4.metric("🚫 Dichiarazioni illegittimità", f"{illegit:,}")
+    c5.metric("📅 Periodo", f"{first_y}–{last_y}")
+
+    st.divider()
+
+    # ── TEMPORAL TREND ───────────────────────────────────────────
+    st.subheader("📅 Attività decisionale per anno")
+    try:
+        year_data = conn.execute("""
+            SELECT anno, tipo, COUNT(*) AS cnt
+            FROM sentenze
+            GROUP BY anno, tipo
+            ORDER BY anno
+        """).fetchall()
+        if year_data:
+            df_yr = pd.DataFrame([dict(r) for r in year_data])
+            fig_yr = px.bar(
+                df_yr, x="anno", y="cnt", color="tipo",
+                title="Decisioni della Corte Costituzionale per anno e tipo",
+                labels={"anno": "Anno", "cnt": "Decisioni", "tipo": "Tipo"},
+                barmode="stack",
+                color_discrete_map={"Sentenza": "#1976D2", "Ordinanza": "#90CAF9"},
+            )
+            st.plotly_chart(fig_yr, width='stretch')
+    except Exception as e:
+        logger.warning("CC temporal chart: %s", e)
+
+    st.divider()
+
+    # ── ESITO DISTRIBUTION ───────────────────────────────────────
+    col_e1, col_e2 = st.columns(2)
+
+    with col_e1:
+        st.subheader("📊 Distribuzione degli esiti")
+        try:
+            esito_data = conn.execute("""
+                SELECT esito, COUNT(*) AS cnt
+                FROM sentenze
+                WHERE esito IS NOT NULL AND esito != ''
+                GROUP BY esito ORDER BY cnt DESC
+            """).fetchall()
+            if esito_data:
+                df_esito = pd.DataFrame([dict(r) for r in esito_data])
+                fig_esito = px.pie(
+                    df_esito, names="esito", values="cnt",
+                    title="Esiti delle decisioni",
+                    color_discrete_sequence=px.colors.qualitative.Set2,
+                )
+                st.plotly_chart(fig_esito, width='stretch')
+        except Exception as e:
+            logger.warning("CC esito pie: %s", e)
+
+    with col_e2:
+        st.subheader("🚫 Illegittimità per anno")
+        try:
+            illeg_yr = conn.execute("""
+                SELECT anno, COUNT(*) AS cnt
+                FROM sentenze
+                WHERE esito = 'illegittimità'
+                GROUP BY anno ORDER BY anno
+            """).fetchall()
+            if illeg_yr:
+                df_il = pd.DataFrame([dict(r) for r in illeg_yr])
+                fig_il = px.area(
+                    df_il, x="anno", y="cnt",
+                    title="Dichiarazioni di illegittimità costituzionale per anno",
+                    labels={"anno": "Anno", "cnt": "Dichiarazioni"},
+                    color_discrete_sequence=["#f44336"],
+                )
+                st.plotly_chart(fig_il, width='stretch')
+        except Exception as e:
+            logger.warning("CC illegit chart: %s", e)
+
+    st.divider()
+
+    # ── CONSTITUTIONAL ARTICLES MOST CHALLENGED ──────────────────
+    st.subheader("📜 Articoli della Costituzione più invocati")
+    try:
+        art_rows = conn.execute("SELECT articoli_cost FROM sentenze WHERE articoli_cost != '[]'").fetchall()
+        from collections import Counter
+        art_counter: Counter = Counter()
+        for row in art_rows:
+            try:
+                arts = json.loads(row[0])
+                art_counter.update(arts)
+            except Exception:
+                pass
+        if art_counter:
+            top_arts = art_counter.most_common(20)
+            df_arts = pd.DataFrame(top_arts, columns=["Articolo", "Citazioni"])
+            df_arts["label"] = "Art. " + df_arts["Articolo"]
+            fig_arts = px.bar(
+                df_arts, x="Citazioni", y="label", orientation="h",
+                title="Articoli costituzionali più richiamati nelle decisioni CC",
+                labels={"Citazioni": "Volte citato", "label": ""},
+                color="Citazioni", color_continuous_scale="Blues",
+            )
+            fig_arts.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_arts, width='stretch')
+        else:
+            st.info("Dati sugli articoli non ancora estratti (richiede download completo).")
+    except Exception as e:
+        logger.warning("CC articles chart: %s", e)
+
+    st.divider()
+
+    # ── SEARCHABLE DECISION TABLE ─────────────────────────────────
+    st.subheader("🔍 Ricerca nelle decisioni")
+    col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
+    with col_s1:
+        q_text = st.text_input("Cerca nel testo / oggetto", key="cc-search")
+    with col_s2:
+        q_tipo = st.selectbox("Tipo", ["Tutti", "Sentenza", "Ordinanza"], key="cc-tipo")
+    with col_s3:
+        q_esito = st.selectbox("Esito", ["Tutti", "illegittimità", "inammissibile", "non fondata", "fondata"], key="cc-esito")
+
+    try:
+        where_clauses = ["1=1"]
+        params: list = []
+        if q_text:
+            where_clauses.append("(LOWER(oggetto) LIKE ? OR LOWER(testo) LIKE ?)")
+            params += [f"%{q_text.lower()}%", f"%{q_text.lower()}%"]
+        if q_tipo != "Tutti":
+            where_clauses.append("tipo = ?")
+            params.append(q_tipo)
+        if q_esito != "Tutti":
+            where_clauses.append("esito = ?")
+            params.append(q_esito)
+
+        results = conn.execute(f"""
+            SELECT ecli, numero, anno, tipo, data_deposito, oggetto, esito, comunicato_url
+            FROM sentenze
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY anno DESC, numero DESC
+            LIMIT 200
+        """, params).fetchall()
+
+        if results:
+            df_res = pd.DataFrame([dict(r) for r in results])
+            df_res["Collegamento"] = df_res["ecli"].apply(
+                lambda e: f"https://www.cortecostituzionale.it/actionSchedaPronuncia.do?param_ecli={e}"
+            )
+            display_cols = ["anno", "numero", "tipo", "esito", "data_deposito", "oggetto"]
+            st.dataframe(df_res[display_cols].rename(columns={
+                "anno": "Anno", "numero": "N.", "tipo": "Tipo",
+                "esito": "Esito", "data_deposito": "Deposito", "oggetto": "Oggetto",
+            }), width='stretch', hide_index=True)
+            st.caption(f"{len(results):,} risultati")
+
+            if not df_res.empty:
+                sel_ecli = st.selectbox(
+                    "Apri sul sito della Corte:",
+                    df_res["ecli"].tolist(),
+                    format_func=lambda e: f"{e.split(':')[-2]}/{e.split(':')[-1]} — {next((r['oggetto'][:60] for r in df_res.to_dict('records') if r['ecli'] == e), '')}",
+                    key="cc-open-sel",
+                )
+                url_sel = f"https://www.cortecostituzionale.it/actionSchedaPronuncia.do?param_ecli={sel_ecli}"
+                st.markdown(f"🔗 [Apri decisione sul sito ufficiale]({url_sel})")
+        else:
+            st.info("Nessuna decisione trovata con questi criteri.")
+    except Exception as e:
+        st.error(f"Errore ricerca: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# LEGGE DI BILANCIO — FISCAL / FINANCIAL LAW ANALYTICS
+# ─────────────────────────────────────────────────────────────────
+
+_BILANCIO_KEYWORDS = [
+    "bilancio", "finanziaria", "legge di bilancio",
+    "manovra", "stabilità", "collegato fiscale",
+]
+
+_BILANCIO_SQL_FILTER = """(
+    LOWER(l.type) LIKE '%bilancio%'
+    OR LOWER(l.title) LIKE '%legge di bilancio%'
+    OR LOWER(l.title) LIKE '%legge finanziaria%'
+    OR LOWER(l.title) LIKE '%manovra finanziaria%'
+    OR LOWER(l.title) LIKE '%collegato fiscale%'
+    OR LOWER(l.title) LIKE '%stabilità%'
+)"""
+
+
+def _bilancio_laws(conn) -> list:
+    """Return all budget/financial law rows."""
+    rows = conn.execute(f"""
+        SELECT l.urn, l.title, l.type, l.year, l.date,
+               l.article_count, l.text_length, l.status,
+               COALESCE(m.domain_cluster, '') AS domain,
+               COALESCE(cit.cited_by, 0) AS cited_by
+        FROM laws l
+        LEFT JOIN law_metadata m ON m.urn = l.urn
+        LEFT JOIN (
+            SELECT cited_urn, COUNT(*) AS cited_by
+            FROM citations
+            GROUP BY cited_urn
+        ) cit ON cit.cited_urn = l.urn
+        WHERE {_BILANCIO_SQL_FILTER}
+        ORDER BY l.year DESC
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def page_bilancio():
+    """Legge di Bilancio — fiscal & financial law analytics dashboard."""
+    st.header("💰 Legge di Bilancio — Analisi Fiscale e Finanziaria")
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    conn = db.conn
+
+    with st.spinner("Caricamento dati fiscali…"):
+        laws = _bilancio_laws(conn)
+
+    if not laws:
+        st.warning("Nessuna legge di bilancio trovata nel database.")
+        return
+
+    df_all = pd.DataFrame(laws)
+
+    # ── KPI ROW ──────────────────────────────────────────────────
+    total = len(df_all)
+    vigente = (df_all["status"] == "in_force").sum()
+    abrogata = total - vigente
+    tot_articles = int(df_all["article_count"].fillna(0).sum())
+    tot_chars = int(df_all["text_length"].fillna(0).sum())
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📜 Totale leggi", f"{total:,}")
+    c2.metric("✅ Vigenti", f"{vigente:,}")
+    c3.metric("❌ Abrogate", f"{abrogata:,}")
+    c4.metric("📑 Articoli totali", f"{tot_articles:,}")
+    c5.metric("📄 Caratteri totali", f"{tot_chars/1_000_000:.1f}M")
+
+    st.divider()
+
+    # ── TEMPORAL TREND ───────────────────────────────────────────
+    st.subheader("📅 Produzione legislativa per anno")
+    year_counts = (
+        df_all.dropna(subset=["year"])
+        .groupby("year")
+        .agg(count=("urn", "count"), articles=("article_count", "sum"))
+        .reset_index()
+    )
+    year_counts["year"] = year_counts["year"].astype(int)
+    year_counts = year_counts[year_counts["year"] >= 1948].sort_values("year")
+
+    if not year_counts.empty:
+        tab_trend1, tab_trend2 = st.tabs(["Numero leggi", "Articoli emanati"])
+        with tab_trend1:
+            fig = px.bar(
+                year_counts, x="year", y="count",
+                title="Leggi di Bilancio / Finanziarie per anno",
+                labels={"year": "Anno", "count": "Leggi emanate"},
+                color="count",
+                color_continuous_scale="Blues",
+            )
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, width='stretch')
+        with tab_trend2:
+            fig2 = px.area(
+                year_counts, x="year", y="articles",
+                title="Articoli nelle leggi di bilancio per anno",
+                labels={"year": "Anno", "articles": "Articoli"},
+                color_discrete_sequence=["#2196F3"],
+            )
+            st.plotly_chart(fig2, width='stretch')
+
+    st.divider()
+
+    # ── STATUS PIE + COMPLEXITY TOP ──────────────────────────────
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.subheader("🟢 Vigenti vs Abrogate")
+        status_df = df_all["status"].value_counts().reset_index()
+        status_df.columns = ["status", "count"]
+        status_df["label"] = status_df["status"].map(
+            {"in_force": "Vigente", "abrogated": "Abrogata"}
+        ).fillna(status_df["status"])
+        fig_pie = px.pie(
+            status_df, names="label", values="count",
+            title="Stato delle leggi di bilancio",
+            color="label",
+            color_discrete_map={"Vigente": "#4CAF50", "Abrogata": "#f44336"},
+        )
+        st.plotly_chart(fig_pie, width='stretch')
+
+    with col_right:
+        st.subheader("📊 Leggi per complessità (articoli)")
+        top_complex = (
+            df_all[df_all["article_count"] > 0]
+            .nlargest(15, "article_count")[["title", "year", "article_count", "status"]]
+            .copy()
+        )
+        top_complex["label"] = top_complex["title"].str[:45] + " (" + top_complex["year"].astype(str) + ")"
+        top_complex["stato"] = top_complex["status"].map(
+            {"in_force": "Vigente", "abrogated": "Abrogata"}
+        ).fillna(top_complex["status"])
+        fig_comp = px.bar(
+            top_complex, x="article_count", y="label",
+            orientation="h",
+            color="stato",
+            color_discrete_map={"Vigente": "#4CAF50", "Abrogata": "#f44336"},
+            title="Le 15 più complesse per numero di articoli",
+            labels={"article_count": "Articoli", "label": ""},
+        )
+        fig_comp.update_layout(yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig_comp, width='stretch')
+
+    st.divider()
+
+    # ── CITATION IMPACT ──────────────────────────────────────────
+    st.subheader("🔗 Impatto citazionale")
+    tab_cit1, tab_cit2 = st.tabs(["Leggi di bilancio più citate", "Cosa citano le leggi di bilancio"])
+
+    bilancio_urns = tuple(df_all["urn"].tolist())
+    placeholder_str = ",".join("?" * len(bilancio_urns))
+
+    with tab_cit1:
+        try:
+            top_cited = conn.execute(f"""
+                SELECT l.urn, l.title, l.year, COUNT(*) AS cited_by
+                FROM citations c
+                JOIN laws l ON l.urn = c.cited_urn
+                WHERE c.cited_urn IN ({placeholder_str})
+                GROUP BY l.urn, l.title, l.year
+                ORDER BY cited_by DESC
+                LIMIT 20
+            """, bilancio_urns).fetchall()
+            if top_cited:
+                df_tc = pd.DataFrame([dict(r) for r in top_cited])
+                df_tc["label"] = df_tc["title"].str[:50] + " (" + df_tc["year"].astype(str) + ")"
+                fig_tc = px.bar(
+                    df_tc, x="cited_by", y="label", orientation="h",
+                    title="Le leggi di bilancio più citate da altre leggi",
+                    labels={"cited_by": "Citazioni ricevute", "label": ""},
+                    color="cited_by", color_continuous_scale="Oranges",
+                )
+                fig_tc.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_tc, width='stretch')
+            else:
+                st.info("Nessuna citazione trovata per le leggi di bilancio nel dataset.")
+        except Exception as e:
+            st.warning(f"Errore citazioni ricevute: {e}")
+
+    with tab_cit2:
+        try:
+            top_citing = conn.execute(f"""
+                SELECT l.urn, l.title, l.year, COUNT(*) AS citations_made
+                FROM citations c
+                JOIN laws l ON l.urn = c.cited_urn
+                WHERE c.citing_urn IN ({placeholder_str})
+                GROUP BY l.urn, l.title, l.year
+                ORDER BY citations_made DESC
+                LIMIT 20
+            """, bilancio_urns).fetchall()
+            if top_citing:
+                df_cg = pd.DataFrame([dict(r) for r in top_citing])
+                df_cg["label"] = df_cg["title"].str[:50] + " (" + df_cg["year"].astype(str) + ")"
+                fig_cg = px.bar(
+                    df_cg, x="citations_made", y="label", orientation="h",
+                    title="Leggi più richiamate dalle leggi di bilancio",
+                    labels={"citations_made": "Richiami effettuati", "label": ""},
+                    color="citations_made", color_continuous_scale="Purples",
+                )
+                fig_cg.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_cg, width='stretch')
+            else:
+                st.info("Nessun richiamo outbound trovato.")
+        except Exception as e:
+            st.warning(f"Errore citazioni emesse: {e}")
+
+    st.divider()
+
+    # ── DOMAIN CROSSOVER ─────────────────────────────────────────
+    st.subheader("🏛️ Intersezione con altri domini giuridici")
+    domain_counts = (
+        df_all[df_all["domain"] != ""]
+        .groupby("domain")["urn"]
+        .count()
+        .reset_index()
+        .rename(columns={"urn": "count"})
+        .sort_values("count", ascending=False)
+    )
+    if not domain_counts.empty:
+        fig_dom = px.treemap(
+            domain_counts, path=["domain"], values="count",
+            title="Domini giuridici toccati dalle leggi di bilancio",
+            color="count",
+            color_continuous_scale="RdBu",
+        )
+        st.plotly_chart(fig_dom, width='stretch')
+    else:
+        st.info("Dati di dominio non ancora elaborati per queste leggi.")
+
+    # Cross-domain citations FROM budget laws
+    try:
+        xd = conn.execute(f"""
+            SELECT m2.domain_cluster AS domain_citato, COUNT(*) AS cnt
+            FROM citations c
+            JOIN law_metadata m2 ON m2.urn = c.cited_urn
+            WHERE c.citing_urn IN ({placeholder_str})
+              AND m2.domain_cluster IS NOT NULL
+              AND m2.domain_cluster != ''
+            GROUP BY domain_citato
+            ORDER BY cnt DESC
+            LIMIT 20
+        """, bilancio_urns).fetchall()
+        if xd:
+            df_xd = pd.DataFrame([dict(r) for r in xd])
+            fig_xd = px.bar(
+                df_xd, x="cnt", y="domain_citato", orientation="h",
+                title="Domini giuridici richiamati dalle leggi di bilancio",
+                labels={"cnt": "Citazioni verso il dominio", "domain_citato": "Dominio"},
+                color="cnt", color_continuous_scale="Teal",
+            )
+            fig_xd.update_layout(yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig_xd, width='stretch')
+    except Exception as e:
+        logger.warning("Cross-domain bilancio: %s", e)
+
+    st.divider()
+
+    # ── FULL LAW TABLE ───────────────────────────────────────────
+    st.subheader("📋 Elenco completo leggi di bilancio")
+
+    col_f1, col_f2 = st.columns([2, 1])
+    with col_f1:
+        search_term = st.text_input("🔎 Filtra per titolo", key="bilancio-search")
+    with col_f2:
+        status_filter = st.selectbox(
+            "Stato", ["Tutti", "Vigente", "Abrogata"], key="bilancio-status"
+        )
+
+    df_table = df_all.copy()
+    if search_term:
+        df_table = df_table[
+            df_table["title"].str.lower().str.contains(search_term.lower(), na=False)
+        ]
+    if status_filter == "Vigente":
+        df_table = df_table[df_table["status"] == "in_force"]
+    elif status_filter == "Abrogata":
+        df_table = df_table[df_table["status"] != "in_force"]
+
+    # Display columns
+    df_display = df_table[["title", "year", "type", "article_count", "text_length", "status", "cited_by", "urn"]].copy()
+    df_display["status"] = df_display["status"].map(
+        {"in_force": "✅ Vigente", "abrogated": "❌ Abrogata"}
+    ).fillna(df_display["status"])
+    df_display["text_length"] = (df_display["text_length"] / 1000).round(1).astype(str) + "K"
+    df_display.columns = ["Titolo", "Anno", "Tipo", "Articoli", "Testo (chars)", "Stato", "Citazioni", "URN"]
+
+    st.dataframe(df_display.drop(columns=["URN"]), width='stretch', hide_index=True)
+
+    st.caption(f"Mostrate {len(df_table):,} leggi su {total:,} totali")
+
+    if not df_table.empty:
+        sel_urn = st.selectbox(
+            "Seleziona una legge da aprire:",
+            df_table["urn"].tolist(),
+            format_func=lambda u: next(
+                (f"{r['year']} — {r['title'][:70]}" for r in df_table.to_dict("records") if r["urn"] == u),
+                u,
+            ),
+            key="bilancio-open-sel",
+        )
+        if st.button("📖 Apri legge selezionata", key="bilancio-open-btn"):
+            _open_law(sel_urn, source_tab="bilancio", source_context="table")
+
+
+def page_multivigente_lab():
+    """Lab-only exploration for multivigente versions."""
+    st.header("🕰️ Multivigente (Lab)")
+    st.caption("Analisi versioni storiche per URN con snapshot temporale")
+
+    file_path = _find_multivigente_file()
+    dataset_repo = get_dataset_repo()
+
+    if not file_path:
+        st.warning("Nessun file multivigente disponibile nel dataset corrente.")
+        st.code(
+            "GitHub Actions -> workflow_dispatch\n"
+            "target_env = lab\n"
+            "variants = 'vigente multivigente'\n"
+            "full_rebuild = true"
+        )
+        return
+
+    size_mb = file_path.stat().st_size / 1e6
+    st.info(f"Dataset: {dataset_repo} | File: {file_path.name} ({size_mb:.1f} MB)")
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        urn_query = st.text_input(
+            "URN (anche parziale)",
+            placeholder="urn:nir:stato:legge:...",
+            help="Inserisci URN completo o prefisso/parte per cercare tutte le versioni.",
+        )
+    with c2:
+        max_matches = st.number_input("Max versioni", min_value=10, max_value=50000, value=5000, step=100)
+
+    as_of = st.date_input("Snapshot alla data", value=datetime.utcnow().date())
+
+    if not urn_query.strip():
+        st.caption("Inserisci un URN per avviare l'analisi multivigente.")
+        return
+
+    rows = _mv_find_versions(str(file_path), urn_query.strip(), int(max_matches))
+
+    if not rows:
+        st.warning("Nessuna versione trovata per l'URN indicato.")
+        return
+
+    active_rows = [r for r in rows if _mv_is_active_on(r, as_of)]
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Versioni trovate", f"{len(rows):,}")
+    k2.metric("Attive alla data", f"{len(active_rows):,}")
+    k3.metric("Range date", f"{(rows[0].get('valid_from') or rows[0].get('date') or '?')} → {(rows[-1].get('valid_from') or rows[-1].get('date') or '?')}")
+
+    st.subheader("Snapshot alla data selezionata")
+    if active_rows:
+        df_active = pd.DataFrame(active_rows)
+        df_active = df_active[["urn", "title", "type", "valid_from", "valid_to", "is_current", "article_count", "text_length"]]
+        st.dataframe(df_active, width='stretch', hide_index=True)
+    else:
+        st.info("Nessuna versione risulta attiva alla data selezionata.")
+
+    st.subheader("Timeline versioni")
+    df_all = pd.DataFrame(rows)
+    df_all = df_all[["urn", "title", "type", "date", "valid_from", "valid_to", "is_current", "article_count", "text_length"]]
+    st.dataframe(df_all, width='stretch', hide_index=True)
+
 
 # ─────────────────────────────────────────────────────────────────
 # NAVIGATION
@@ -1719,15 +2999,21 @@ def main():
     pages = {
         "📊 Dashboard": page_dashboard,
         "🇮🇹 Costituzione & Codici": page_costituzione,
+        "⚖️ Corte Costituzionale": page_corte_cost,
         "🔍 Search": page_search,
         "📋 Browse": page_browse,
         "📖 Law Detail": page_law_detail,
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
+        "💰 Legge di Bilancio": page_bilancio,
         "🔔 Notifications": page_notifications,
         "📝 Update Log": page_update_log,
         "📥 Export": page_export,
     }
+
+    # Expose multivigente tools only in lab-like datasets.
+    if "lab" in get_dataset_repo().lower():
+        pages["🕰️ Multivigente (Lab)"] = page_multivigente_lab
 
     # Allow in-page navigation to Law Detail (from cards)
     if "goto_page" in st.session_state and st.session_state["goto_page"] in pages:

@@ -6,6 +6,19 @@ on:
     - cron: '0 2 * * 0'   # Weekly Sunday 2 AM UTC — full rebuild with all collections
   workflow_dispatch:
     inputs:
+      target_env:
+        description: 'Deployment target (production or lab)'
+        required: false
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - lab
+      variants:
+        description: 'Variants to download (space-separated, e.g. "vigente" or "vigente multivigente")'
+        required: false
+        default: 'vigente'
+        type: string
       full_rebuild:
         description: 'Full rebuild (all collections)'
         required: false
@@ -13,9 +26,11 @@ on:
         type: boolean
 
 env:
-  HF_DATASET_REPO: diatribe00/normattiva-data
-  HF_SPACE_REPO: diatribe00/normattiva-search
   PYTHON_VERSION: '3.11'
+
+concurrency:
+  group: nightly-update-${{ github.event.inputs.target_env || 'production' }}
+  cancel-in-progress: false
 
 jobs:
   pipeline:
@@ -39,54 +54,124 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Resolve target repos and variants
+        id: cfg
+        shell: bash
+        run: |
+          TARGET="${{ github.event.inputs.target_env }}"
+          VARIANTS_INPUT="${{ github.event.inputs.variants }}"
+
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            TARGET="production"
+            VARIANTS_INPUT="vigente"
+          fi
+
+          if [[ -z "$TARGET" ]]; then
+            TARGET="production"
+          fi
+
+          if [[ "$TARGET" == "lab" ]]; then
+            echo "HF_DATASET_REPO=diatribe00/normattiva-lab-data" >> "$GITHUB_ENV"
+            echo "HF_SPACE_REPO=diatribe00/normattiva-lab" >> "$GITHUB_ENV"
+          else
+            echo "HF_DATASET_REPO=diatribe00/normattiva-data" >> "$GITHUB_ENV"
+            echo "HF_SPACE_REPO=diatribe00/normattiva-search" >> "$GITHUB_ENV"
+            TARGET="production"
+          fi
+
+          if [[ -z "$VARIANTS_INPUT" ]]; then
+            VARIANTS_INPUT="vigente"
+          fi
+
+          echo "PIPELINE_VARIANTS=$VARIANTS_INPUT" >> "$GITHUB_ENV"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "variants=$VARIANTS_INPUT" >> "$GITHUB_OUTPUT"
+
+          echo "Target env: $TARGET"
+          echo "Dataset repo: $HF_DATASET_REPO"
+          echo "Space repo: $HF_SPACE_REPO"
+          echo "Variants: $VARIANTS_INPUT"
+
       - name: Prepare directories
         run: mkdir -p data/raw data/processed logs
 
       - name: Download existing DB from HF Dataset
+        id: db
+        shell: bash
         run: |
-          python - <<'PYEOF'
-          import os, sys
+          rm -f data/laws.db
+          DB_READY=false
+          for ATTEMPT in 1 2 3; do
+            echo "DB download attempt $ATTEMPT/3 from $HF_DATASET_REPO"
+            if python - <<'PYEOF'
+          import os, sys, shutil, sqlite3
           from pathlib import Path
           from huggingface_hub import hf_hub_download
-          token = os.environ.get('HF_TOKEN')
+
           repo_id = os.environ['HF_DATASET_REPO']
-          print(f'Downloading existing DB from {repo_id}...')
-          try:
-              cached = hf_hub_download(
-                  repo_id=repo_id,
-                  filename='data/laws.db',
-                  repo_type='dataset',
-                  token=token,
-                  local_dir='data',
-              )
-              size = Path(cached).stat().st_size
-              print(f'Downloaded: {size/1e9:.2f} GB at {cached}')
-              if size < 100_000_000:
-                  print(f'WARNING: Downloaded DB too small ({size} bytes), starting fresh')
-                  Path(cached).unlink(missing_ok=True)
-              else:
-                  import sqlite3
-                  conn = sqlite3.connect(cached)
-                  count = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
-                  conn.close()
-                  print(f'Existing DB has {count:,} laws - incremental update will build on top')
-          except Exception as e:
-              print(f'Could not download existing DB ({e}), starting fresh')
+          token = os.environ.get('HF_TOKEN')
+
+          cached = hf_hub_download(
+              repo_id=repo_id,
+              filename='data/laws.db',
+              repo_type='dataset',
+              token=token,
+          )
+
+          target = Path('data/laws.db')
+          target.parent.mkdir(parents=True, exist_ok=True)
+          if Path(cached).resolve() != target.resolve():
+              shutil.copy(cached, target)
+
+          size = target.stat().st_size
+          print(f'Downloaded: {size/1e9:.2f} GB at {target}')
+          if size < 100_000_000:
+              raise RuntimeError(f'DB too small ({size} bytes)')
+
+          conn = sqlite3.connect(str(target))
+          laws = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
+          conn.close()
+          print(f'Existing DB has {laws:,} laws')
           PYEOF
+            then
+              DB_READY=true
+              break
+            fi
+            sleep 5
+          done
+
+          echo "db_ready=$DB_READY" >> "$GITHUB_OUTPUT"
+          echo "DB ready: $DB_READY"
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Download & parse laws
         id: parse
+        shell: bash
         run: |
           set -o pipefail
+          FORCE_FULL=false
           if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" == "0 2 * * 0" ]] || \
              [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
+            FORCE_FULL=true
+          fi
+
+          if [[ "${{ steps.db.outputs.db_ready }}" != "true" ]]; then
+            echo "No valid base DB available. Forcing full rebuild to avoid partial/inconsistent update."
+            FORCE_FULL=true
+          fi
+
+          if [[ "${{ env.PIPELINE_VARIANTS }}" == *"multivigente"* ]]; then
+            echo "Multivigente requested. Forcing full rebuild for consistency across collections."
+            FORCE_FULL=true
+          fi
+
+          if [[ "$FORCE_FULL" == "true" ]]; then
             echo "Running FULL rebuild (all collections)..."
-            python pipeline.py --variants vigente 2>&1 | tee logs/download.log
+            python pipeline.py --variants ${{ env.PIPELINE_VARIANTS }} 2>&1 | tee logs/download.log
           else
             echo "Running incremental update (main collections)..."
-            python pipeline.py --variants vigente \
+            python pipeline.py --variants ${{ env.PIPELINE_VARIANTS }} \
               --collections "Leggi" "Decreti Legislativi" "Decreti Legge" \
               "DPR" "DPCM" "DM" "Cost" 2>&1 | tee logs/download.log
           fi
@@ -139,9 +224,16 @@ jobs:
           conn = sqlite3.connect(str(db_path))
           laws = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
           cits = conn.execute('SELECT COUNT(*) FROM citations').fetchone()[0]
-          scored = conn.execute('SELECT COUNT(*) FROM laws WHERE importance_score > 0').fetchone()[0]
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(laws)").fetchall()]
+            if 'importance_score' in cols:
+              scored = conn.execute('SELECT COUNT(*) FROM laws WHERE importance_score > 0').fetchone()[0]
+            else:
+              scored = -1
           conn.close()
-          print(f'Laws: {laws:,}  |  Citations: {cits:,}  |  PageRank scored: {scored:,}')
+            if scored >= 0:
+              print(f'Laws: {laws:,}  |  Citations: {cits:,}  |  PageRank scored: {scored:,}')
+            else:
+              print(f'Laws: {laws:,}  |  Citations: {cits:,}  |  PageRank scored: n/a (legacy schema)')
           if laws < 10000:
               print(f'ERROR: Too few laws ({laws:,}) - incomplete run, refusing to upload', file=sys.stderr)
               sys.exit(1)
@@ -149,7 +241,7 @@ jobs:
           PYEOF
 
       - name: Upload JSONL to HF Dataset
-        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
+        if: steps.parse.outputs.parse_done == 'true' && secrets.HF_TOKEN != ''
         run: |
           python - <<'PYEOF'
           import os
@@ -157,22 +249,21 @@ jobs:
           from huggingface_hub import HfApi
           api = HfApi(token=os.environ['HF_TOKEN'])
           repo_id = os.environ['HF_DATASET_REPO']
-          jsonl = Path('data/processed/laws_vigente.jsonl')
-          if jsonl.exists():
+          for jsonl in sorted(Path('data/processed').glob('laws_*.jsonl')):
               print(f'Uploading {jsonl} ({jsonl.stat().st_size/1e6:.0f} MB)...')
               api.upload_file(
                   path_or_fileobj=str(jsonl),
-                  path_in_repo='data/processed/laws_vigente.jsonl',
+                  path_in_repo=f'data/processed/{jsonl.name}',
                   repo_id=repo_id, repo_type='dataset',
-                  commit_message='Nightly update: laws JSONL',
+                  commit_message=f'Nightly update: {jsonl.name}',
               )
-              print('JSONL uploaded')
+              print(f'{jsonl.name} uploaded')
           PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Upload DB to HF Dataset
-        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
+        if: steps.parse.outputs.parse_done == 'true' && secrets.HF_TOKEN != ''
         run: |
           python - <<'PYEOF'
           import os
@@ -208,7 +299,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       - name: Restart HF Space
-        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
+        if: steps.parse.outputs.parse_done == 'true' && secrets.HF_TOKEN != ''
         run: |
           python - <<'PYEOF'
           import os, requests
