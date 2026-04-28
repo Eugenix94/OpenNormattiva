@@ -1,17 +1,19 @@
-﻿name: Normattiva-Lab Nightly Pipeline
+name: Normattiva-Lab Continuous Pipeline
 
 on:
   schedule:
-    - cron: '0 3 * * 0'   # Weekly Sunday 3 AM UTC — full rebuild (lab is less frequent)
+    - cron: '30 3 * * *'   # Daily: align from master + nightly variant refresh
+    - cron: '0 4 * * 0'    # Weekly: full all-collections rebuild
   workflow_dispatch:
     inputs:
       full_rebuild:
-        description: 'Full rebuild (all collections incl. multivigente)'
+        description: 'Full rebuild of all collections and all variants'
         required: false
         default: 'false'
         type: boolean
 
 env:
+  HF_MASTER_DATASET_REPO: diatribe00/normattiva-data
   HF_DATASET_REPO: diatribe00/normattiva-lab-data
   HF_SPACE_REPO: diatribe00/normattiva-lab
   PYTHON_VERSION: '3.11'
@@ -19,7 +21,7 @@ env:
 jobs:
   pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 420
 
     steps:
       - name: Checkout
@@ -41,70 +43,79 @@ jobs:
       - name: Prepare directories
         run: mkdir -p data/raw data/processed logs
 
-      - name: Download existing DB from HF Dataset
+      - name: Download base DB from master dataset
         run: |
           python - <<'PYEOF'
-          import os, sys
+          import os
           from pathlib import Path
           from huggingface_hub import hf_hub_download
+
           token = os.environ.get('HF_TOKEN')
-          repo_id = os.environ['HF_DATASET_REPO']
-          print(f'Downloading existing DB from {repo_id}...')
-          try:
-              cached = hf_hub_download(
-                  repo_id=repo_id,
-                  filename='data/laws.db',
-                  repo_type='dataset',
-                  token=token,
-                  local_dir='data',
-              )
-              size = Path(cached).stat().st_size
-              print(f'Downloaded: {size/1e9:.2f} GB at {cached}')
-              if size < 100_000_000:
-                  print(f'WARNING: Downloaded DB too small ({size} bytes), starting fresh')
-                  Path(cached).unlink(missing_ok=True)
-              else:
-                  import sqlite3
-                  conn = sqlite3.connect(cached)
-                  count = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
-                  conn.close()
-                  print(f'Existing DB has {count:,} laws - incremental update will build on top')
-          except Exception as e:
-              print(f'Could not download existing DB ({e}), starting fresh')
+          repo_id = os.environ['HF_MASTER_DATASET_REPO']
+
+          print(f'Downloading baseline DB from {repo_id}...')
+          cached = hf_hub_download(
+              repo_id=repo_id,
+              filename='data/laws.db',
+              repo_type='dataset',
+              token=token,
+              local_dir='data',
+          )
+          size = Path(cached).stat().st_size
+          print(f'Baseline DB downloaded: {size/1e9:.2f} GB ({cached})')
+          if size < 100_000_000:
+              raise RuntimeError(f'Baseline DB too small: {size} bytes')
           PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-      - name: Download & parse laws
+      - name: Download and parse variants
         id: parse
         run: |
           set -o pipefail
-          if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" == "0 2 * * 0" ]] || \
+
+          if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" == "0 4 * * 0" ]] || \
              [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
-            echo "Running FULL rebuild (all collections)..."
-            python pipeline.py --variants vigente 2>&1 | tee logs/download.log
+            echo "Running weekly FULL rebuild for vigente+originale+multivigente (all collections)..."
+            python pipeline.py --variants vigente originale multivigente 2>&1 | tee logs/pipeline_full.log
           else
-            echo "Running incremental update (main collections)..."
-            python pipeline.py --variants vigente \
+            echo "Running nightly lab update (vigente + multivigente core + abrogati originale)..."
+            python pipeline.py --variants vigente multivigente \
               --collections "Leggi" "Decreti Legislativi" "Decreti Legge" \
-              "DPR" "DPCM" "DM" "Cost" 2>&1 | tee logs/download.log
+              "DPR" "DPCM" "DM" "Cost" 2>&1 | tee logs/pipeline_incremental.log
+            python pipeline.py --variants originale \
+              --collections "Atti normativi abrogati (in originale)" 2>&1 | tee logs/pipeline_abrogati.log
           fi
+
           echo "parse_done=true" >> "$GITHUB_OUTPUT"
         env:
           PYTHONUNBUFFERED: '1'
 
-      - name: Build DB + insert citations
+      - name: Refresh citations from vigente JSONL
         if: steps.parse.outputs.parse_done == 'true'
         run: |
-          python insert_citations.py 2>&1 | tee logs/insert_citations.log
+          python insert_citations.py \
+            --jsonl data/processed/laws_vigente.jsonl \
+            --db data/laws.db 2>&1 | tee logs/insert_citations.log
         env:
           PYTHONUNBUFFERED: '1'
 
-      - name: Enrich DB (PageRank, domains, export)
+      - name: Build lab variants + bundle exports
+        if: steps.parse.outputs.parse_done == 'true'
+        run: |
+          python sync_normattiva_lab_dataset.py \
+            --db data/laws.db \
+            --processed-dir data/processed \
+            --bundle-path data/processed/laws_lab_bundle.jsonl \
+            --report-path data/processed/normattiva_lab_sync_report.json \
+            2>&1 | tee logs/lab_sync.log
+        env:
+          PYTHONUNBUFFERED: '1'
+
+      - name: Enrich DB metadata exports
         if: steps.parse.outputs.parse_done == 'true'
         run: |
           python - <<'PYEOF'
-          import json
           from pathlib import Path
           from core.db import LawDatabase
 
@@ -123,101 +134,98 @@ jobs:
         env:
           PYTHONUNBUFFERED: '1'
 
-      - name: Validate DB before upload
+      - name: Validate lab DB before upload
         if: steps.parse.outputs.parse_done == 'true'
         run: |
           python - <<'PYEOF'
-          import sqlite3, sys
+          import sqlite3
+          import sys
           from pathlib import Path
+
           db_path = Path('data/laws.db')
           size = db_path.stat().st_size
           print(f'DB size: {size/1e9:.3f} GB ({size:,} bytes)')
           if size < 100_000_000:
-              print(f'ERROR: DB too small ({size} bytes) - refusing to upload', file=sys.stderr)
+              print(f'ERROR: DB too small ({size} bytes)', file=sys.stderr)
               sys.exit(1)
+
           conn = sqlite3.connect(str(db_path))
           laws = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
-          cits = conn.execute('SELECT COUNT(*) FROM citations').fetchone()[0]
-          scored = conn.execute('SELECT COUNT(*) FROM laws WHERE importance_score > 0').fetchone()[0]
+          abrog = conn.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
+          variants = conn.execute('SELECT COUNT(*) FROM law_variants').fetchone()[0]
+          mv = conn.execute("SELECT COUNT(*) FROM law_variants WHERE variant='multivigente'").fetchone()[0]
           conn.close()
-          print(f'Laws: {laws:,}  |  Citations: {cits:,}  |  PageRank scored: {scored:,}')
-          if laws < 10000:
-              print(f'ERROR: Too few laws ({laws:,}) - incomplete run, refusing to upload', file=sys.stderr)
+
+          print(f'Laws: {laws:,}')
+          print(f'Abrogated in laws: {abrog:,}')
+          print(f'Law variants total: {variants:,}')
+          print(f'Multivigente rows: {mv:,}')
+
+          if laws < 10_000:
+              print(f'ERROR: Too few laws ({laws:,})', file=sys.stderr)
               sys.exit(1)
-          print('Validation passed: DB is safe to upload')
+          if variants < laws:
+              print('ERROR: law_variants unexpectedly small', file=sys.stderr)
+              sys.exit(1)
+
+          print('Validation passed')
           PYEOF
 
-      - name: Upload JSONL to HF Dataset
+      - name: Upload files to lab dataset
         if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
         run: |
           python - <<'PYEOF'
           import os
           from pathlib import Path
           from huggingface_hub import HfApi
+
           api = HfApi(token=os.environ['HF_TOKEN'])
           repo_id = os.environ['HF_DATASET_REPO']
-          jsonl = Path('data/processed/laws_vigente.jsonl')
-          if jsonl.exists():
-              print(f'Uploading {jsonl} ({jsonl.stat().st_size/1e6:.0f} MB)...')
+
+          uploads = [
+              ('data/laws.db', 'data/laws.db', 'Nightly lab update: SQLite DB'),
+              ('data/processed/laws_vigente.jsonl', 'data/processed/laws_vigente.jsonl', 'Nightly lab update: vigente JSONL'),
+              ('data/processed/laws_originale.jsonl', 'data/processed/laws_originale.jsonl', 'Nightly lab update: originale JSONL'),
+              ('data/processed/laws_multivigente.jsonl', 'data/processed/laws_multivigente.jsonl', 'Nightly lab update: multivigente JSONL'),
+              ('data/processed/laws_lab_bundle.jsonl', 'data/processed/laws_lab_bundle.jsonl', 'Nightly lab update: all variants bundle'),
+              ('data/processed/normattiva_lab_sync_report.json', 'data/processed/normattiva_lab_sync_report.json', 'Nightly lab update: sync report'),
+              ('data/laws_summary.csv', 'data/laws_summary.csv', 'Nightly lab update: summary CSV'),
+              ('data/citation_graph.json', 'data/citation_graph.json', 'Nightly lab update: citation graph'),
+          ]
+
+          for local_file, repo_file, message in uploads:
+              p = Path(local_file)
+              if not p.exists():
+                  print(f'Skip missing: {local_file}')
+                  continue
+              print(f'Uploading {local_file} ({p.stat().st_size/1e6:.1f} MB) -> {repo_file}')
               api.upload_file(
-                  path_or_fileobj=str(jsonl),
-                  path_in_repo='data/processed/laws_vigente.jsonl',
-                  repo_id=repo_id, repo_type='dataset',
-                  commit_message='Nightly update: laws JSONL',
+                  path_or_fileobj=str(p),
+                  path_in_repo=repo_file,
+                  repo_id=repo_id,
+                  repo_type='dataset',
+                  commit_message=message,
               )
-              print('JSONL uploaded')
+
+          print('Upload complete')
           PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-      - name: Upload DB to HF Dataset
+      - name: Restart lab space
         if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
         run: |
           python - <<'PYEOF'
           import os
-          from pathlib import Path
-          from huggingface_hub import HfApi
-          api = HfApi(token=os.environ['HF_TOKEN'])
-          repo_id = os.environ['HF_DATASET_REPO']
-          db = Path('data/laws.db')
-          if db.exists():
-              print(f'Uploading DB ({db.stat().st_size/1e6:.0f} MB)...')
-              api.upload_file(
-                  path_or_fileobj=str(db),
-                  path_in_repo='data/laws.db',
-                  repo_id=repo_id, repo_type='dataset',
-                  commit_message='Nightly update: pre-built SQLite DB',
-              )
-              print('DB uploaded')
-          for f, repo_path in [
-              ('data/laws_summary.csv', 'data/laws_summary.csv'),
-              ('data/citation_graph.json', 'data/citation_graph.json'),
-          ]:
-              p = Path(f)
-              if p.exists():
-                  api.upload_file(
-                      path_or_fileobj=str(p),
-                      path_in_repo=repo_path,
-                      repo_id=repo_id, repo_type='dataset',
-                      commit_message='Nightly supplemental files',
-                  )
-                  print(f'Uploaded {f}')
-          PYEOF
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          import requests
 
-      - name: Restart HF Space
-        if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''
-        run: |
-          python - <<'PYEOF'
-          import os, requests
           token = os.environ['HF_TOKEN']
           space = os.environ['HF_SPACE_REPO']
           r = requests.post(
               f'https://huggingface.co/api/spaces/{space}/restart',
               headers={'Authorization': f'Bearer {token}'},
           )
-          print(f'Space restart: {r.status_code} {r.text[:200]}')
+          print(f'Space restart: {r.status_code} {r.text[:300]}')
           PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -226,6 +234,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-logs-${{ github.run_id }}
+          name: normattiva-lab-logs-${{ github.run_id }}
           path: logs/
           retention-days: 7
