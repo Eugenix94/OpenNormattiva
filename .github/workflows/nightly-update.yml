@@ -2,14 +2,13 @@ name: Normattiva-Lab Continuous Pipeline
 
 on:
   schedule:
-    - cron: '30 3 * * *'   # Daily: align from master + nightly variant refresh
-    - cron: '0 4 * * 0'    # Weekly: full all-collections rebuild
+    - cron: '0 2 * * *'    # Nightly full rebuild (all collections, all variants)
   workflow_dispatch:
     inputs:
       full_rebuild:
-        description: 'Full rebuild of all collections and all variants'
+        description: 'Run full rebuild now (same as nightly schedule)'
         required: false
-        default: 'false'
+        default: 'true'
         type: boolean
 
 env:
@@ -74,18 +73,8 @@ jobs:
         run: |
           set -o pipefail
 
-          if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" == "0 4 * * 0" ]] || \
-             [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
-            echo "Running weekly FULL rebuild for vigente+originale+multivigente (all collections)..."
-            python pipeline.py --variants vigente originale multivigente 2>&1 | tee logs/pipeline_full.log
-          else
-            echo "Running nightly lab update (vigente + multivigente core + abrogati originale)..."
-            python pipeline.py --variants vigente multivigente \
-              --collections "Leggi" "Decreti Legislativi" "Decreti Legge" \
-              "DPR" "DPCM" "DM" "Cost" 2>&1 | tee logs/pipeline_incremental.log
-            python pipeline.py --variants originale \
-              --collections "Atti normativi abrogati (in originale)" 2>&1 | tee logs/pipeline_abrogati.log
-          fi
+          echo "Running NIGHTLY FULL rebuild for vigente+originale+multivigente (all collections)..."
+          python pipeline.py --variants vigente originale multivigente 2>&1 | tee logs/pipeline_full.log
 
           echo "parse_done=true" >> "$GITHUB_OUTPUT"
         env:
