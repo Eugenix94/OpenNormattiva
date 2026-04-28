@@ -11,11 +11,12 @@ Goals:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Tuple
+from typing import Dict, Iterator, Tuple
 
 
 VARIANT_FILES = {
@@ -62,6 +63,62 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_law_variants_variant ON law_variants(variant)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_law_variants_status ON law_variants(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_law_variants_year ON law_variants(year)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS law_snapshot_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_at TEXT NOT NULL,
+            source_mode TEXT NOT NULL,
+            laws_count INTEGER DEFAULT 0,
+            abrogated_count INTEGER DEFAULT 0,
+            variants_count INTEGER DEFAULT 0,
+            multivigente_count INTEGER DEFAULT 0,
+            notes TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS law_snapshot_latest (
+            urn TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            status TEXT,
+            title TEXT,
+            type TEXT,
+            date TEXT,
+            year INTEGER,
+            text_length INTEGER DEFAULT 0,
+            article_count INTEGER DEFAULT 0,
+            snapshot_run_id INTEGER,
+            observed_at TEXT,
+            FOREIGN KEY (snapshot_run_id) REFERENCES law_snapshot_runs(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS law_snapshot_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_run_id INTEGER NOT NULL,
+            urn TEXT NOT NULL,
+            change_type TEXT NOT NULL,
+            previous_status TEXT,
+            status TEXT,
+            title TEXT,
+            type TEXT,
+            date TEXT,
+            year INTEGER,
+            text_length INTEGER DEFAULT 0,
+            article_count INTEGER DEFAULT 0,
+            content_hash TEXT NOT NULL,
+            changed_fields TEXT DEFAULT '[]',
+            observed_at TEXT NOT NULL,
+            FOREIGN KEY (snapshot_run_id) REFERENCES law_snapshot_runs(id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_law_snapshot_events_urn ON law_snapshot_events(urn)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_law_snapshot_events_run ON law_snapshot_events(snapshot_run_id)")
 
 
 def resolve_status(variant: str, source_collection: str) -> str:
@@ -349,6 +406,172 @@ def export_bundle(conn: sqlite3.Connection, bundle_path: Path) -> int:
     return written
 
 
+def build_law_hash(law: Dict) -> str:
+    payload = "\u241f".join(
+        [
+            str(law.get("title", "")),
+            str(law.get("type", "")),
+            str(law.get("date", "")),
+            str(law.get("year", "")),
+            str(law.get("status", "")),
+            str(law.get("text_length", 0)),
+            str(law.get("article_count", 0)),
+            str(law.get("text", "")),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def record_snapshot_history(conn: sqlite3.Connection, source_mode: str, notes: str | None = None) -> Dict[str, int]:
+    observed_at = datetime.now(timezone.utc).isoformat()
+
+    laws_count = conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+    abrogated_count = conn.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
+    variants_count = conn.execute("SELECT COUNT(*) FROM law_variants").fetchone()[0]
+    multivigente_count = conn.execute(
+        "SELECT COUNT(*) FROM law_variants WHERE variant='multivigente'"
+    ).fetchone()[0]
+
+    cursor = conn.execute(
+        """
+        INSERT INTO law_snapshot_runs
+            (snapshot_at, source_mode, laws_count, abrogated_count, variants_count, multivigente_count, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            observed_at,
+            source_mode,
+            laws_count,
+            abrogated_count,
+            variants_count,
+            multivigente_count,
+            notes,
+        ),
+    )
+    run_id = cursor.lastrowid
+
+    latest_rows = conn.execute(
+        "SELECT urn, content_hash, status, title, type, date, year, text_length, article_count FROM law_snapshot_latest"
+    ).fetchall()
+    latest = {
+        row[0]: {
+            "content_hash": row[1],
+            "status": row[2],
+            "title": row[3],
+            "type": row[4],
+            "date": row[5],
+            "year": row[6],
+            "text_length": row[7],
+            "article_count": row[8],
+        }
+        for row in latest_rows
+    }
+
+    current_rows = conn.execute(
+        "SELECT urn, title, type, date, year, status, text_length, article_count, text FROM laws"
+    ).fetchall()
+
+    changed = 0
+    for row in current_rows:
+        law = {
+            "urn": row[0],
+            "title": row[1],
+            "type": row[2],
+            "date": row[3],
+            "year": row[4],
+            "status": row[5],
+            "text_length": row[6],
+            "article_count": row[7],
+            "text": row[8],
+        }
+        urn = law["urn"]
+        content_hash = build_law_hash(law)
+        prev = latest.get(urn)
+
+        if prev is None:
+            change_type = "added"
+            changed_fields = ["initial_observation"]
+            previous_status = None
+        elif prev["content_hash"] != content_hash:
+            changed_fields = []
+            for field in ["status", "title", "type", "date", "year", "text_length", "article_count"]:
+                if prev.get(field) != law.get(field):
+                    changed_fields.append(field)
+            if not changed_fields:
+                changed_fields = ["text"]
+            change_type = "status_changed" if "status" in changed_fields else "updated"
+            previous_status = prev.get("status")
+        else:
+            continue
+
+        conn.execute(
+            """
+            INSERT INTO law_snapshot_events
+                (snapshot_run_id, urn, change_type, previous_status, status, title, type, date, year,
+                 text_length, article_count, content_hash, changed_fields, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                urn,
+                change_type,
+                previous_status,
+                law.get("status"),
+                law.get("title"),
+                law.get("type"),
+                law.get("date"),
+                law.get("year"),
+                law.get("text_length", 0),
+                law.get("article_count", 0),
+                content_hash,
+                json.dumps(changed_fields, ensure_ascii=False),
+                observed_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO law_snapshot_latest
+                (urn, content_hash, status, title, type, date, year, text_length, article_count, snapshot_run_id, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(urn) DO UPDATE SET
+                content_hash=excluded.content_hash,
+                status=excluded.status,
+                title=excluded.title,
+                type=excluded.type,
+                date=excluded.date,
+                year=excluded.year,
+                text_length=excluded.text_length,
+                article_count=excluded.article_count,
+                snapshot_run_id=excluded.snapshot_run_id,
+                observed_at=excluded.observed_at
+            """,
+            (
+                urn,
+                content_hash,
+                law.get("status"),
+                law.get("title"),
+                law.get("type"),
+                law.get("date"),
+                law.get("year"),
+                law.get("text_length", 0),
+                law.get("article_count", 0),
+                run_id,
+                observed_at,
+            ),
+        )
+        changed += 1
+
+    conn.commit()
+    return {
+        "run_id": run_id,
+        "laws_count": laws_count,
+        "abrogated_count": abrogated_count,
+        "variants_count": variants_count,
+        "multivigente_count": multivigente_count,
+        "changed_laws": changed,
+    }
+
+
 def build_report(conn: sqlite3.Connection, report_path: Path, processed_dir: Path) -> Dict:
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -375,6 +598,8 @@ def build_report(conn: sqlite3.Connection, report_path: Path, processed_dir: Pat
             "law_variants_total": sum(by_variant.values()),
             "variants": by_variant,
             "variant_status": by_status,
+            "snapshot_runs": conn.execute("SELECT COUNT(*) FROM law_snapshot_runs").fetchone()[0],
+            "snapshot_events": conn.execute("SELECT COUNT(*) FROM law_snapshot_events").fetchone()[0],
         },
         "processed_files": {
             name: str((processed_dir / filename).exists())
@@ -394,6 +619,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-path", default="data/processed/normattiva_lab_sync_report.json", help="Output JSON report")
     parser.add_argument("--skip-refresh-laws", action="store_true", help="Do not update main laws table from vigente JSONL")
     parser.add_argument("--skip-bundle", action="store_true", help="Do not write bundle JSONL")
+    parser.add_argument("--snapshot-mode", default="incremental", help="Label for snapshot history run")
     return parser.parse_args()
 
 
@@ -444,6 +670,13 @@ def main() -> int:
         if not args.skip_bundle:
             bundle_written = export_bundle(conn, Path(args.bundle_path))
             print(f"[sync] bundle rows written: {bundle_written:,}")
+
+        snapshot = record_snapshot_history(conn, args.snapshot_mode)
+        print(
+            "[sync] snapshot recorded: "
+            f"run={snapshot['run_id']} changed={snapshot['changed_laws']:,} "
+            f"laws={snapshot['laws_count']:,}"
+        )
 
         report = build_report(conn, Path(args.report_path), processed_dir)
         print("[sync] report written:")

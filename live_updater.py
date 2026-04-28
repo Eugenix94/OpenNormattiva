@@ -201,7 +201,8 @@ class LiveUpdater:
             laws = self.parser.parse_zip_file(tmp_path)
             tmp_path.unlink()  # Clean up temp file
             
-            # Merge into existing JSONL
+            # Merge into existing JSONL by REPLACING the current collection slice.
+            # This keeps the dataset aligned with the present state instead of only appending.
             variant_name = self.variant_code_to_name(variant)
             jsonl_file = self.processed_dir / f"laws_{variant_name}.jsonl"
             
@@ -212,16 +213,27 @@ class LiveUpdater:
                     for line in f:
                         law = json.loads(line)
                         existing[law.get('urn')] = law
+
+            # Remove the previous copy of this collection before inserting the fresh one.
+            previous_urns = {
+                urn for urn, law in existing.items()
+                if (law.get('source_collection') or '') == collection
+            }
+            for urn in previous_urns:
+                existing.pop(urn, None)
             
             # Merge new laws
             updated_count = 0
             added_count = 0
+            current_urns = set()
             
             for law in laws:
                 urn = law.get('urn')
                 if not urn:
                     continue
-                if urn in existing:
+                current_urns.add(urn)
+
+                if urn in previous_urns:
                     # Law already existed - record update
                     updated_count += 1
                     self.amendment_log.record_amendment(
@@ -241,19 +253,27 @@ class LiveUpdater:
                 law['source_collection'] = collection
                 law['status'] = self.infer_status(variant, collection)
                 existing[urn] = law
+
+            removed_urns = previous_urns - current_urns
+            for urn in sorted(removed_urns):
+                self.amendment_log.record_amendment(
+                    urn, collection, 'removed', {'variant': variant_name}
+                )
             
             # Write back to JSONL
             with open(jsonl_file, 'w', encoding='utf-8') as f:
                 for law in existing.values():
                     f.write(json.dumps(law, ensure_ascii=False) + '\n')
             
-            logger.info(f"✓ Updated {collection}: {added_count} added, {updated_count} updated")
+            logger.info(
+                f"✓ Updated {collection}: {added_count} added, {updated_count} updated, {len(removed_urns)} removed"
+            )
             
             # Update ETag cache
             if etag:
                 self.etag_cache.set(collection, etag, variant)
             
-            return added_count + updated_count
+            return added_count + updated_count + len(removed_urns)
         
         except Exception as e:
             logger.error(f"Failed to update {collection}: {e}")

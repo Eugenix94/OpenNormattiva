@@ -14,9 +14,10 @@ Pages:
   4. Law Detail        - full text, citations, graph
   5. Citations         - network explorer
   6. Domains           - legal domain analysis
-  7. Notifications     - API change detection (read-only)
-  8. Update Log        - manual update history
-  9. Export            - CSV, JSON, JSONL downloads
+    7. History Lab       - observed law-state timeline / wayback
+    8. Notifications     - API change detection (read-only)
+    9. Update Log        - manual update history
+ 10. Export            - CSV, JSON, JSONL downloads
 """
 
 import streamlit as st
@@ -43,6 +44,13 @@ sys.path.insert(0, str(_app_dir))
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
+HF_DATASET_OWNER = os.environ.get("HF_DATASET_OWNER", "diatribe00")
+HF_DATASET_NAME = os.environ.get("HF_DATASET_NAME", "normattiva-data")
+
+
+def get_hf_dataset_repo_id() -> str:
+    return f"{HF_DATASET_OWNER}/{HF_DATASET_NAME}"
+
 # Database connection (static - pre-built DB ships with the Space)
 
 def get_db_paths():
@@ -53,10 +61,11 @@ def get_db_paths():
     
     hf_cache_hub = Path.home() / '.cache' / 'huggingface' / 'hub'
     
-    # Scan HF hub cache for any normattiva dataset snapshot that has laws.db
+    # Scan HF hub cache for the configured dataset snapshot that has laws.db.
     hf_cached_paths = []
     if hf_cache_hub.exists():
-        for snap in hf_cache_hub.glob('datasets--diatribe00--normattiva-data/snapshots/*/data/laws.db'):
+        dataset_glob = f'datasets--{HF_DATASET_OWNER}--{HF_DATASET_NAME}/snapshots/*/data/laws.db'
+        for snap in hf_cache_hub.glob(dataset_glob):
             hf_cached_paths.append(snap)
     
     base_paths = [
@@ -84,9 +93,10 @@ def download_database_from_hf():
         return None
     
     try:
-        logger.info("Downloading database from HF Dataset (this may take ~5 min)...")
+        repo_id = get_hf_dataset_repo_id()
+        logger.info(f"Downloading database from HF Dataset {repo_id} (this may take ~5 min)...")
         cached = hf_hub_download(
-            repo_id="diatribe00/normattiva-data",
+            repo_id=repo_id,
             filename="data/laws.db",
             repo_type="dataset",
         )
@@ -1135,6 +1145,112 @@ This keeps you in full control of what enters the dataset.
     """)
 
 
+def page_history_lab():
+    st.header("🕰️ History Lab")
+    st.caption(
+        "Observed law-state history from lab sync runs. "
+        "After the full lab dataset is seeded, this acts like a wayback timeline for tracked laws."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for history exploration.")
+        return
+
+    try:
+        runs = db.conn.execute(
+            """
+            SELECT id, snapshot_at, source_mode, laws_count, abrogated_count,
+                   variants_count, multivigente_count
+            FROM law_snapshot_runs
+            ORDER BY snapshot_at DESC
+            LIMIT 180
+            """
+        ).fetchall()
+    except Exception as e:
+        st.info(f"Snapshot history not available yet: {e}")
+        return
+
+    if not runs:
+        st.info(
+            "No history snapshots recorded yet. Once the full lab dataset finishes its first seeded sync, "
+            "this tab will show timeline runs and law-level changes."
+        )
+        return
+
+    runs_df = pd.DataFrame([dict(r) for r in runs])
+    runs_df["snapshot_at"] = pd.to_datetime(runs_df["snapshot_at"], errors="coerce")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Snapshots", f"{len(runs_df):,}")
+    c2.metric("Latest laws", f"{int(runs_df.iloc[0]['laws_count']):,}")
+    c3.metric("Latest abrogated", f"{int(runs_df.iloc[0]['abrogated_count']):,}")
+    c4.metric("Latest multivigente", f"{int(runs_df.iloc[0]['multivigente_count']):,}")
+
+    fig = px.line(
+        runs_df.sort_values("snapshot_at"),
+        x="snapshot_at",
+        y=["laws_count", "abrogated_count", "multivigente_count"],
+        title="Observed legal state over time",
+    )
+    st.plotly_chart(fig, width='stretch')
+
+    tab1, tab2, tab3 = st.tabs(["📈 Snapshot Runs", "📜 Law Timeline", "🔥 Recent Changes"])
+
+    with tab1:
+        display_df = runs_df[[
+            "snapshot_at", "source_mode", "laws_count", "abrogated_count",
+            "variants_count", "multivigente_count"
+        ]].copy()
+        display_df.columns = [
+            "Snapshot", "Mode", "Laws", "Abrogated", "Variant Rows", "Multivigente"
+        ]
+        st.dataframe(display_df, width='stretch', hide_index=True)
+
+    with tab2:
+        search = st.text_input("Law URN or title contains", key="history-law-search")
+        like = f"%{search}%"
+        rows = db.conn.execute(
+            """
+            SELECT urn, MAX(title) AS title, COUNT(*) AS changes
+            FROM law_snapshot_events
+            WHERE (? = '' OR urn LIKE ? OR title LIKE ?)
+            GROUP BY urn
+            ORDER BY changes DESC, title ASC
+            LIMIT 200
+            """,
+            (search, like, like),
+        ).fetchall()
+        if not rows:
+            st.info("No matching laws found in snapshot history.")
+        else:
+            options = [f"{row['title'][:80]} ({row['urn']})" for row in rows]
+            selected = st.selectbox("Choose a law timeline", options, key="history-law-select")
+            sel_urn = selected.split("(")[-1].rstrip(")")
+            history = db.conn.execute(
+                """
+                SELECT observed_at, change_type, previous_status, status, changed_fields,
+                       title, type, date, year, text_length, article_count
+                FROM law_snapshot_events
+                WHERE urn = ?
+                ORDER BY observed_at DESC, id DESC
+                """,
+                (sel_urn,),
+            ).fetchall()
+            st.dataframe(pd.DataFrame([dict(r) for r in history]), width='stretch', hide_index=True)
+
+    with tab3:
+        recent = db.conn.execute(
+            """
+            SELECT observed_at, urn, change_type, previous_status, status, changed_fields, title
+            FROM law_snapshot_events
+            ORDER BY observed_at DESC, id DESC
+            LIMIT 200
+            """
+        ).fetchall()
+        st.dataframe(pd.DataFrame([dict(r) for r in recent]), width='stretch', hide_index=True)
+
+
 def page_update_log():
     """Manual update log -- tracks when the dataset was updated."""
     st.header("\U0001f4dd Update Log")
@@ -1724,6 +1840,7 @@ def main():
         "📖 Law Detail": page_law_detail,
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
+        "🕰️ History Lab": page_history_lab,
         "🔔 Notifications": page_notifications,
         "📝 Update Log": page_update_log,
         "📥 Export": page_export,

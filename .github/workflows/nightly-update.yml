@@ -132,11 +132,16 @@ jobs:
       - name: Build lab variants + bundle exports
         if: steps.parse.outputs.parse_done == 'true'
         run: |
+          SNAPSHOT_MODE=incremental
+          if [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
+            SNAPSHOT_MODE=full
+          fi
           python sync_normattiva_lab_dataset.py \
             --db data/laws.db \
             --processed-dir data/processed \
             --bundle-path data/processed/laws_lab_bundle.jsonl \
             --report-path data/processed/normattiva_lab_sync_report.json \
+            --snapshot-mode "$SNAPSHOT_MODE" \
             2>&1 | tee logs/lab_sync.log
         env:
           PYTHONUNBUFFERED: '1'
