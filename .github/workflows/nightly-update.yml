@@ -1,20 +1,19 @@
-﻿name: Normattiva Nightly Pipeline
+﻿name: Normattiva-Lab Nightly Pipeline
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # Daily 2 AM UTC — incremental update
-    - cron: '0 2 * * 0'   # Weekly Sunday 2 AM UTC — full rebuild with all collections
+    - cron: '0 3 * * 0'   # Weekly Sunday 3 AM UTC — full rebuild (lab is less frequent)
   workflow_dispatch:
     inputs:
       full_rebuild:
-        description: 'Full rebuild (all collections)'
+        description: 'Full rebuild (all collections incl. multivigente)'
         required: false
         default: 'false'
         type: boolean
 
 env:
-  HF_DATASET_REPO: diatribe00/normattiva-data
-  HF_SPACE_REPO: diatribe00/normattiva-search
+  HF_DATASET_REPO: diatribe00/normattiva-lab-data
+  HF_SPACE_REPO: diatribe00/normattiva-lab
   PYTHON_VERSION: '3.11'
 
 jobs:

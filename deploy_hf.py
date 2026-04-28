@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """
-Deploy OpenNormattiva to HuggingFace Spaces + create/update HF Dataset.
+Deploy OpenNormattiva Normattiva-Lab to HuggingFace.
+
+This branch (normattiva-lab) targets:
+  Space:   diatribe00/normattiva-lab
+  Dataset: diatribe00/normattiva-lab-data
+
+Used for multivigente and experimental dataset enhancements.
+Stable improvements are later merged into master (-> normattiva-search).
 
 Usage:
     python deploy_hf.py --token hf_xxx
@@ -15,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 def main():
-    parser = argparse.ArgumentParser(description="Deploy to HuggingFace")
+    parser = argparse.ArgumentParser(description="Deploy to HuggingFace (normattiva-lab branch)")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN", ""))
     parser.add_argument("--skip-space", action="store_true")
     parser.add_argument("--skip-dataset", action="store_true")
@@ -31,8 +38,9 @@ def main():
     username = user["name"]
     print(f"Authenticated as: {username}")
 
-    space_id = f"{username}/normattiva-search"
-    dataset_id = f"{username}/normattiva-data"
+    # normattiva-lab branch targets the lab space/dataset, NOT production
+    space_id = f"{username}/normattiva-lab"
+    dataset_id = f"{username}/normattiva-lab-data"
 
     # ── Deploy Space ──────────────────────────────────────────────────────
     if not args.skip_space:
@@ -93,6 +101,9 @@ def main():
                 "ENV PYTHONUNBUFFERED=1 \\\n"
                 "    PYTHONDONTWRITEBYTECODE=1 \\\n"
                 "    PIP_NO_CACHE_DIR=1\n"
+                # normattiva-lab branch: always pull from normattiva-lab-data
+                "ENV HF_DATASET_OWNER=diatribe00 \\\n"
+                "    HF_DATASET_NAME=normattiva-lab-data\n"
                 "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
                 "    libxml2-dev libxslt-dev gcc git && rm -rf /var/lib/apt/lists/*\n"
                 "COPY requirements.txt .\n"
