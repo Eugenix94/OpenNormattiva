@@ -2,13 +2,13 @@ name: Normattiva-Lab Continuous Pipeline
 
 on:
   schedule:
-    - cron: '0 2 * * *'    # Nightly full rebuild (all collections, all variants)
+    - cron: '0 2 * * *'    # Nightly incremental sync (ETag change tracking)
   workflow_dispatch:
     inputs:
       full_rebuild:
-        description: 'Run full rebuild now (same as nightly schedule)'
+        description: 'Force full rebuild instead of incremental ETag sync'
         required: false
-        default: 'true'
+        default: 'false'
         type: boolean
 
 env:
@@ -68,13 +68,53 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
+      - name: Restore lab tracking state and JSONL from lab dataset
+        run: |
+          python - <<'PYEOF'
+          import os
+          from huggingface_hub import hf_hub_download
+
+          token = os.environ.get('HF_TOKEN')
+          repo_id = os.environ['HF_DATASET_REPO']
+
+          files = [
+              'data/.etag_cache.json',
+              'data/processed/laws_vigente.jsonl',
+              'data/processed/laws_originale.jsonl',
+              'data/processed/laws_multivigente.jsonl',
+              'data/processed/amendments.jsonl',
+          ]
+
+          for path in files:
+              try:
+                  cached = hf_hub_download(
+                      repo_id=repo_id,
+                      filename=path,
+                      repo_type='dataset',
+                      token=token,
+                      local_dir='.',
+                  )
+                  print(f'Restored: {path} ({cached})')
+              except Exception as e:
+                  print(f'Optional restore skipped for {path}: {e}')
+          PYEOF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
       - name: Download and parse variants
         id: parse
         run: |
           set -o pipefail
 
-          echo "Running NIGHTLY FULL rebuild for vigente+originale+multivigente (all collections)..."
-          python pipeline.py --variants vigente originale multivigente 2>&1 | tee logs/pipeline_full.log
+          if [[ "${{ github.event.inputs.full_rebuild }}" == "true" ]]; then
+            echo "Running FORCED FULL rebuild for vigente+originale+multivigente (all collections)..."
+            python pipeline.py --variants vigente originale multivigente 2>&1 | tee logs/pipeline_full.log
+          else
+            echo "Running ETag incremental updates for changed collections only..."
+            python live_updater.py --variant vigente 2>&1 | tee logs/live_vigente.log
+            python live_updater.py --variant multivigente 2>&1 | tee logs/live_multivigente.log
+            python live_updater.py --variant originale --collections "Atti normativi abrogati (in originale)" 2>&1 | tee logs/live_abrogati.log
+          fi
 
           echo "parse_done=true" >> "$GITHUB_OUTPUT"
         env:

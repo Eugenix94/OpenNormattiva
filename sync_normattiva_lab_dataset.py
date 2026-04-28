@@ -237,6 +237,85 @@ def refresh_laws_from_vigente(conn: sqlite3.Connection, vigente_jsonl: Path) -> 
     return count
 
 
+def apply_abrogated_from_originale(conn: sqlite3.Connection, originale_jsonl: Path) -> int:
+    """Mark/insert abrogated laws from originale-abrogati feed."""
+    rows = []
+    count = 0
+    for law in iter_jsonl(originale_jsonl):
+        urn = law.get("urn")
+        if not urn:
+            continue
+
+        source_collection = (law.get("source_collection") or "")
+        if "abrogat" not in source_collection.lower():
+            continue
+
+        rows.append(
+            (
+                urn,
+                law.get("title", ""),
+                law.get("type", ""),
+                law.get("date"),
+                int(law.get("year")) if law.get("year") not in (None, "") else None,
+                law.get("text", ""),
+                int(law.get("text_length", 0) or 0),
+                int(law.get("article_count", 0) or 0),
+                "abrogated",
+                source_collection,
+                law.get("parsed_at") or datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+        if len(rows) >= 500:
+            conn.executemany(
+                """
+                INSERT INTO laws
+                    (urn, title, type, date, year, text, text_length, article_count, status, source_collection, parsed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(urn) DO UPDATE SET
+                    title=excluded.title,
+                    type=excluded.type,
+                    date=excluded.date,
+                    year=excluded.year,
+                    text=excluded.text,
+                    text_length=excluded.text_length,
+                    article_count=excluded.article_count,
+                    status='abrogated',
+                    source_collection=excluded.source_collection,
+                    parsed_at=excluded.parsed_at
+                """,
+                rows,
+            )
+            conn.commit()
+            count += len(rows)
+            rows.clear()
+
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO laws
+                (urn, title, type, date, year, text, text_length, article_count, status, source_collection, parsed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(urn) DO UPDATE SET
+                title=excluded.title,
+                type=excluded.type,
+                date=excluded.date,
+                year=excluded.year,
+                text=excluded.text,
+                text_length=excluded.text_length,
+                article_count=excluded.article_count,
+                status='abrogated',
+                source_collection=excluded.source_collection,
+                parsed_at=excluded.parsed_at
+            """,
+            rows,
+        )
+        conn.commit()
+        count += len(rows)
+
+    return count
+
+
 def export_bundle(conn: sqlite3.Connection, bundle_path: Path) -> int:
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -340,11 +419,19 @@ def main() -> int:
             if vigente_path.exists():
                 refreshed = refresh_laws_from_vigente(conn, vigente_path)
                 print(f"[sync] refreshed laws from vigente: {refreshed:,}")
-                conn.execute("INSERT INTO laws_fts(laws_fts) VALUES('rebuild')")
-                conn.commit()
-                print("[sync] rebuilt laws_fts")
             else:
                 print(f"[sync] vigente file missing, skipped laws refresh: {vigente_path}")
+
+            originale_path = processed_dir / VARIANT_FILES["originale"]
+            if originale_path.exists():
+                marked = apply_abrogated_from_originale(conn, originale_path)
+                print(f"[sync] applied abrogated status from originale: {marked:,}")
+            else:
+                print(f"[sync] originale file missing, skipped abrogated mapping: {originale_path}")
+
+            conn.execute("INSERT INTO laws_fts(laws_fts) VALUES('rebuild')")
+            conn.commit()
+            print("[sync] rebuilt laws_fts")
 
         for variant, filename in VARIANT_FILES.items():
             path = processed_dir / filename

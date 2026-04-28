@@ -122,6 +122,24 @@ class LiveUpdater:
         
         self.etag_cache = ETagCache(self.data_dir / '.etag_cache.json')
         self.amendment_log = AmendmentLog(self.processed_dir / 'amendments.jsonl')
+
+    @staticmethod
+    def variant_code_to_name(variant: str) -> str:
+        mapping = {'V': 'vigente', 'M': 'multivigente', 'O': 'originale'}
+        return mapping.get(variant, variant.lower())
+
+    @staticmethod
+    def infer_status(variant: str, collection: str) -> str:
+        c = (collection or '').lower()
+        if 'abrogat' in c:
+            return 'abrogated'
+        if variant == 'V':
+            return 'in_force'
+        if variant == 'M':
+            return 'multi_version'
+        if variant == 'O':
+            return 'original_text'
+        return 'unknown'
     
     def check_for_updates(self, collections: List[str] = None, variant: str = 'V') -> Dict[str, bool]:
         """Check which collections have changed since last sync."""
@@ -131,8 +149,9 @@ class LiveUpdater:
                 catalogue = self.api.get_collection_catalogue()
                 collections = []
                 seen = set()
+                target_variant = variant
                 for entry in catalogue:
-                    if entry.get('formatoCollezione') == 'V':
+                    if entry.get('formatoCollezione') == target_variant:
                         nome = entry.get('nomeCollezione')
                         if nome not in seen:
                             collections.append(nome)
@@ -183,7 +202,8 @@ class LiveUpdater:
             tmp_path.unlink()  # Clean up temp file
             
             # Merge into existing JSONL
-            jsonl_file = self.processed_dir / f"laws_{variant}.jsonl"
+            variant_name = self.variant_code_to_name(variant)
+            jsonl_file = self.processed_dir / f"laws_{variant_name}.jsonl"
             
             # Load existing laws by URN
             existing = {}
@@ -199,6 +219,8 @@ class LiveUpdater:
             
             for law in laws:
                 urn = law.get('urn')
+                if not urn:
+                    continue
                 if urn in existing:
                     # Law already existed - record update
                     updated_count += 1
@@ -216,6 +238,8 @@ class LiveUpdater:
                 
                 # Replace in dict (new version)
                 law = self.parser.enrich_with_metadata(law)
+                law['source_collection'] = collection
+                law['status'] = self.infer_status(variant, collection)
                 existing[urn] = law
             
             # Write back to JSONL
@@ -272,7 +296,7 @@ def main():
     parser.add_argument(
         '--variant', '-v',
         default='vigente',
-        choices=['vigente', 'multivigente'],
+        choices=['vigente', 'multivigente', 'originale'],
         help='Law variant to track'
     )
     parser.add_argument(
@@ -293,7 +317,7 @@ def main():
     
     args = parser.parse_args()
     
-    variant_map = {'vigente': 'V', 'multivigente': 'M'}
+    variant_map = {'vigente': 'V', 'multivigente': 'M', 'originale': 'O'}
     variant_code = variant_map.get(args.variant, 'V')
     
     updater = LiveUpdater(Path(args.data_dir))
