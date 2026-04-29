@@ -301,6 +301,99 @@ def _get_laws():
     return load_laws_from_jsonl()
 
 
+def _init_global_filters(laws):
+    """Initialize shared cross-tab filters once per session."""
+    years = [int(l.get("year")) for l in laws if l.get("year") not in (None, "")]
+    types = sorted(set((l.get("type") or "unknown") for l in laws))
+    statuses = sorted(set((l.get("status") or "unknown") for l in laws))
+
+    min_year = min(years) if years else 1800
+    max_year = max(years) if years else datetime.now().year
+
+    st.session_state.setdefault("gf_all_types", types)
+    st.session_state.setdefault("gf_all_statuses", statuses)
+    st.session_state.setdefault("gf_year_bounds", (min_year, max_year))
+
+    st.session_state.setdefault("gf_types", types)
+    st.session_state.setdefault("gf_statuses", statuses)
+    st.session_state.setdefault("gf_year_range", (min_year, max_year))
+    st.session_state.setdefault("gf_keyword", "")
+
+
+def _apply_global_filters(laws):
+    """Apply shared sidebar filters to law lists."""
+    selected_types = set(st.session_state.get("gf_types", []))
+    selected_statuses = set(st.session_state.get("gf_statuses", []))
+    y0, y1 = st.session_state.get("gf_year_range", st.session_state.get("gf_year_bounds", (1800, 2100)))
+    keyword = (st.session_state.get("gf_keyword") or "").strip().lower()
+
+    out = []
+    for l in laws:
+        typ = (l.get("type") or "unknown")
+        status = (l.get("status") or "unknown")
+        year = l.get("year")
+
+        if selected_types and typ not in selected_types:
+            continue
+        if selected_statuses and status not in selected_statuses:
+            continue
+        if year not in (None, ""):
+            try:
+                y = int(year)
+                if y < y0 or y > y1:
+                    continue
+            except Exception:
+                pass
+
+        if keyword:
+            blob = " ".join([
+                str(l.get("title") or ""),
+                str(l.get("urn") or ""),
+                str(l.get("type") or ""),
+                str(l.get("status") or ""),
+            ]).lower()
+            if keyword not in blob:
+                continue
+
+        out.append(l)
+    return out
+
+
+def _render_filter_summary(filtered_count: int, total_count: int):
+    if total_count <= 0:
+        return
+    if filtered_count == total_count:
+        st.caption(f"Global view: {filtered_count:,}/{total_count:,} laws")
+    else:
+        st.info(f"Global filters active: showing {filtered_count:,} of {total_count:,} laws")
+
+
+def _objective_results(db, filtered_laws):
+    """Compute objective cross-domain indicators on the current filtered scope."""
+    total = len(filtered_laws)
+    in_force = sum(1 for l in filtered_laws if (l.get("status") == "in_force"))
+    abrog = sum(1 for l in filtered_laws if (l.get("status") == "abrogated"))
+    avg_articles = (sum(int(l.get("article_count") or 0) for l in filtered_laws) / total) if total else 0
+    avg_text = (sum(int(l.get("text_length") or 0) for l in filtered_laws) / total) if total else 0
+
+    citation_total = 0
+    if db:
+        try:
+            citation_total = db.conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
+        except Exception:
+            citation_total = 0
+
+    return {
+        "total": total,
+        "in_force": in_force,
+        "abrogated": abrog,
+        "abrogation_rate": (abrog / total * 100.0) if total else 0.0,
+        "avg_articles": avg_articles,
+        "avg_text": avg_text,
+        "citations_total": citation_total,
+    }
+
+
 def _render_graph_plotly(nodes, edges, title="Citation Graph"):
     """Render a citation graph using Plotly scatter."""
     if not nodes or not edges:
@@ -612,7 +705,9 @@ def _get_fiscal_status_snapshot(db_path: str) -> dict:
 def page_dashboard():
     st.header("\U0001f4ca Dashboard")
     db = load_db()
-    laws = _get_laws()
+    all_laws = _get_laws()
+    laws = _apply_global_filters(all_laws)
+    _render_filter_summary(len(laws), len(all_laws))
     
     if not laws:
         st.error(
@@ -711,6 +806,10 @@ def page_dashboard():
 def page_search():
     st.header("\U0001f50d Advanced Search")
     db = load_db()
+    all_laws = _get_laws()
+    filtered_scope = _apply_global_filters(all_laws)
+    allowed_urns = set(l.get("urn") for l in filtered_scope if l.get("urn"))
+    _render_filter_summary(len(filtered_scope), len(all_laws))
 
     query = st.text_input(
         "Search Italian law (full-text with BM25 ranking):",
@@ -735,6 +834,8 @@ def page_search():
     if db:
         try:
             results = db.search_fts(query, limit=50)
+            if allowed_urns:
+                results = [r for r in results if r.get("urn") in allowed_urns]
             st.write(f"**Found {len(results)} results** (ranked by relevance)")
             for r in results:
                 year = r.get("year", "?")
@@ -768,6 +869,7 @@ def page_search():
             st.error(f"Search error: {e}")
     else:
         laws = load_laws_from_jsonl()
+        laws = [l for l in laws if l.get("urn") in allowed_urns] if allowed_urns else laws
         q = query.lower()
         results = [l for l in laws
                    if q in l.get("title", "").lower()
@@ -785,7 +887,9 @@ def page_search():
 
 def page_browse():
     st.header("\U0001f4cb Browse Laws")
-    laws = _get_laws()
+    all_laws = _get_laws()
+    laws = _apply_global_filters(all_laws)
+    _render_filter_summary(len(laws), len(all_laws))
     if not laws:
         st.info("No data loaded.")
         return
@@ -863,6 +967,50 @@ def page_browse():
                            else "No text")
                 st.text_area("Text preview", txt, height=250, disabled=True,
                              key=f"browse_{law.get('urn', start)}")
+
+
+def page_unified_analysis():
+    st.header("📈 Unified Analysis")
+    st.caption("Objective cross-tab synthesis on the exact filtered dataset scope.")
+
+    db = load_db()
+    all_laws = _get_laws()
+    laws = _apply_global_filters(all_laws)
+    _render_filter_summary(len(laws), len(all_laws))
+
+    if not laws:
+        st.info("No laws in current filter scope.")
+        return
+
+    obj = _objective_results(db, laws)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Laws in scope", f"{obj['total']:,}")
+    c2.metric("In force", f"{obj['in_force']:,}")
+    c3.metric("Abrogated", f"{obj['abrogated']:,}")
+    c4.metric("Abrogation rate", f"{obj['abrogation_rate']:.2f}%")
+
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Avg articles/law", f"{obj['avg_articles']:.1f}")
+    c6.metric("Avg text length", f"{obj['avg_text']:.0f} chars")
+    c7.metric("Citations in DB", f"{obj['citations_total']:,}")
+
+    year_counts = Counter(int(l.get("year")) for l in laws if l.get("year") not in (None, ""))
+    if year_counts:
+        ys = dict(sorted(year_counts.items()))
+        fig_year = px.line(
+            x=list(ys.keys()), y=list(ys.values()),
+            title="Objective trend: laws by year (filtered scope)",
+            labels={"x": "Year", "y": "Count"},
+        )
+        st.plotly_chart(fig_year, width='stretch')
+
+    status_counts = Counter((l.get("status") or "unknown") for l in laws)
+    fig_status = px.bar(
+        x=list(status_counts.keys()), y=list(status_counts.values()),
+        title="Objective status composition",
+        labels={"x": "Status", "y": "Count"},
+    )
+    st.plotly_chart(fig_status, width='stretch')
 
 
 def page_law_detail():
@@ -1102,6 +1250,10 @@ def page_law_detail():
 def page_citations():
     st.header("\U0001f517 Citation Network")
     db = load_db()
+    all_laws = _get_laws()
+    filtered_laws = _apply_global_filters(all_laws)
+    allowed_urns = set(l.get("urn") for l in filtered_laws if l.get("urn"))
+    _render_filter_summary(len(filtered_laws), len(all_laws))
 
     if db:
         st.subheader("Most Cited Laws")
@@ -1113,6 +1265,8 @@ def page_citations():
                 "ORDER BY m.citation_count_incoming DESC LIMIT 25"
             ).fetchall()
             if top:
+                if allowed_urns:
+                    top = [r for r in top if r["urn"] in allowed_urns]
                 df = pd.DataFrame([dict(r) for r in top])
                 df.columns = ["URN", "Title", "Year", "Cited By"]
                 df["Title"] = df["Title"].str[:50]
@@ -1191,17 +1345,29 @@ def page_citations():
 def page_domains():
     st.header("\U0001f3db Legal Domains")
     db = load_db()
+    all_laws = _get_laws()
+    filtered_laws = _apply_global_filters(all_laws)
+    allowed_urns = set(l.get("urn") for l in filtered_laws if l.get("urn"))
+    _render_filter_summary(len(filtered_laws), len(all_laws))
     if not db:
         st.info("Database required for domain analysis.")
         return
 
     try:
-        domains = db.conn.execute("""
-            SELECT domain_cluster, COUNT(*) as cnt
-            FROM law_metadata
-            WHERE domain_cluster IS NOT NULL AND domain_cluster != ''
-            GROUP BY domain_cluster ORDER BY cnt DESC
-        """).fetchall()
+        domain_rows = db.conn.execute(
+            """
+            SELECT m.domain_cluster, l.urn
+            FROM law_metadata m
+            JOIN laws l ON l.urn = m.urn
+            WHERE m.domain_cluster IS NOT NULL AND m.domain_cluster != ''
+            """
+        ).fetchall()
+        counts = {}
+        for r in domain_rows:
+            if allowed_urns and r[1] not in allowed_urns:
+                continue
+            counts[r[0]] = counts.get(r[0], 0) + 1
+        domains = sorted(counts.items(), key=lambda x: x[1], reverse=True)
     except Exception:
         st.info("Domain data not available.")
         return
@@ -1232,6 +1398,8 @@ def page_domains():
             ORDER BY l.importance_score DESC NULLS LAST
             LIMIT 50
         """, (selected_domain,)).fetchall()
+        if allowed_urns:
+            laws_in_domain = [r for r in laws_in_domain if r["urn"] in allowed_urns]
         if laws_in_domain:
             df = pd.DataFrame([dict(r) for r in laws_in_domain])
             df.columns = ["URN", "Title", "Year", "Type", "Importance"]
@@ -1357,6 +1525,9 @@ def page_fiscal_status_quo():
         return
 
     snap = _get_fiscal_status_snapshot(db_path)
+    all_laws = _get_laws()
+    filtered_laws = _apply_global_filters(all_laws)
+    _render_filter_summary(len(filtered_laws), len(all_laws))
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("In force laws", f"{snap['total_in_force']:,}")
@@ -2034,8 +2205,12 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 # ─────────────────────────────────────────────────────────────────
 
 def main():
+    all_laws = _get_laws()
+    _init_global_filters(all_laws)
+
     pages = {
         "📊 Dashboard": page_dashboard,
+        "📈 Unified Analysis": page_unified_analysis,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
         "📋 Browse": page_browse,
@@ -2068,6 +2243,25 @@ def main():
         pending_count = len(_monitor_state["pending_changes"])
     if pending_count > 0:
         st.sidebar.warning(f"🔔 {pending_count} API change(s) detected!")
+
+    st.sidebar.divider()
+
+    # Global cross-tab analysis filters
+    st.sidebar.write("### Global Analysis Filters")
+    all_types = st.session_state.get("gf_all_types", [])
+    all_statuses = st.session_state.get("gf_all_statuses", [])
+    yb = st.session_state.get("gf_year_bounds", (1800, datetime.now().year))
+
+    st.sidebar.multiselect("Types", options=all_types, key="gf_types")
+    st.sidebar.multiselect("Statuses", options=all_statuses, key="gf_statuses")
+    st.sidebar.slider("Year range", min_value=int(yb[0]), max_value=int(yb[1]), key="gf_year_range")
+    st.sidebar.text_input("Keyword", key="gf_keyword", placeholder="title/urn/type")
+    if st.sidebar.button("Reset filters"):
+        st.session_state["gf_types"] = list(all_types)
+        st.session_state["gf_statuses"] = list(all_statuses)
+        st.session_state["gf_year_range"] = (int(yb[0]), int(yb[1]))
+        st.session_state["gf_keyword"] = ""
+        st.rerun()
 
     st.sidebar.divider()
 
