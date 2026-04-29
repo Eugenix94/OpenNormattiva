@@ -310,7 +310,7 @@ class LawDatabase:
             results = self.conn.execute('''
                 SELECT 
                     l.urn, l.title, l.type, l.year, l.date,
-                    l.article_count, l.text_length, l.importance_score,
+                    l.status, l.article_count, l.text_length, l.importance_score,
                     rank * (-1) as relevance_score,
                     snippet(laws_fts, 3, '<b>', '</b>', '...', 40) as snippet
                 FROM laws_fts f
@@ -340,7 +340,7 @@ class LawDatabase:
         """Fallback LIKE search when FTS fails."""
         pattern = f'%{query}%'
         results = self.conn.execute('''
-            SELECT urn, title, type, year, date, article_count, 
+            SELECT urn, title, type, year, date, status, article_count, 
                    text_length, importance_score, 0.0 as relevance_score,
                    '' as snippet
             FROM laws

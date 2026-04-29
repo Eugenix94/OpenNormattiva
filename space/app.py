@@ -14,9 +14,10 @@ Pages:
   4. Law Detail        - full text, citations, graph
   5. Citations         - network explorer
   6. Domains           - legal domain analysis
-  7. Notifications     - API change detection (read-only)
-  8. Update Log        - manual update history
-  9. Export            - CSV, JSON, JSONL downloads
+    7. Fiscal Lab        - taxes registry + citizen simulation
+    8. Notifications     - API change detection (read-only)
+    9. Update Log        - manual update history
+    10. Export           - CSV, JSON, JSONL downloads
 """
 
 import streamlit as st
@@ -33,6 +34,7 @@ from collections import Counter
 import logging
 import threading
 import math
+import re
 
 # Setup paths for imports
 _app_dir = Path(__file__).parent
@@ -42,6 +44,165 @@ sys.path.insert(0, str(_app_dir))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
+
+STATUS_ALIASES = {
+    "in_force": "in_force",
+    "vigente": "in_force",
+    "v": "in_force",
+    "abrogated": "abrogated",
+    "abrogato": "abrogated",
+    "abrogata": "abrogated",
+    "a": "abrogated",
+}
+
+TAX_KEYWORDS = {
+    "IVA": ["iva", "imposta sul valore aggiunto"],
+    "IRPEF": ["irpef", "imposta sul reddito delle persone fisiche"],
+    "IRES": ["ires", "imposta sul reddito delle societa", "imposta sul reddito delle società"],
+    "IMU": ["imu", "imposta municipale propria"],
+    "TARI": ["tari", "tassa sui rifiuti"],
+    "TASI": ["tasi", "tributo per i servizi indivisibili"],
+    "Bollo": ["imposta di bollo", "bollo auto", "bollo"],
+    "Registro": ["imposta di registro"],
+    "Accise": ["accisa", "accise"],
+    "Canone RAI": ["canone rai", "canone televisivo"],
+    "Contributi Previdenziali": ["contributi previdenziali", "contributo inps", "inps"],
+    "Addizionale Regionale": ["addizionale regionale"],
+    "Addizionale Comunale": ["addizionale comunale"],
+    "Imposta di Successione": ["imposta sulle successioni", "imposta di successione"],
+    "Imposta Ipotecaria/Catastale": ["imposta ipotecaria", "imposta catastale"],
+}
+
+TAX_CONTEXT = {
+    "IVA": "Colpisce consumi quotidiani: spesa, beni e servizi. Aliquote ridotte su beni essenziali.",
+    "IRPEF": "Tassa principale sul reddito delle persone fisiche, applicata per scaglioni.",
+    "IRES": "Imposta sul reddito delle societa; incide sui prezzi finali tramite costi d'impresa.",
+    "IMU": "Imposta locale sugli immobili diversi dall'abitazione principale (con eccezioni).",
+    "TARI": "Copre i costi del servizio rifiuti del Comune.",
+    "TASI": "Tributo locale sui servizi comunali indivisibili (storicamente variabile).",
+    "Bollo": "Imposta su atti/documenti e, in casi specifici, veicoli.",
+    "Registro": "Imposta su registrazione di atti (es. locazioni, compravendite).",
+    "Accise": "Imposte indirette su prodotti specifici (es. carburanti, energia, tabacchi).",
+    "Canone RAI": "Contributo destinato al servizio radiotelevisivo pubblico.",
+    "Contributi Previdenziali": "Prelievo finalizzato a pensioni e tutele previdenziali.",
+    "Addizionale Regionale": "Quota aggiuntiva regionale sul reddito personale.",
+    "Addizionale Comunale": "Quota aggiuntiva comunale sul reddito personale.",
+    "Imposta di Successione": "Imposta sul trasferimento di patrimonio per successione.",
+    "Imposta Ipotecaria/Catastale": "Imposte collegate a formalita immobiliari e catasto.",
+}
+
+
+def _normalize_status(raw_status: str | None) -> str:
+    if not raw_status:
+        return "unknown"
+    key = str(raw_status).strip().lower()
+    return STATUS_ALIASES.get(key, key)
+
+
+def _status_label(raw_status: str | None) -> str:
+    norm = _normalize_status(raw_status)
+    if norm == "in_force":
+        return "⚡ In vigore"
+    if norm == "abrogated":
+        return "🚫 Abrogato"
+    return f"❓ {raw_status or 'N/A'}"
+
+
+def _full_laws_query() -> str:
+    # No hard cap by default: load full dataset for complete visualization.
+    return (
+        "SELECT urn, title, type, date, year, status, article_count, "
+        "text_length, importance_score FROM laws ORDER BY year DESC"
+    )
+
+
+def _extract_euro_amounts(text: str) -> List[float]:
+    if not text:
+        return []
+    matches = re.findall(r"(?:€\s*|eur\s*)(\d{1,3}(?:[\.,]\d{3})*(?:[\.,]\d{1,2})?|\d+(?:[\.,]\d{1,2})?)", text.lower())
+    values = []
+    for m in matches:
+        val = m.replace('.', '').replace(',', '.')
+        try:
+            values.append(float(val))
+        except Exception:
+            continue
+    return values
+
+
+def _extract_tax_labels(text: str) -> List[str]:
+    txt = (text or "").lower()
+    labels = []
+    for label, kws in TAX_KEYWORDS.items():
+        if any(kw in txt for kw in kws):
+            labels.append(label)
+    return labels
+
+
+def _short_context(text: str, tax_label: str) -> str:
+    txt = (text or "")
+    low = txt.lower()
+    for kw in TAX_KEYWORDS.get(tax_label, []):
+        idx = low.find(kw)
+        if idx >= 0:
+            start = max(0, idx - 80)
+            end = min(len(txt), idx + 220)
+            excerpt = txt[start:end].replace("\n", " ").strip()
+            return excerpt[:280]
+    return ""
+
+
+@st.cache_data(ttl=7200, show_spinner="Building fiscal registry from full dataset...")
+def _get_fiscal_registry(db_path: str):
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    where_terms = []
+    params = []
+    for kws in TAX_KEYWORDS.values():
+        for kw in kws:
+            where_terms.append("LOWER(text) LIKE ?")
+            params.append(f"%{kw}%")
+    sql = (
+        "SELECT urn, title, type, year, date, status, text "
+        "FROM laws WHERE " + " OR ".join(where_terms) + " ORDER BY year DESC"
+    )
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    conn.close()
+
+    per_law = []
+    tax_rows = []
+    for r in rows:
+        item = dict(r)
+        labels = _extract_tax_labels(item.get("text", ""))
+        if not labels:
+            continue
+        nstatus = _normalize_status(item.get("status"))
+        amounts = _extract_euro_amounts(item.get("text", ""))
+        per_law.append({
+            "urn": item.get("urn"),
+            "title": item.get("title"),
+            "type": item.get("type"),
+            "year": item.get("year"),
+            "date": item.get("date"),
+            "status": nstatus,
+            "taxes": labels,
+            "amount_mentions": len(amounts),
+            "max_amount_mentioned": max(amounts) if amounts else None,
+        })
+        for lab in labels:
+            tax_rows.append({
+                "tax": lab,
+                "urn": item.get("urn"),
+                "title": item.get("title"),
+                "year": item.get("year"),
+                "status": nstatus,
+                "context": _short_context(item.get("text", ""), lab),
+                "amount_mentions": len(amounts),
+            })
+
+    return per_law, tax_rows
 
 # Database connection (static - pre-built DB ships with the Space)
 
@@ -272,8 +433,7 @@ def _get_laws_cached(db_path: str):
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT urn, title, type, date, year, status, article_count, "
-            "text_length, importance_score FROM laws ORDER BY year DESC LIMIT 100000"
+            _full_laws_query()
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -292,106 +452,12 @@ def _get_laws():
                 return _get_laws_cached(db_path)
             # Fallback: direct query without cache
             rows = db.conn.execute(
-                "SELECT urn, title, type, date, year, status, article_count, "
-                "text_length, importance_score FROM laws ORDER BY year DESC LIMIT 100000"
+                _full_laws_query()
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
             logger.error(f"Error loading laws from DB: {e}")
     return load_laws_from_jsonl()
-
-
-def _init_global_filters(laws):
-    """Initialize shared cross-tab filters once per session."""
-    years = [int(l.get("year")) for l in laws if l.get("year") not in (None, "")]
-    types = sorted(set((l.get("type") or "unknown") for l in laws))
-    statuses = sorted(set((l.get("status") or "unknown") for l in laws))
-
-    min_year = min(years) if years else 1800
-    max_year = max(years) if years else datetime.now().year
-
-    st.session_state.setdefault("gf_all_types", types)
-    st.session_state.setdefault("gf_all_statuses", statuses)
-    st.session_state.setdefault("gf_year_bounds", (min_year, max_year))
-
-    st.session_state.setdefault("gf_types", types)
-    st.session_state.setdefault("gf_statuses", statuses)
-    st.session_state.setdefault("gf_year_range", (min_year, max_year))
-    st.session_state.setdefault("gf_keyword", "")
-
-
-def _apply_global_filters(laws):
-    """Apply shared sidebar filters to law lists."""
-    selected_types = set(st.session_state.get("gf_types", []))
-    selected_statuses = set(st.session_state.get("gf_statuses", []))
-    y0, y1 = st.session_state.get("gf_year_range", st.session_state.get("gf_year_bounds", (1800, 2100)))
-    keyword = (st.session_state.get("gf_keyword") or "").strip().lower()
-
-    out = []
-    for l in laws:
-        typ = (l.get("type") or "unknown")
-        status = (l.get("status") or "unknown")
-        year = l.get("year")
-
-        if selected_types and typ not in selected_types:
-            continue
-        if selected_statuses and status not in selected_statuses:
-            continue
-        if year not in (None, ""):
-            try:
-                y = int(year)
-                if y < y0 or y > y1:
-                    continue
-            except Exception:
-                pass
-
-        if keyword:
-            blob = " ".join([
-                str(l.get("title") or ""),
-                str(l.get("urn") or ""),
-                str(l.get("type") or ""),
-                str(l.get("status") or ""),
-            ]).lower()
-            if keyword not in blob:
-                continue
-
-        out.append(l)
-    return out
-
-
-def _render_filter_summary(filtered_count: int, total_count: int):
-    if total_count <= 0:
-        return
-    if filtered_count == total_count:
-        st.caption(f"Global view: {filtered_count:,}/{total_count:,} laws")
-    else:
-        st.info(f"Global filters active: showing {filtered_count:,} of {total_count:,} laws")
-
-
-def _objective_results(db, filtered_laws):
-    """Compute objective cross-domain indicators on the current filtered scope."""
-    total = len(filtered_laws)
-    in_force = sum(1 for l in filtered_laws if (l.get("status") == "in_force"))
-    abrog = sum(1 for l in filtered_laws if (l.get("status") == "abrogated"))
-    avg_articles = (sum(int(l.get("article_count") or 0) for l in filtered_laws) / total) if total else 0
-    avg_text = (sum(int(l.get("text_length") or 0) for l in filtered_laws) / total) if total else 0
-
-    citation_total = 0
-    if db:
-        try:
-            citation_total = db.conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
-        except Exception:
-            citation_total = 0
-
-    return {
-        "total": total,
-        "in_force": in_force,
-        "abrogated": abrog,
-        "abrogation_rate": (abrog / total * 100.0) if total else 0.0,
-        "avg_articles": avg_articles,
-        "avg_text": avg_text,
-        "citations_total": citation_total,
-    }
 
 
 def _render_graph_plotly(nodes, edges, title="Citation Graph"):
@@ -496,218 +562,12 @@ def _record_update_log(db, action, description, laws_before=None, laws_after=Non
         logger.warning(f"Failed to record update log: {e}")
 
 
-def _extract_euro_amounts(text: str) -> list[float]:
-    """Extract approximate euro amounts from legal text.
-
-    Supports values like:
-    - 1.234.567,89 euro
-    - 250 milioni di euro
-    - 3,5 miliardi euro
-    """
-    if not text:
-        return []
-
-    import re
-
-    patt = re.compile(
-        r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:,\d+)?)\s*"
-        r"(miliardi?|milioni?|mila)?\s*(?:di\s+)?euro",
-        re.IGNORECASE,
-    )
-    mult = {
-        None: 1,
-        "mila": 1_000,
-        "milione": 1_000_000,
-        "milioni": 1_000_000,
-        "miliardo": 1_000_000_000,
-        "miliardi": 1_000_000_000,
-    }
-
-    out: list[float] = []
-    for raw_n, raw_u in patt.findall(text):
-        n = raw_n.replace(".", "").replace(",", ".")
-        try:
-            val = float(n)
-        except ValueError:
-            continue
-        unit = (raw_u or "").lower() or None
-        out.append(val * mult.get(unit, 1))
-    return out
-
-
-@st.cache_data(ttl=21600, show_spinner="Computing fiscal and status-quo analytics...")
-def _get_fiscal_status_snapshot(db_path: str) -> dict:
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-
-    try:
-        status_rows = conn.execute(
-            "SELECT status, COUNT(*) AS cnt FROM laws GROUP BY status ORDER BY cnt DESC"
-        ).fetchall()
-        status_counts = {r["status"] or "unknown": r["cnt"] for r in status_rows}
-
-        total_in_force = int(status_counts.get("in_force", 0))
-        total_abrogated = int(status_counts.get("abrogated", 0))
-
-        has_variants = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='law_variants'"
-        ).fetchone() is not None
-
-        correlated = None
-        if has_variants:
-            correlated_row = conn.execute(
-                """
-                SELECT
-                    SUM(CASE WHEN l.status='in_force'
-                         AND EXISTS(SELECT 1 FROM law_variants v WHERE v.urn=l.urn AND v.variant='vigente')
-                         THEN 1 ELSE 0 END) AS in_force_with_vigente,
-                    SUM(CASE WHEN l.status='abrogated'
-                         AND EXISTS(SELECT 1 FROM law_variants v WHERE v.urn=l.urn AND v.status='abrogated')
-                         THEN 1 ELSE 0 END) AS abrogated_with_variant_evidence,
-                    SUM(CASE WHEN l.status='in_force'
-                         AND EXISTS(SELECT 1 FROM law_variants v WHERE v.urn=l.urn AND v.variant='originale' AND v.status='abrogated')
-                         THEN 1 ELSE 0 END) AS potential_status_conflicts
-                FROM laws l
-                """
-            ).fetchone()
-            correlated = dict(correlated_row) if correlated_row else None
-
-        bilancio_rows = conn.execute(
-            """
-            SELECT urn, title, year, status, type, text_length, text
-            FROM laws
-            WHERE LOWER(title) LIKE '%bilancio%'
-            ORDER BY year DESC, date DESC
-            LIMIT 160
-            """
-        ).fetchall()
-
-        bilancio_series = []
-        bilancio_total_in_force = 0.0
-        bilancio_mentions_in_force = 0
-        bilancio_in_force_count = 0
-        bilancio_table = []
-
-        for r in bilancio_rows:
-            row = dict(r)
-            amounts = _extract_euro_amounts(row.get("text") or "")
-            amount_sum = float(sum(amounts))
-            mention_count = len(amounts)
-
-            if row.get("status") == "in_force":
-                bilancio_total_in_force += amount_sum
-                bilancio_mentions_in_force += mention_count
-                bilancio_in_force_count += 1
-
-            yr = row.get("year")
-            bilancio_series.append({
-                "year": int(yr) if yr not in (None, "") else None,
-                "status": row.get("status") or "unknown",
-                "euro_mentions_count": mention_count,
-                "euro_mentions_sum": amount_sum,
-            })
-            bilancio_table.append({
-                "URN": row.get("urn"),
-                "Title": (row.get("title") or "")[:120],
-                "Year": row.get("year"),
-                "Status": row.get("status"),
-                "Euro Mentions": mention_count,
-                "Mentioned Amount (EUR)": round(amount_sum, 2),
-                "Text Length": row.get("text_length", 0),
-            })
-
-        fiscal_rows = conn.execute(
-            """
-            SELECT urn, title, year, status, text
-            FROM laws
-            WHERE status='in_force'
-              AND (
-                LOWER(title) LIKE '%impost%'
-                OR LOWER(title) LIKE '%accis%'
-                OR LOWER(title) LIKE '%tribut%'
-                OR LOWER(title) LIKE '%tass%'
-                OR LOWER(title) LIKE '%bilancio%'
-                OR LOWER(title) LIKE '%fiscal%'
-              )
-            ORDER BY year DESC
-            LIMIT 4000
-            """
-        ).fetchall()
-
-        term_patterns = {
-            "imposta": "impost",
-            "tassa": "tass",
-            "tributo": "tribut",
-            "accisa": "accis",
-            "detrazione": "detraz",
-            "credito_imposta": "credito d'imposta",
-        }
-        laws_by_term = {k: 0 for k in term_patterns}
-        mentions_by_term = {k: 0 for k in term_patterns}
-
-        fiscal_total_amount = 0.0
-        fiscal_total_mentions = 0
-        fiscal_sample = []
-
-        for r in fiscal_rows:
-            row = dict(r)
-            txt = ((row.get("title") or "") + " " + (row.get("text") or "")).lower()
-            txt_short = txt[:120000]
-
-            matched_any = False
-            for label, needle in term_patterns.items():
-                c = txt_short.count(needle)
-                if c > 0:
-                    matched_any = True
-                    laws_by_term[label] += 1
-                    mentions_by_term[label] += c
-
-            amounts = _extract_euro_amounts(row.get("text") or "")
-            fiscal_total_amount += float(sum(amounts))
-            fiscal_total_mentions += len(amounts)
-
-            if matched_any and len(fiscal_sample) < 300:
-                fiscal_sample.append({
-                    "URN": row.get("urn"),
-                    "Title": (row.get("title") or "")[:120],
-                    "Year": row.get("year"),
-                    "Status": row.get("status"),
-                    "Euro Mentions": len(amounts),
-                    "Mentioned Amount (EUR)": round(sum(amounts), 2),
-                })
-
-        return {
-            "status_counts": status_counts,
-            "total_in_force": total_in_force,
-            "total_abrogated": total_abrogated,
-            "has_variants": has_variants,
-            "correlated": correlated,
-            "bilancio_in_force_count": bilancio_in_force_count,
-            "bilancio_total_in_force": bilancio_total_in_force,
-            "bilancio_mentions_in_force": bilancio_mentions_in_force,
-            "bilancio_series": bilancio_series,
-            "bilancio_table": bilancio_table,
-            "fiscal_in_force_count": len(fiscal_rows),
-            "fiscal_total_amount": fiscal_total_amount,
-            "fiscal_total_mentions": fiscal_total_mentions,
-            "laws_by_term": laws_by_term,
-            "mentions_by_term": mentions_by_term,
-            "fiscal_sample": fiscal_sample,
-        }
-    finally:
-        conn.close()
-
-
 # PAGES
 
 def page_dashboard():
     st.header("\U0001f4ca Dashboard")
     db = load_db()
-    all_laws = _get_laws()
-    laws = _apply_global_filters(all_laws)
-    _render_filter_summary(len(laws), len(all_laws))
+    laws = _get_laws()
     
     if not laws:
         st.error(
@@ -739,6 +599,14 @@ def page_dashboard():
     c3.metric("Year Range", f"{min(years)}-{max(years)}" if years else "N/A")
     total_articles = sum(l.get("article_count", 0) for l in laws)
     c4.metric("Total Articles", f"{total_articles:,}")
+
+    norm_statuses = [_normalize_status(l.get("status")) for l in laws]
+    in_force_count = sum(1 for s in norm_statuses if s == "in_force")
+    abrogated_count = sum(1 for s in norm_statuses if s == "abrogated")
+    sc1, sc2 = st.columns(2)
+    sc1.metric("In vigore", f"{in_force_count:,}")
+    sc2.metric("Abrogati", f"{abrogated_count:,}")
+    st.caption("Status harmonization active: vigente/in_force and abrogato/abrogated are unified.")
 
     # DB info
     if db:
@@ -806,10 +674,6 @@ def page_dashboard():
 def page_search():
     st.header("\U0001f50d Advanced Search")
     db = load_db()
-    all_laws = _get_laws()
-    filtered_scope = _apply_global_filters(all_laws)
-    allowed_urns = set(l.get("urn") for l in filtered_scope if l.get("urn"))
-    _render_filter_summary(len(filtered_scope), len(all_laws))
 
     query = st.text_input(
         "Search Italian law (full-text with BM25 ranking):",
@@ -834,8 +698,6 @@ def page_search():
     if db:
         try:
             results = db.search_fts(query, limit=50)
-            if allowed_urns:
-                results = [r for r in results if r.get("urn") in allowed_urns]
             st.write(f"**Found {len(results)} results** (ranked by relevance)")
             for r in results:
                 year = r.get("year", "?")
@@ -846,15 +708,15 @@ def page_search():
                 score_str = ""
                 if r.get("rank"):
                     score_str = f" · Score: {r['rank']:.2f}"
-                status = r.get("status", "in_force")
-                status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
+                    status = _normalize_status(r.get("status", "in_force"))
+                    status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
                 with st.expander(f"{r.get('title', 'Untitled')} ({year}){score_str}{status_badge}"):
                     c1, c2 = st.columns([1, 3])
                     with c1:
                         st.write(f"**URN**: `{r.get('urn', 'N/A')}`")
                         st.write(f"**Type**: {r.get('type', 'N/A')}")
                         st.write(f"**Date**: {r.get('date', 'N/A')}")
-                        st.write(f"**Status**: {'⚡ In vigore' if status == 'in_force' else '🚫 Abrogato'}")
+                        st.write(f"**Status**: {_status_label(status)}")
                         if r.get("importance_score"):
                             st.write(f"**Importance**: {r['importance_score']:.4f}")
                     with c2:
@@ -869,7 +731,6 @@ def page_search():
             st.error(f"Search error: {e}")
     else:
         laws = load_laws_from_jsonl()
-        laws = [l for l in laws if l.get("urn") in allowed_urns] if allowed_urns else laws
         q = query.lower()
         results = [l for l in laws
                    if q in l.get("title", "").lower()
@@ -887,9 +748,7 @@ def page_search():
 
 def page_browse():
     st.header("\U0001f4cb Browse Laws")
-    all_laws = _get_laws()
-    laws = _apply_global_filters(all_laws)
-    _render_filter_summary(len(laws), len(all_laws))
+    laws = _get_laws()
     if not laws:
         st.info("No data loaded.")
         return
@@ -902,7 +761,7 @@ def page_browse():
         all_years = sorted(set(l.get("year") for l in laws if l.get("year")))
         sel_year = st.selectbox("Year", ["All"] + all_years)
     with c3:
-        all_statuses = sorted(set(l.get("status", "vigente") for l in laws))
+        all_statuses = sorted(set(_normalize_status(l.get("status", "vigente")) for l in laws))
         sel_status = st.selectbox("Status", ["All"] + all_statuses)
     with c4:
         sort_by = st.selectbox("Sort by", [
@@ -915,7 +774,7 @@ def page_browse():
     if sel_year != "All":
         filtered = [l for l in filtered if l.get("year") == sel_year]
     if sel_status != "All":
-        filtered = [l for l in filtered if l.get("status") == sel_status]
+        filtered = [l for l in filtered if _normalize_status(l.get("status")) == sel_status]
 
     if sort_by == "Year (newest)":
         filtered.sort(key=lambda x: x.get("year", 0), reverse=True)
@@ -946,7 +805,7 @@ def page_browse():
                 st.write(f"**URN**: `{law.get('urn', 'N/A')}`")
                 st.write(f"**Type**: {law.get('type', 'N/A')}")
                 st.write(f"**Date**: {law.get('date', 'N/A')}")
-                st.write(f"**Status**: {law.get('status', 'N/A')}")
+                st.write(f"**Status**: {_status_label(law.get('status'))}")
                 st.write(f"**Articles**: {law.get('article_count', 0)}")
                 if imp:
                     st.write(f"**Importance**: {imp:.6f}")
@@ -967,50 +826,6 @@ def page_browse():
                            else "No text")
                 st.text_area("Text preview", txt, height=250, disabled=True,
                              key=f"browse_{law.get('urn', start)}")
-
-
-def page_unified_analysis():
-    st.header("📈 Unified Analysis")
-    st.caption("Objective cross-tab synthesis on the exact filtered dataset scope.")
-
-    db = load_db()
-    all_laws = _get_laws()
-    laws = _apply_global_filters(all_laws)
-    _render_filter_summary(len(laws), len(all_laws))
-
-    if not laws:
-        st.info("No laws in current filter scope.")
-        return
-
-    obj = _objective_results(db, laws)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Laws in scope", f"{obj['total']:,}")
-    c2.metric("In force", f"{obj['in_force']:,}")
-    c3.metric("Abrogated", f"{obj['abrogated']:,}")
-    c4.metric("Abrogation rate", f"{obj['abrogation_rate']:.2f}%")
-
-    c5, c6, c7 = st.columns(3)
-    c5.metric("Avg articles/law", f"{obj['avg_articles']:.1f}")
-    c6.metric("Avg text length", f"{obj['avg_text']:.0f} chars")
-    c7.metric("Citations in DB", f"{obj['citations_total']:,}")
-
-    year_counts = Counter(int(l.get("year")) for l in laws if l.get("year") not in (None, ""))
-    if year_counts:
-        ys = dict(sorted(year_counts.items()))
-        fig_year = px.line(
-            x=list(ys.keys()), y=list(ys.values()),
-            title="Objective trend: laws by year (filtered scope)",
-            labels={"x": "Year", "y": "Count"},
-        )
-        st.plotly_chart(fig_year, width='stretch')
-
-    status_counts = Counter((l.get("status") or "unknown") for l in laws)
-    fig_status = px.bar(
-        x=list(status_counts.keys()), y=list(status_counts.values()),
-        title="Objective status composition",
-        labels={"x": "Status", "y": "Count"},
-    )
-    st.plotly_chart(fig_status, width='stretch')
 
 
 def page_law_detail():
@@ -1068,7 +883,7 @@ def page_law_detail():
             st.subheader("Metadata")
             st.write(f"**URN**: `{law.get('urn')}`")
             st.write(f"**Date**: {law.get('date', 'N/A')}")
-            st.write(f"**Status**: {law.get('status', 'N/A')}")
+            st.write(f"**Status**: {_status_label(law.get('status'))}")
             st.write(f"**Characters**: {law.get('text_length', 0):,}")
             
             meta = db.conn.execute(
@@ -1250,10 +1065,6 @@ def page_law_detail():
 def page_citations():
     st.header("\U0001f517 Citation Network")
     db = load_db()
-    all_laws = _get_laws()
-    filtered_laws = _apply_global_filters(all_laws)
-    allowed_urns = set(l.get("urn") for l in filtered_laws if l.get("urn"))
-    _render_filter_summary(len(filtered_laws), len(all_laws))
 
     if db:
         st.subheader("Most Cited Laws")
@@ -1265,8 +1076,6 @@ def page_citations():
                 "ORDER BY m.citation_count_incoming DESC LIMIT 25"
             ).fetchall()
             if top:
-                if allowed_urns:
-                    top = [r for r in top if r["urn"] in allowed_urns]
                 df = pd.DataFrame([dict(r) for r in top])
                 df.columns = ["URN", "Title", "Year", "Cited By"]
                 df["Title"] = df["Title"].str[:50]
@@ -1345,29 +1154,17 @@ def page_citations():
 def page_domains():
     st.header("\U0001f3db Legal Domains")
     db = load_db()
-    all_laws = _get_laws()
-    filtered_laws = _apply_global_filters(all_laws)
-    allowed_urns = set(l.get("urn") for l in filtered_laws if l.get("urn"))
-    _render_filter_summary(len(filtered_laws), len(all_laws))
     if not db:
         st.info("Database required for domain analysis.")
         return
 
     try:
-        domain_rows = db.conn.execute(
-            """
-            SELECT m.domain_cluster, l.urn
-            FROM law_metadata m
-            JOIN laws l ON l.urn = m.urn
-            WHERE m.domain_cluster IS NOT NULL AND m.domain_cluster != ''
-            """
-        ).fetchall()
-        counts = {}
-        for r in domain_rows:
-            if allowed_urns and r[1] not in allowed_urns:
-                continue
-            counts[r[0]] = counts.get(r[0], 0) + 1
-        domains = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        domains = db.conn.execute("""
+            SELECT domain_cluster, COUNT(*) as cnt
+            FROM law_metadata
+            WHERE domain_cluster IS NOT NULL AND domain_cluster != ''
+            GROUP BY domain_cluster ORDER BY cnt DESC
+        """).fetchall()
     except Exception:
         st.info("Domain data not available.")
         return
@@ -1398,8 +1195,6 @@ def page_domains():
             ORDER BY l.importance_score DESC NULLS LAST
             LIMIT 50
         """, (selected_domain,)).fetchall()
-        if allowed_urns:
-            laws_in_domain = [r for r in laws_in_domain if r["urn"] in allowed_urns]
         if laws_in_domain:
             df = pd.DataFrame([dict(r) for r in laws_in_domain])
             df.columns = ["URN", "Title", "Year", "Type", "Importance"]
@@ -1507,121 +1302,125 @@ This keeps you in full control of what enters the dataset.
     """)
 
 
-def page_fiscal_status_quo():
-    st.header("💶 Fiscal Status Quo")
+def page_fiscal_citizen_tax_lab():
+    st.header("💶 Fiscal Burden Lab (Experimental)")
     st.caption(
-        "Correlates vigente/abrogated state with fiscal laws and extracts quantitative "
-        "signals from legge di bilancio and tax-policy texts."
+        "Full-dataset fiscal scan: extracts tax-related laws (vigente + abrogato harmonized), "
+        "surfaces citizen context, and provides a conservative minimum-tax simulator."
     )
 
     db = load_db()
     if not db:
-        st.info("Database required for fiscal analytics.")
+        st.info("Database required for fiscal analysis.")
         return
 
     db_path = str(db.db_path) if hasattr(db, "db_path") else ""
     if not db_path:
-        st.info("Database path not available for fiscal analytics.")
+        st.info("Database path unavailable for fiscal analysis.")
         return
 
-    snap = _get_fiscal_status_snapshot(db_path)
-    all_laws = _get_laws()
-    filtered_laws = _apply_global_filters(all_laws)
-    _render_filter_summary(len(filtered_laws), len(all_laws))
+    per_law, tax_rows = _get_fiscal_registry(db_path)
+    if not tax_rows:
+        st.info("No fiscal/tax references detected in the current dataset.")
+        return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("In force laws", f"{snap['total_in_force']:,}")
-    c2.metric("Abrogated laws", f"{snap['total_abrogated']:,}")
-    c3.metric("Bilancio laws (in force)", f"{snap['bilancio_in_force_count']:,}")
-    c4.metric("Fiscal laws screened", f"{snap['fiscal_in_force_count']:,}")
+    tax_df = pd.DataFrame(tax_rows)
+    law_df = pd.DataFrame(per_law)
 
-    tabs = st.tabs(["⚖️ Present-Day Correlation", "🏦 Legge di Bilancio", "🧾 Taxes & Excises in Force"])
+    t1, t2, t3 = st.tabs([
+        "📊 Registry Overview",
+        "🧾 Imposed Taxes Registry",
+        "🧮 Minimum Daily-Life Simulation",
+    ])
 
-    with tabs[0]:
-        st.subheader("Status correlation (vigente vs abrogated)")
-        status_df = pd.DataFrame(
-            [{"status": k, "count": v} for k, v in snap["status_counts"].items()]
+    with t1:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Fiscal Laws Found", f"{len(law_df):,}")
+        c2.metric("Tax Mentions", f"{len(tax_df):,}")
+        c3.metric("Unique Tax Types", tax_df["tax"].nunique())
+        c4.metric("In Vigore Laws", f"{(law_df['status'] == 'in_force').sum():,}")
+
+        status_tax = (
+            tax_df.groupby(["tax", "status"]).size().reset_index(name="mentions")
         )
-        if not status_df.empty:
-            fig_status = px.pie(status_df, names="status", values="count", title="Current status distribution")
-            st.plotly_chart(fig_status, width='stretch')
-            st.dataframe(status_df.sort_values("count", ascending=False), width='stretch', hide_index=True)
+        fig = px.bar(
+            status_tax,
+            x="tax",
+            y="mentions",
+            color="status",
+            title="Tax Mentions by Status (Harmonized)",
+            barmode="stack",
+            category_orders={"status": ["in_force", "abrogated", "unknown"]},
+        )
+        st.plotly_chart(fig, width='stretch')
 
-        if snap["has_variants"] and snap["correlated"]:
-            corr = snap["correlated"]
-            cc1, cc2, cc3 = st.columns(3)
-            cc1.metric("In-force with vigente evidence", f"{int(corr.get('in_force_with_vigente', 0)):,}")
-            cc2.metric("Abrogated with variant evidence", f"{int(corr.get('abrogated_with_variant_evidence', 0)):,}")
-            cc3.metric("Potential status conflicts", f"{int(corr.get('potential_status_conflicts', 0)):,}")
-            st.caption(
-                "Potential conflicts are laws marked in force in `laws` while a related originale variant is already "
-                "marked abrogated and should be reviewed."
-            )
-        else:
-            st.info(
-                "Variant-level correlation table (`law_variants`) is not available in this dataset build. "
-                "The present-day status view is based on `laws.status`."
-            )
+        st.subheader("Citizen Context by Tax")
+        context_rows = []
+        for tax_name in sorted(tax_df["tax"].unique()):
+            context_rows.append({
+                "Tax": tax_name,
+                "Citizen Context": TAX_CONTEXT.get(tax_name, "Contesto non classificato."),
+            })
+        st.dataframe(pd.DataFrame(context_rows), width='stretch', hide_index=True)
 
-    with tabs[1]:
-        st.subheader("Legge di bilancio quantitative extraction")
-        amount_billion = snap["bilancio_total_in_force"] / 1_000_000_000
-        b1, b2 = st.columns(2)
-        b1.metric("Mentioned amounts (EUR, in-force bilancio)", f"€ {amount_billion:,.2f}B")
-        b2.metric("Euro mentions (in-force bilancio)", f"{snap['bilancio_mentions_in_force']:,}")
+    with t2:
+        st.write("Full registry of taxes detected across the corpus (with harmonized status labels).")
+
+        agg = tax_df.groupby("tax").agg(
+            laws=("urn", "nunique"),
+            mentions=("tax", "count")
+        ).reset_index().sort_values(["laws", "mentions"], ascending=False)
+        st.dataframe(agg, width='stretch', hide_index=True)
+
+        sel_tax = st.selectbox("Inspect tax", sorted(tax_df["tax"].unique()))
+        sel_status = st.selectbox("Status filter", ["All", "in_force", "abrogated", "unknown"])
+
+        view = tax_df[tax_df["tax"] == sel_tax]
+        if sel_status != "All":
+            view = view[view["status"] == sel_status]
+        view = view.sort_values(["year", "title"], ascending=[False, True])
+
+        st.write(f"{len(view):,} law rows for {sel_tax}.")
+        st.dataframe(
+            view[["year", "status", "title", "urn", "context", "amount_mentions"]],
+            width='stretch',
+            hide_index=True,
+        )
+
+    with t3:
+        st.warning(
+            "Experimental estimator: values are conservative assumptions for citizen awareness, "
+            "not legal/tax advice."
+        )
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            annual_income = st.number_input("Annual gross income (€)", min_value=0.0, value=25000.0, step=500.0)
+            annual_essential_spend = st.number_input("Annual essential spending (€)", min_value=0.0, value=12000.0, step=250.0)
+            annual_fuel_liters = st.number_input("Annual fuel consumption (liters)", min_value=0.0, value=600.0, step=25.0)
+        with col_b:
+            min_irpef_rate = st.slider("Minimum IRPEF assumption (%)", 0.0, 43.0, 23.0, 0.5)
+            min_iva_rate = st.slider("Minimum IVA assumption (%)", 0.0, 22.0, 4.0, 0.5)
+            min_excise_per_liter = st.number_input("Minimum fuel excise assumption (€/liter)", min_value=0.0, value=0.10, step=0.01)
+
+        no_tax_area = 8500.0
+        taxable_income = max(0.0, annual_income - no_tax_area)
+        irpef_component = taxable_income * (min_irpef_rate / 100.0)
+        iva_component = annual_essential_spend * (min_iva_rate / 100.0)
+        excise_component = annual_fuel_liters * min_excise_per_liter
+        annual_min_tax = irpef_component + iva_component + excise_component
+        daily_min_tax = annual_min_tax / 365.0 if annual_min_tax else 0.0
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("IRPEF (min est.)", f"€ {irpef_component:,.2f}")
+        r2.metric("IVA (min est.)", f"€ {iva_component:,.2f}")
+        r3.metric("Accise (min est.)", f"€ {excise_component:,.2f}")
+        r4.metric("Daily minimum burden", f"€ {daily_min_tax:,.2f}")
+
         st.caption(
-            "Amounts are parsed from legal text mentions and should be interpreted as textual fiscal signals, "
-            "not certified accounting totals."
+            "Formula: max(Income - €8,500, 0) × IRPEF_min + Essential Spend × IVA_min + Fuel Liters × Excise_min. "
+            "Tune assumptions interactively to simulate policy sensitivity."
         )
-
-        series_df = pd.DataFrame(snap["bilancio_series"])
-        if not series_df.empty:
-            series_df = series_df[series_df["year"].notna()]
-            if not series_df.empty:
-                yearly = series_df.groupby("year", as_index=False).agg(
-                    euro_mentions_sum=("euro_mentions_sum", "sum"),
-                    euro_mentions_count=("euro_mentions_count", "sum"),
-                )
-                fig_year = px.bar(
-                    yearly,
-                    x="year",
-                    y="euro_mentions_sum",
-                    title="Bilancio: extracted amount mentions by year",
-                    labels={"euro_mentions_sum": "EUR mentioned", "year": "Year"},
-                )
-                st.plotly_chart(fig_year, width='stretch')
-                st.dataframe(yearly.sort_values("year", ascending=False), width='stretch', hide_index=True)
-
-        bilancio_df = pd.DataFrame(snap["bilancio_table"])
-        if not bilancio_df.empty:
-            st.write("Recent bilancio laws and extracted monetary signals")
-            st.dataframe(bilancio_df.head(80), width='stretch', hide_index=True)
-
-    with tabs[2]:
-        st.subheader("Taxes, imposts, excises and fiscal policy signals in force")
-        t1, t2 = st.columns(2)
-        t1.metric("Total parsed euro mentions (fiscal corpus)", f"{snap['fiscal_total_mentions']:,}")
-        t2.metric("Mentioned amounts (EUR, fiscal corpus)", f"€ {snap['fiscal_total_amount']/1_000_000_000:,.2f}B")
-
-        by_law_df = pd.DataFrame(
-            [{"term": k, "laws_in_force": v} for k, v in snap["laws_by_term"].items()]
-        )
-        mentions_df = pd.DataFrame(
-            [{"term": k, "mentions": v} for k, v in snap["mentions_by_term"].items()]
-        )
-        if not by_law_df.empty:
-            fig_terms = px.bar(by_law_df, x="term", y="laws_in_force", title="In-force laws by fiscal term")
-            st.plotly_chart(fig_terms, width='stretch')
-            st.dataframe(by_law_df.sort_values("laws_in_force", ascending=False), width='stretch', hide_index=True)
-
-        if not mentions_df.empty:
-            fig_mentions = px.bar(mentions_df, x="term", y="mentions", title="Term mentions in in-force fiscal laws")
-            st.plotly_chart(fig_mentions, width='stretch')
-
-        sample_df = pd.DataFrame(snap["fiscal_sample"])
-        if not sample_df.empty:
-            st.write("Sample of fiscal laws currently in force")
-            st.dataframe(sample_df.head(120), width='stretch', hide_index=True)
 
 
 def page_update_log():
@@ -2205,19 +2004,15 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 # ─────────────────────────────────────────────────────────────────
 
 def main():
-    all_laws = _get_laws()
-    _init_global_filters(all_laws)
-
     pages = {
         "📊 Dashboard": page_dashboard,
-        "📈 Unified Analysis": page_unified_analysis,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
         "📋 Browse": page_browse,
         "📖 Law Detail": page_law_detail,
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
-        "💶 Fiscal Status Quo": page_fiscal_status_quo,
+        "💶 Fiscal Burden Lab": page_fiscal_citizen_tax_lab,
         "🔔 Notifications": page_notifications,
         "📝 Update Log": page_update_log,
         "📥 Export": page_export,
@@ -2243,25 +2038,6 @@ def main():
         pending_count = len(_monitor_state["pending_changes"])
     if pending_count > 0:
         st.sidebar.warning(f"🔔 {pending_count} API change(s) detected!")
-
-    st.sidebar.divider()
-
-    # Global cross-tab analysis filters
-    st.sidebar.write("### Global Analysis Filters")
-    all_types = st.session_state.get("gf_all_types", [])
-    all_statuses = st.session_state.get("gf_all_statuses", [])
-    yb = st.session_state.get("gf_year_bounds", (1800, datetime.now().year))
-
-    st.sidebar.multiselect("Types", options=all_types, key="gf_types")
-    st.sidebar.multiselect("Statuses", options=all_statuses, key="gf_statuses")
-    st.sidebar.slider("Year range", min_value=int(yb[0]), max_value=int(yb[1]), key="gf_year_range")
-    st.sidebar.text_input("Keyword", key="gf_keyword", placeholder="title/urn/type")
-    if st.sidebar.button("Reset filters"):
-        st.session_state["gf_types"] = list(all_types)
-        st.session_state["gf_statuses"] = list(all_statuses)
-        st.session_state["gf_year_range"] = (int(yb[0]), int(yb[1]))
-        st.session_state["gf_keyword"] = ""
-        st.rerun()
 
     st.sidebar.divider()
 
