@@ -414,6 +414,210 @@ def _record_update_log(db, action, description, laws_before=None, laws_after=Non
         logger.warning(f"Failed to record update log: {e}")
 
 
+def _extract_euro_amounts(text: str) -> list[float]:
+    """Extract approximate euro amounts from legal text.
+
+    Supports values like:
+    - 1.234.567,89 euro
+    - 250 milioni di euro
+    - 3,5 miliardi euro
+    """
+    if not text:
+        return []
+
+    import re
+
+    patt = re.compile(
+        r"(\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:,\d+)?)\s*"
+        r"(miliardi?|milioni?|mila)?\s*(?:di\s+)?euro",
+        re.IGNORECASE,
+    )
+    mult = {
+        None: 1,
+        "mila": 1_000,
+        "milione": 1_000_000,
+        "milioni": 1_000_000,
+        "miliardo": 1_000_000_000,
+        "miliardi": 1_000_000_000,
+    }
+
+    out: list[float] = []
+    for raw_n, raw_u in patt.findall(text):
+        n = raw_n.replace(".", "").replace(",", ".")
+        try:
+            val = float(n)
+        except ValueError:
+            continue
+        unit = (raw_u or "").lower() or None
+        out.append(val * mult.get(unit, 1))
+    return out
+
+
+@st.cache_data(ttl=21600, show_spinner="Computing fiscal and status-quo analytics...")
+def _get_fiscal_status_snapshot(db_path: str) -> dict:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        status_rows = conn.execute(
+            "SELECT status, COUNT(*) AS cnt FROM laws GROUP BY status ORDER BY cnt DESC"
+        ).fetchall()
+        status_counts = {r["status"] or "unknown": r["cnt"] for r in status_rows}
+
+        total_in_force = int(status_counts.get("in_force", 0))
+        total_abrogated = int(status_counts.get("abrogated", 0))
+
+        has_variants = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='law_variants'"
+        ).fetchone() is not None
+
+        correlated = None
+        if has_variants:
+            correlated_row = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN l.status='in_force'
+                         AND EXISTS(SELECT 1 FROM law_variants v WHERE v.urn=l.urn AND v.variant='vigente')
+                         THEN 1 ELSE 0 END) AS in_force_with_vigente,
+                    SUM(CASE WHEN l.status='abrogated'
+                         AND EXISTS(SELECT 1 FROM law_variants v WHERE v.urn=l.urn AND v.status='abrogated')
+                         THEN 1 ELSE 0 END) AS abrogated_with_variant_evidence,
+                    SUM(CASE WHEN l.status='in_force'
+                         AND EXISTS(SELECT 1 FROM law_variants v WHERE v.urn=l.urn AND v.variant='originale' AND v.status='abrogated')
+                         THEN 1 ELSE 0 END) AS potential_status_conflicts
+                FROM laws l
+                """
+            ).fetchone()
+            correlated = dict(correlated_row) if correlated_row else None
+
+        bilancio_rows = conn.execute(
+            """
+            SELECT urn, title, year, status, type, text_length, text
+            FROM laws
+            WHERE LOWER(title) LIKE '%bilancio%'
+            ORDER BY year DESC, date DESC
+            LIMIT 160
+            """
+        ).fetchall()
+
+        bilancio_series = []
+        bilancio_total_in_force = 0.0
+        bilancio_mentions_in_force = 0
+        bilancio_in_force_count = 0
+        bilancio_table = []
+
+        for r in bilancio_rows:
+            row = dict(r)
+            amounts = _extract_euro_amounts(row.get("text") or "")
+            amount_sum = float(sum(amounts))
+            mention_count = len(amounts)
+
+            if row.get("status") == "in_force":
+                bilancio_total_in_force += amount_sum
+                bilancio_mentions_in_force += mention_count
+                bilancio_in_force_count += 1
+
+            yr = row.get("year")
+            bilancio_series.append({
+                "year": int(yr) if yr not in (None, "") else None,
+                "status": row.get("status") or "unknown",
+                "euro_mentions_count": mention_count,
+                "euro_mentions_sum": amount_sum,
+            })
+            bilancio_table.append({
+                "URN": row.get("urn"),
+                "Title": (row.get("title") or "")[:120],
+                "Year": row.get("year"),
+                "Status": row.get("status"),
+                "Euro Mentions": mention_count,
+                "Mentioned Amount (EUR)": round(amount_sum, 2),
+                "Text Length": row.get("text_length", 0),
+            })
+
+        fiscal_rows = conn.execute(
+            """
+            SELECT urn, title, year, status, text
+            FROM laws
+            WHERE status='in_force'
+              AND (
+                LOWER(title) LIKE '%impost%'
+                OR LOWER(title) LIKE '%accis%'
+                OR LOWER(title) LIKE '%tribut%'
+                OR LOWER(title) LIKE '%tass%'
+                OR LOWER(title) LIKE '%bilancio%'
+                OR LOWER(title) LIKE '%fiscal%'
+              )
+            ORDER BY year DESC
+            LIMIT 4000
+            """
+        ).fetchall()
+
+        term_patterns = {
+            "imposta": "impost",
+            "tassa": "tass",
+            "tributo": "tribut",
+            "accisa": "accis",
+            "detrazione": "detraz",
+            "credito_imposta": "credito d'imposta",
+        }
+        laws_by_term = {k: 0 for k in term_patterns}
+        mentions_by_term = {k: 0 for k in term_patterns}
+
+        fiscal_total_amount = 0.0
+        fiscal_total_mentions = 0
+        fiscal_sample = []
+
+        for r in fiscal_rows:
+            row = dict(r)
+            txt = ((row.get("title") or "") + " " + (row.get("text") or "")).lower()
+            txt_short = txt[:120000]
+
+            matched_any = False
+            for label, needle in term_patterns.items():
+                c = txt_short.count(needle)
+                if c > 0:
+                    matched_any = True
+                    laws_by_term[label] += 1
+                    mentions_by_term[label] += c
+
+            amounts = _extract_euro_amounts(row.get("text") or "")
+            fiscal_total_amount += float(sum(amounts))
+            fiscal_total_mentions += len(amounts)
+
+            if matched_any and len(fiscal_sample) < 300:
+                fiscal_sample.append({
+                    "URN": row.get("urn"),
+                    "Title": (row.get("title") or "")[:120],
+                    "Year": row.get("year"),
+                    "Status": row.get("status"),
+                    "Euro Mentions": len(amounts),
+                    "Mentioned Amount (EUR)": round(sum(amounts), 2),
+                })
+
+        return {
+            "status_counts": status_counts,
+            "total_in_force": total_in_force,
+            "total_abrogated": total_abrogated,
+            "has_variants": has_variants,
+            "correlated": correlated,
+            "bilancio_in_force_count": bilancio_in_force_count,
+            "bilancio_total_in_force": bilancio_total_in_force,
+            "bilancio_mentions_in_force": bilancio_mentions_in_force,
+            "bilancio_series": bilancio_series,
+            "bilancio_table": bilancio_table,
+            "fiscal_in_force_count": len(fiscal_rows),
+            "fiscal_total_amount": fiscal_total_amount,
+            "fiscal_total_mentions": fiscal_total_mentions,
+            "laws_by_term": laws_by_term,
+            "mentions_by_term": mentions_by_term,
+            "fiscal_sample": fiscal_sample,
+        }
+    finally:
+        conn.close()
+
+
 # PAGES
 
 def page_dashboard():
@@ -1355,6 +1559,120 @@ def page_dataset_updates():
             st.dataframe(status_counts, width='stretch', hide_index=True)
 
 
+def page_fiscal_status_quo():
+    st.header("💶 Fiscal Status Quo")
+    st.caption(
+        "Correlates vigente/abrogated state with fiscal laws and extracts quantitative "
+        "signals from legge di bilancio and tax-policy texts."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for fiscal analytics.")
+        return
+
+    db_path = str(db.db_path) if hasattr(db, "db_path") else ""
+    if not db_path:
+        st.info("Database path not available for fiscal analytics.")
+        return
+
+    snap = _get_fiscal_status_snapshot(db_path)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("In force laws", f"{snap['total_in_force']:,}")
+    c2.metric("Abrogated laws", f"{snap['total_abrogated']:,}")
+    c3.metric("Bilancio laws (in force)", f"{snap['bilancio_in_force_count']:,}")
+    c4.metric("Fiscal laws screened", f"{snap['fiscal_in_force_count']:,}")
+
+    tabs = st.tabs(["⚖️ Present-Day Correlation", "🏦 Legge di Bilancio", "🧾 Taxes & Excises in Force"])
+
+    with tabs[0]:
+        st.subheader("Status correlation (vigente vs abrogated)")
+        status_df = pd.DataFrame(
+            [{"status": k, "count": v} for k, v in snap["status_counts"].items()]
+        )
+        if not status_df.empty:
+            fig_status = px.pie(status_df, names="status", values="count", title="Current status distribution")
+            st.plotly_chart(fig_status, width='stretch')
+            st.dataframe(status_df.sort_values("count", ascending=False), width='stretch', hide_index=True)
+
+        if snap["has_variants"] and snap["correlated"]:
+            corr = snap["correlated"]
+            cc1, cc2, cc3 = st.columns(3)
+            cc1.metric("In-force with vigente evidence", f"{int(corr.get('in_force_with_vigente', 0)):,}")
+            cc2.metric("Abrogated with variant evidence", f"{int(corr.get('abrogated_with_variant_evidence', 0)):,}")
+            cc3.metric("Potential status conflicts", f"{int(corr.get('potential_status_conflicts', 0)):,}")
+            st.caption(
+                "Potential conflicts are laws marked in force in `laws` while a related originale variant is already "
+                "marked abrogated and should be reviewed."
+            )
+        else:
+            st.info(
+                "Variant-level correlation table (`law_variants`) is not available in this dataset build. "
+                "The present-day status view is based on `laws.status`."
+            )
+
+    with tabs[1]:
+        st.subheader("Legge di bilancio quantitative extraction")
+        amount_billion = snap["bilancio_total_in_force"] / 1_000_000_000
+        b1, b2 = st.columns(2)
+        b1.metric("Mentioned amounts (EUR, in-force bilancio)", f"€ {amount_billion:,.2f}B")
+        b2.metric("Euro mentions (in-force bilancio)", f"{snap['bilancio_mentions_in_force']:,}")
+        st.caption(
+            "Amounts are parsed from legal text mentions and should be interpreted as textual fiscal signals, "
+            "not certified accounting totals."
+        )
+
+        series_df = pd.DataFrame(snap["bilancio_series"])
+        if not series_df.empty:
+            series_df = series_df[series_df["year"].notna()]
+            if not series_df.empty:
+                yearly = series_df.groupby("year", as_index=False).agg(
+                    euro_mentions_sum=("euro_mentions_sum", "sum"),
+                    euro_mentions_count=("euro_mentions_count", "sum"),
+                )
+                fig_year = px.bar(
+                    yearly,
+                    x="year",
+                    y="euro_mentions_sum",
+                    title="Bilancio: extracted amount mentions by year",
+                    labels={"euro_mentions_sum": "EUR mentioned", "year": "Year"},
+                )
+                st.plotly_chart(fig_year, width='stretch')
+                st.dataframe(yearly.sort_values("year", ascending=False), width='stretch', hide_index=True)
+
+        bilancio_df = pd.DataFrame(snap["bilancio_table"])
+        if not bilancio_df.empty:
+            st.write("Recent bilancio laws and extracted monetary signals")
+            st.dataframe(bilancio_df.head(80), width='stretch', hide_index=True)
+
+    with tabs[2]:
+        st.subheader("Taxes, imposts, excises and fiscal policy signals in force")
+        t1, t2 = st.columns(2)
+        t1.metric("Total parsed euro mentions (fiscal corpus)", f"{snap['fiscal_total_mentions']:,}")
+        t2.metric("Mentioned amounts (EUR, fiscal corpus)", f"€ {snap['fiscal_total_amount']/1_000_000_000:,.2f}B")
+
+        by_law_df = pd.DataFrame(
+            [{"term": k, "laws_in_force": v} for k, v in snap["laws_by_term"].items()]
+        )
+        mentions_df = pd.DataFrame(
+            [{"term": k, "mentions": v} for k, v in snap["mentions_by_term"].items()]
+        )
+        if not by_law_df.empty:
+            fig_terms = px.bar(by_law_df, x="term", y="laws_in_force", title="In-force laws by fiscal term")
+            st.plotly_chart(fig_terms, width='stretch')
+            st.dataframe(by_law_df.sort_values("laws_in_force", ascending=False), width='stretch', hide_index=True)
+
+        if not mentions_df.empty:
+            fig_mentions = px.bar(mentions_df, x="term", y="mentions", title="Term mentions in in-force fiscal laws")
+            st.plotly_chart(fig_mentions, width='stretch')
+
+        sample_df = pd.DataFrame(snap["fiscal_sample"])
+        if not sample_df.empty:
+            st.write("Sample of fiscal laws currently in force")
+            st.dataframe(sample_df.head(120), width='stretch', hide_index=True)
+
+
 def page_update_log():
     """Manual update log -- tracks when the dataset was updated."""
     st.header("\U0001f4dd Update Log")
@@ -1944,6 +2262,7 @@ def main():
         "📖 Law Detail": page_law_detail,
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
+        "💶 Fiscal Status Quo": page_fiscal_status_quo,
         "🕰️ History Lab": page_history_lab,
         "📡 Dataset Updates": page_dataset_updates,
         "🔔 Notifications": page_notifications,
