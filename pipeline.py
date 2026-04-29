@@ -185,34 +185,20 @@ class NormattivaPipeline:
     def run_pipeline(self, variants: List[str], collections: List[str] = None):
         """Run full pipeline."""
         if collections is None:
-            # Get all collections from API, filtering by available variants
+            # Get all collections from API.
+            # Some catalogue payloads expose file format fields, not variant codes,
+            # so filtering by variant at this stage can incorrectly drop collections.
             try:
                 collections_data = self.api.get_collection_catalogue()
-                
-                # Build dict: collection_name -> set of available variants
-                available = {}
+
+                seen = set()
+                collections = []
                 for c in collections_data:
                     name = c.get('nomeCollezione', c.get('nome'))
-                    fmt = c.get('formatoCollezione', c.get('formato'))
-                    if name and fmt:
-                        if name not in available:
-                            available[name] = set()
-                        available[name].add(fmt)
-                
-                # Get variant codes for requested variants
-                variant_codes = {
-                    'originale': 'O',
-                    'vigente': 'V',
-                    'multivigente': 'M'
-                }
-                requested_codes = set(variant_codes.get(v, v) for v in variants)
-                
-                # Only include collections that have at least one requested variant
-                collections = []
-                for name, variants_available in available.items():
-                    if variants_available & requested_codes:  # intersection
+                    if name and name not in seen:
+                        seen.add(name)
                         collections.append(name)
-                
+
                 logger.info(f"Found {len(collections)} collections with variants {variants}")
                 
             except Exception as e:

@@ -46,6 +46,8 @@ jobs:
         run: |
           python - <<'PYEOF'
           import os
+          import shutil
+          import sqlite3
           from pathlib import Path
           from huggingface_hub import hf_hub_download
 
@@ -58,15 +60,43 @@ jobs:
               filename='data/laws.db',
               repo_type='dataset',
               token=token,
-              local_dir='data',
+              local_dir='.',
           )
-          size = Path(cached).stat().st_size
-          print(f'Baseline DB downloaded: {size/1e9:.2f} GB ({cached})')
+            target = Path('data/laws.db')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if Path(cached).resolve() != target.resolve():
+              shutil.copy2(cached, target)
+
+            size = target.stat().st_size
+            print(f'Baseline DB ready: {size/1e9:.2f} GB ({target})')
           if size < 100_000_000:
               raise RuntimeError(f'Baseline DB too small: {size} bytes')
+
+            conn = sqlite3.connect(str(target))
+            laws = conn.execute('SELECT COUNT(*) FROM laws').fetchone()[0]
+            abrog = conn.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
+            conn.close()
+            print(f'Baseline counts: laws={laws:,}, abrogated={abrog:,}')
+            if laws < 100_000:
+              raise RuntimeError(f'Baseline laws unexpectedly low: {laws:,}')
           PYEOF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+          - name: Verify baseline DB exists before citation refresh
+          run: |
+            python - <<'PYEOF'
+            from pathlib import Path
+
+            db = Path('data/laws.db')
+            if not db.exists():
+              raise RuntimeError('Missing data/laws.db before citation refresh')
+
+            size = db.stat().st_size
+            print(f'Pre-citations DB size: {size/1e9:.3f} GB')
+            if size < 500_000_000:
+              raise RuntimeError('DB is too small before citation refresh; refusing to continue')
+            PYEOF
 
       - name: Restore lab tracking state and JSONL from lab dataset
         run: |
@@ -213,8 +243,11 @@ jobs:
           print(f'Law variants total: {variants:,}')
           print(f'Multivigente rows: {mv:,}')
 
-          if laws < 10_000:
+            if laws < 100_000:
               print(f'ERROR: Too few laws ({laws:,})', file=sys.stderr)
+              sys.exit(1)
+            if abrog < 1_000:
+              print(f'ERROR: Too few abrogated laws ({abrog:,})', file=sys.stderr)
               sys.exit(1)
           if variants < laws:
               print('ERROR: law_variants unexpectedly small', file=sys.stderr)
