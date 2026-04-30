@@ -1047,6 +1047,149 @@ def _dataset_track(rec: dict) -> str:
     return "vigente"
 
 
+def _ensure_status_timeline_schema(db):
+    db.conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS status_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            note TEXT
+        )
+        """
+    )
+    db.conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS law_status_snapshot (
+            snapshot_id INTEGER,
+            urn TEXT,
+            title TEXT,
+            year INTEGER,
+            status TEXT,
+            track TEXT,
+            source_collection TEXT,
+            PRIMARY KEY (snapshot_id, urn)
+        )
+        """
+    )
+    db.conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS law_status_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            urn TEXT,
+            title TEXT,
+            year INTEGER,
+            from_status TEXT,
+            to_status TEXT,
+            from_track TEXT,
+            to_track TEXT,
+            snapshot_from INTEGER,
+            snapshot_to INTEGER,
+            detected_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    db.conn.commit()
+
+
+def _capture_status_snapshot(db, note: str = "manual"):
+    _ensure_status_timeline_schema(db)
+
+    db.conn.execute("INSERT INTO status_snapshots (note) VALUES (?)", (note,))
+    snap_id = db.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    db.conn.execute(
+        """
+        INSERT INTO law_status_snapshot
+            (snapshot_id, urn, title, year, status, track, source_collection)
+        SELECT
+            ?,
+            urn,
+            title,
+            year,
+            LOWER(COALESCE(status, '')),
+            CASE
+                WHEN LOWER(COALESCE(source_collection, '')) LIKE '%abrogat%'
+                     OR LOWER(COALESCE(status, '')) IN ('abrogated', 'abrogato', 'abrogata', 'a')
+                    THEN 'abrogato'
+                WHEN LOWER(COALESCE(source_collection, '')) LIKE '%multivigente%'
+                    THEN 'multivigente'
+                ELSE 'vigente'
+            END,
+            COALESCE(source_collection, '')
+        FROM laws
+        """,
+        (snap_id,),
+    )
+
+    prev = db.conn.execute(
+        "SELECT id FROM status_snapshots WHERE id < ? ORDER BY id DESC LIMIT 1",
+        (snap_id,),
+    ).fetchone()
+
+    transitions = 0
+    if prev:
+        prev_id = prev[0]
+        db.conn.execute(
+            """
+            INSERT INTO law_status_transitions
+                (urn, title, year, from_status, to_status, from_track, to_track, snapshot_from, snapshot_to)
+            SELECT
+                c.urn,
+                c.title,
+                c.year,
+                p.status,
+                c.status,
+                p.track,
+                c.track,
+                ?,
+                ?
+            FROM law_status_snapshot p
+            JOIN law_status_snapshot c ON p.urn = c.urn
+            WHERE p.snapshot_id = ?
+              AND c.snapshot_id = ?
+              AND (
+                    COALESCE(p.status, '') <> COALESCE(c.status, '')
+                 OR COALESCE(p.track, '') <> COALESCE(c.track, '')
+              )
+            """,
+            (prev_id, snap_id, prev_id, snap_id),
+        )
+        transitions = db.conn.execute(
+            "SELECT COUNT(*) FROM law_status_transitions WHERE snapshot_from = ? AND snapshot_to = ?",
+            (prev_id, snap_id),
+        ).fetchone()[0]
+
+    db.conn.commit()
+
+    total = db.conn.execute(
+        "SELECT COUNT(*) FROM law_status_snapshot WHERE snapshot_id = ?",
+        (snap_id,),
+    ).fetchone()[0]
+    return {"snapshot_id": snap_id, "laws_captured": total, "transitions": transitions}
+
+
+def _load_status_snapshots(db):
+    _ensure_status_timeline_schema(db)
+    rows = db.conn.execute(
+        "SELECT id, captured_at, note FROM status_snapshots ORDER BY id DESC LIMIT 50"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _load_status_transitions(db, limit: int = 1000):
+    _ensure_status_timeline_schema(db)
+    rows = db.conn.execute(
+        """
+        SELECT id, detected_at, urn, title, year, from_status, to_status, from_track, to_track, snapshot_from, snapshot_to
+        FROM law_status_transitions
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def page_italian_legal_lab():
     st.header("🧪 Italian Legal Lab")
     st.caption(
@@ -1061,6 +1204,7 @@ def page_italian_legal_lab():
 
     tabs = st.tabs([
         "⚖️ Normattiva Status Hub",
+        "🔄 Status Timeline",
         "🗞️ Gazzetta Ufficiale Daily",
         "🏦 Banca d'Italia SDMX",
         "📊 ISTAT SDMX",
@@ -1127,6 +1271,49 @@ def page_italian_legal_lab():
                     st.error(f"API scan failed: {e}")
 
     with tabs[1]:
+        st.subheader("Status transition timeline (vigente ↔ abrogato / track changes)")
+        st.caption(
+            "Capture periodic status snapshots and detect transitions per URN. "
+            "This enables auditable change tracking over time."
+        )
+
+        note = st.text_input("Snapshot note", value="manual-check", key="timeline-note")
+        if st.button("Capture new status snapshot"):
+            try:
+                result = _capture_status_snapshot(db, note=note)
+                st.success(
+                    f"Snapshot #{result['snapshot_id']} captured: {result['laws_captured']:,} laws, "
+                    f"{result['transitions']:,} transitions vs previous snapshot."
+                )
+            except Exception as e:
+                st.error(f"Snapshot capture failed: {e}")
+
+        snaps = _load_status_snapshots(db)
+        if snaps:
+            st.write("Recent snapshots")
+            st.dataframe(pd.DataFrame(snaps), width='stretch', hide_index=True)
+        else:
+            st.info("No snapshots captured yet.")
+
+        transitions = _load_status_transitions(db, limit=2000)
+        if transitions:
+            df_t = pd.DataFrame(transitions)
+            st.write(f"Recent transitions: {len(df_t):,}")
+            st.dataframe(
+                df_t[["detected_at", "year", "title", "from_status", "to_status", "from_track", "to_track", "urn"]],
+                width='stretch',
+                hide_index=True,
+            )
+
+            by_snap = (
+                df_t.groupby(["snapshot_to"]).size().reset_index(name="transition_count").sort_values("snapshot_to")
+            )
+            fig = px.bar(by_snap, x="snapshot_to", y="transition_count", title="Transitions per snapshot")
+            st.plotly_chart(fig, width='stretch')
+        else:
+            st.info("No transitions detected yet. Capture at least two snapshots to compute diffs.")
+
+    with tabs[2]:
         st.subheader("Daily Gazzetta Ufficiale feed")
         rss_url = st.text_input(
             "RSS URL",
@@ -1154,7 +1341,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Gazzetta fetch failed: {e}")
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("Banca d'Italia SDMX preview")
         st.caption("Endpoint can vary by dataset family; this tab provides on-demand endpoint probing.")
         bdi_url = st.text_input(
@@ -1170,7 +1357,7 @@ def page_italian_legal_lab():
                 st.error(f"Banca d'Italia fetch failed: {e}")
                 st.info("Try an alternate official SDMX endpoint URL if this one is unavailable.")
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("ISTAT SDMX preview")
         istat_url = st.text_input(
             "ISTAT endpoint",
@@ -1184,7 +1371,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"ISTAT fetch failed: {e}")
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Senato Akoma Ntoso bulk explorer")
         st.caption("Browsable view over SenatoDellaRepubblica/AkomaNtosoBulkData repository contents.")
         path = st.text_input("Repository path", value="", key="senato-path")
@@ -1199,7 +1386,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Senato AKN listing failed: {e}")
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("Institutional APIs catalog")
         catalog = [
             {"source": "OpenGazzetta (openGA)", "url": "https://api.gazzettaufficiale.it/"},
