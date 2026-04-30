@@ -1361,7 +1361,7 @@ def page_italian_legal_lab():
         st.subheader("ISTAT SDMX preview")
         istat_url = st.text_input(
             "ISTAT endpoint",
-            value="https://esploradati.istat.it/SDMXWS/rest/dataflow/IT1",
+            value="https://sdmx.istat.it/SDMXWS/rest/dataflow",
             key="istat-url"
         )
         if st.button("Fetch ISTAT"):
