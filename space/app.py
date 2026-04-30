@@ -737,10 +737,16 @@ def page_search():
             st.write(f"**Found {len(results)} results** (ranked by relevance)")
             for r in results:
                 year = r.get("year", "?")
-                if filter_type and filter_type.lower() not in r.get("type", "").lower():
+                law_type = str(r.get("type") or "")
+                if filter_type and filter_type.lower() not in law_type.lower():
                     continue
-                if year != "?" and (int(year) < filter_year_from or int(year) > filter_year_to):
-                    continue
+                if year not in (None, "?"):
+                    try:
+                        yi = int(year)
+                        if yi < filter_year_from or yi > filter_year_to:
+                            continue
+                    except Exception:
+                        pass
                 status = _normalize_status(r.get("status", "in_force"))
                 status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
                 score_str = ""
@@ -784,6 +790,72 @@ def page_search():
                 st.write(f"**Status**: {_status_label(law.get('status'))}")
                 st.text_area("Text", law.get("text", "")[:800], height=150,
                              disabled=True, key=f"srch_jl_{law.get('urn','')}")
+
+
+def page_rights_explorer():
+    st.header("🧭 Citizen Rights Explorer")
+    st.caption(
+        "Guided exploration of core rights and protections, based on the current Normattiva dataset. "
+        "Use this to quickly discover vigente norms without confusion from abrogated laws."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for rights explorer.")
+        return
+
+    topics = {
+        "Diritto alla salute": "diritto alla salute servizio sanitario nazionale",
+        "Diritto al lavoro": "diritto al lavoro statuto lavoratori",
+        "Diritto all'istruzione": "diritto istruzione scuola universita",
+        "Privacy e dati personali": "privacy protezione dati personali codice privacy",
+        "Tutela del consumatore": "consumatore garanzia recesso pratiche commerciali",
+        "Famiglia e minori": "famiglia minori responsabilita genitoriale",
+        "Casa e proprieta": "proprieta abitazione locazione sfratto",
+        "Tributi e diritti del contribuente": "contribuente statuto diritti fiscali imposta",
+    }
+
+    col1, col2 = st.columns([2, 3])
+    with col1:
+        topic = st.selectbox("Choose a rights topic", list(topics.keys()))
+        include_abrogated = st.checkbox("Include abrogated laws", value=False)
+        max_results = st.slider("Max retrieved laws", 5, 50, 15, 5)
+        run = st.button("Explore topic")
+    with col2:
+        st.markdown(
+            "**How to read results**\n"
+            "- Prioritize ⚡ In vigore for current enforceable rights.\n"
+            "- Use 🚫 Abrogato only for legal history/comparison."
+        )
+
+    if run:
+        query = topics[topic]
+        results = db.search_fts(query, limit=200)
+        if not include_abrogated:
+            results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+        results = results[:max_results]
+
+        if not results:
+            st.warning("No matching laws found for this topic.")
+            return
+
+        st.subheader(f"Results for: {topic}")
+        vcount = sum(1 for r in results if _normalize_status(r.get("status")) == "in_force")
+        acount = sum(1 for r in results if _normalize_status(r.get("status")) == "abrogated")
+        c1, c2 = st.columns(2)
+        c1.metric("Vigenti", vcount)
+        c2.metric("Abrogati", acount)
+
+        for r in results:
+            status = _normalize_status(r.get("status"))
+            badge = "⚡" if status == "in_force" else "🚫"
+            with st.expander(f"{badge} {r.get('title', 'N/A')} ({r.get('year', 'N/A')})"):
+                st.write(f"**Status**: {_status_label(status)}")
+                st.write(f"**Type**: {r.get('type', 'N/A')}")
+                st.write(f"**URN**: `{r.get('urn', 'N/A')}`")
+                snippet = r.get("snippet", "")
+                if snippet:
+                    st.markdown(f"**Snippet**: ...{snippet}...")
 
 
 def _render_browse_table(laws: List[Dict], title: str, locked_status: str | None = None):
@@ -2127,6 +2199,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 def main():
     pages = {
         "📊 Dashboard": page_dashboard,
+        "🧭 Rights Explorer": page_rights_explorer,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
         "⚡ Vigenti": page_vigenti,
