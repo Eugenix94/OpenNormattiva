@@ -395,6 +395,32 @@ def _run_api_check():
             _monitor_state["pending_changes"] = changes
             _monitor_state["last_check"] = datetime.now(timezone.utc).isoformat()
 
+        # Persist detected API changes for auditability across restarts.
+        db = load_db()
+        if db and changes:
+            for ch in changes:
+                try:
+                    exists = db.conn.execute(
+                        "SELECT 1 FROM api_changes WHERE collection = ? AND old_etag IS ? AND new_etag = ? LIMIT 1",
+                        (ch.get("collection"), ch.get("old_etag"), ch.get("new_etag")),
+                    ).fetchone()
+                    if not exists:
+                        db.conn.execute(
+                            "INSERT INTO api_changes (collection, old_etag, new_etag, status, preview_data) VALUES (?, ?, ?, 'pending', ?)",
+                            (
+                                ch.get("collection"),
+                                ch.get("old_etag"),
+                                ch.get("new_etag"),
+                                json.dumps({"num_acts": ch.get("num_acts", 0), "detected_at": ch.get("detected_at")}),
+                            ),
+                        )
+                except Exception:
+                    continue
+            try:
+                db.conn.commit()
+            except Exception:
+                pass
+
     except Exception as e:
         with _monitor_lock:
             _monitor_state["error"] = str(e)
@@ -681,7 +707,7 @@ def page_search():
     )
 
     with st.expander("Advanced Filters"):
-        fc1, fc2, fc3 = st.columns(3)
+        fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1:
             filter_type = st.text_input("Law type (e.g. legge, decreto)")
         with fc2:
@@ -690,6 +716,14 @@ def page_search():
         with fc3:
             filter_year_to = st.number_input("Year to", min_value=1800,
                                               max_value=2100, value=2100)
+        with fc4:
+            status_scope = st.selectbox(
+                "Status scope",
+                ["in_force", "abrogated", "all"],
+                help="Default is in_force to keep vigente laws separated from abrogated ones."
+            )
+
+    result_limit = st.slider("Max results", 25, 500, 100, 25)
 
     if not query or len(query) < 2:
         st.info("Enter at least 2 characters to search.")
@@ -697,7 +731,9 @@ def page_search():
 
     if db:
         try:
-            results = db.search_fts(query, limit=50)
+            results = db.search_fts(query, limit=result_limit)
+            if status_scope != "all":
+                results = [r for r in results if _normalize_status(r.get("status")) == status_scope]
             st.write(f"**Found {len(results)} results** (ranked by relevance)")
             for r in results:
                 year = r.get("year", "?")
@@ -705,11 +741,11 @@ def page_search():
                     continue
                 if year != "?" and (int(year) < filter_year_from or int(year) > filter_year_to):
                     continue
+                status = _normalize_status(r.get("status", "in_force"))
+                status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
                 score_str = ""
-                if r.get("rank"):
-                    score_str = f" · Score: {r['rank']:.2f}"
-                    status = _normalize_status(r.get("status", "in_force"))
-                    status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
+                if r.get("relevance_score") is not None:
+                    score_str = f" · Score: {float(r['relevance_score']):.2f}"
                 with st.expander(f"{r.get('title', 'Untitled')} ({year}){score_str}{status_badge}"):
                     c1, c2 = st.columns([1, 3])
                     with c1:
@@ -734,21 +770,24 @@ def page_search():
         q = query.lower()
         results = [l for l in laws
                    if q in l.get("title", "").lower()
-                   or q in l.get("text", "").lower()[:500]][:50]
+                   or q in l.get("text", "").lower()]
+        if status_scope != "all":
+            results = [l for l in results if _normalize_status(l.get("status")) == status_scope]
+        results = results[:result_limit]
         st.write(f"**Found {len(results)} results** (simple text match)")
-        for law in results[:20]:
+        for law in results:
             with st.expander(
                 f"{law.get('title', 'Untitled')} ({law.get('year', '?')})"
             ):
                 st.write(f"**URN**: `{law.get('urn')}`")
                 st.write(f"**Type**: {law.get('type')}")
+                st.write(f"**Status**: {_status_label(law.get('status'))}")
                 st.text_area("Text", law.get("text", "")[:800], height=150,
                              disabled=True, key=f"srch_jl_{law.get('urn','')}")
 
 
-def page_browse():
-    st.header("\U0001f4cb Browse Laws")
-    laws = _get_laws()
+def _render_browse_table(laws: List[Dict], title: str, locked_status: str | None = None):
+    st.header(title)
     if not laws:
         st.info("No data loaded.")
         return
@@ -756,17 +795,22 @@ def page_browse():
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         all_types = sorted(set(l.get("type", "unknown") for l in laws))
-        sel_type = st.selectbox("Type", ["All"] + all_types)
+        sel_type = st.selectbox("Type", ["All"] + all_types, key=f"{title}-type")
     with c2:
         all_years = sorted(set(l.get("year") for l in laws if l.get("year")))
-        sel_year = st.selectbox("Year", ["All"] + all_years)
+        sel_year = st.selectbox("Year", ["All"] + all_years, key=f"{title}-year")
     with c3:
-        all_statuses = sorted(set(_normalize_status(l.get("status", "vigente")) for l in laws))
-        sel_status = st.selectbox("Status", ["All"] + all_statuses)
+        if locked_status:
+            st.write("Status")
+            st.info(locked_status)
+            sel_status = locked_status
+        else:
+            all_statuses = sorted(set(_normalize_status(l.get("status", "vigente")) for l in laws))
+            sel_status = st.selectbox("Status", ["All"] + all_statuses, key=f"{title}-status")
     with c4:
         sort_by = st.selectbox("Sort by", [
             "Year (newest)", "Year (oldest)", "Title A-Z", "Importance", "Articles"
-        ])
+        ], key=f"{title}-sort")
 
     filtered = laws
     if sel_type != "All":
@@ -791,7 +835,7 @@ def page_browse():
 
     page_size = 25
     total_pages = max(1, math.ceil(len(filtered) / page_size))
-    page_num = st.number_input("Page", 1, total_pages, 1)
+    page_num = st.number_input("Page", 1, total_pages, 1, key=f"{title}-page")
     start = (page_num - 1) * page_size
 
     for law in filtered[start:start + page_size]:
@@ -825,7 +869,84 @@ def page_browse():
                            if isinstance(law.get("text"), str)
                            else "No text")
                 st.text_area("Text preview", txt, height=250, disabled=True,
-                             key=f"browse_{law.get('urn', start)}")
+                             key=f"{title}_{law.get('urn', start)}")
+
+
+def page_browse():
+    laws = _get_laws()
+    _render_browse_table(laws, "📋 Browse Laws (All)", locked_status=None)
+
+
+def page_vigenti():
+    laws = [l for l in _get_laws() if _normalize_status(l.get("status")) == "in_force"]
+    _render_browse_table(laws, "⚡ Vigenti Laws", locked_status="in_force")
+
+
+def page_abrogated():
+    laws = [l for l in _get_laws() if _normalize_status(l.get("status")) == "abrogated"]
+    _render_browse_table(laws, "🚫 Abrogated Laws", locked_status="abrogated")
+
+
+def page_llm_lab():
+    st.header("🤖 LLM Assistant Lab")
+    st.caption(
+        "Experimental legal assistant over the full Normattiva dataset. "
+        "This lab retrieves the most relevant laws and builds a status-aware answer draft."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for LLM lab.")
+        return
+
+    if "llm_chat" not in st.session_state:
+        st.session_state["llm_chat"] = []
+
+    with st.expander("Assistant setup"):
+        top_k = st.slider("Top laws to retrieve", 3, 20, 8)
+        include_abrogated = st.checkbox("Include abrogated laws in evidence", value=False)
+
+    user_q = st.text_input("Ask a legal question", placeholder="Esempio: Qual e lo stato vigente della disciplina IVA?")
+    if st.button("Analyze question") and user_q:
+        results = db.search_fts(user_q, limit=100)
+        if not include_abrogated:
+            results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+        evidence = results[:top_k]
+
+        if not evidence:
+            st.warning("No matching laws found with current filters.")
+        else:
+            vig_count = sum(1 for r in evidence if _normalize_status(r.get("status")) == "in_force")
+            abg_count = sum(1 for r in evidence if _normalize_status(r.get("status")) == "abrogated")
+            answer_lines = [
+                f"Query: {user_q}",
+                f"Evidence considered: {len(evidence)} laws ({vig_count} vigenti, {abg_count} abrogate).",
+                "",
+                "Proposed status-aware answer:",
+            ]
+            for i, r in enumerate(evidence, 1):
+                answer_lines.append(
+                    f"{i}. [{_status_label(r.get('status'))}] {r.get('title', 'N/A')} ({r.get('year', 'N/A')}) - {r.get('urn', 'N/A')}"
+                )
+
+            answer_text = "\n".join(answer_lines)
+            st.session_state["llm_chat"].append({"q": user_q, "a": answer_text, "e": evidence})
+
+    if st.session_state["llm_chat"]:
+        st.subheader("Conversation")
+        for idx, item in enumerate(reversed(st.session_state["llm_chat"]), 1):
+            with st.expander(f"Q{idx}: {item['q']}"):
+                st.text(item["a"])
+                df = pd.DataFrame([
+                    {
+                        "status": _normalize_status(r.get("status")),
+                        "title": r.get("title"),
+                        "year": r.get("year"),
+                        "urn": r.get("urn"),
+                    }
+                    for r in item["e"]
+                ])
+                st.dataframe(df, width='stretch', hide_index=True)
 
 
 def page_law_detail():
@@ -2008,7 +2129,10 @@ def main():
         "📊 Dashboard": page_dashboard,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
-        "📋 Browse": page_browse,
+        "⚡ Vigenti": page_vigenti,
+        "🚫 Abrogati": page_abrogated,
+        "📋 Browse (All)": page_browse,
+        "🤖 LLM Lab": page_llm_lab,
         "📖 Law Detail": page_law_detail,
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
