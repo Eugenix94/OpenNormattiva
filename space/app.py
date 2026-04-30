@@ -1021,6 +1021,225 @@ def page_llm_lab():
                 st.dataframe(df, width='stretch', hide_index=True)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _http_get_json(url: str, params: dict | None = None):
+    import requests
+    r = requests.get(url, params=params, timeout=25)
+    r.raise_for_status()
+    return r.json()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _http_get_text(url: str):
+    import requests
+    r = requests.get(url, timeout=25)
+    r.raise_for_status()
+    return r.text
+
+
+def _dataset_track(rec: dict) -> str:
+    src = str(rec.get("source_collection") or "").lower()
+    status = _normalize_status(rec.get("status"))
+    if "abrogat" in src or status == "abrogated":
+        return "abrogato"
+    if "multivigente" in src:
+        return "multivigente"
+    return "vigente"
+
+
+def page_italian_legal_lab():
+    st.header("🧪 Italian Legal Lab")
+    st.caption(
+        "Unified exploration hub across Normattiva status tracks, daily Gazzetta flow, "
+        "institutional statistics (Banca d'Italia/ISTAT SDMX), and parliamentary datasets."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for Legal Lab.")
+        return
+
+    tabs = st.tabs([
+        "⚖️ Normattiva Status Hub",
+        "🗞️ Gazzetta Ufficiale Daily",
+        "🏦 Banca d'Italia SDMX",
+        "📊 ISTAT SDMX",
+        "🏛️ Senato AKN Bulk",
+        "🧩 Institutional APIs",
+    ])
+
+    with tabs[0]:
+        st.subheader("Normattiva: vigente / multivigente / abrogato")
+        laws = _get_laws()
+        if not laws:
+            st.info("No laws loaded.")
+        else:
+            df = pd.DataFrame(laws)
+            if "source_collection" not in df.columns:
+                try:
+                    rows = db.conn.execute("SELECT urn, source_collection FROM laws").fetchall()
+                    sc = pd.DataFrame([dict(r) for r in rows])
+                    df = df.merge(sc, on="urn", how="left")
+                except Exception:
+                    df["source_collection"] = ""
+            df["track"] = df.apply(_dataset_track, axis=1)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Vigente", int((df["track"] == "vigente").sum()))
+            c2.metric("Multivigente", int((df["track"] == "multivigente").sum()))
+            c3.metric("Abrogato", int((df["track"] == "abrogato").sum()))
+
+            fig = px.pie(df, names="track", title="Dataset status tracks")
+            st.plotly_chart(fig, width='stretch')
+
+            sel_track = st.selectbox("Explore track", ["vigente", "multivigente", "abrogato"])
+            view = df[df["track"] == sel_track].copy().sort_values("year", ascending=False)
+            st.write(f"Showing {len(view):,} laws in track: {sel_track}")
+            st.dataframe(
+                view[["year", "type", "title", "status", "source_collection", "urn"]].head(200),
+                width='stretch',
+                hide_index=True,
+            )
+
+            st.divider()
+            st.subheader("Normattiva API live collection check")
+            st.caption("Checks whether API collections expose vigente/multivigente/abrogato streams.")
+            if st.button("Run API collection scan"):
+                try:
+                    from normattiva_api_client import NormattivaAPI
+                    api = NormattivaAPI(timeout_s=15, retries=1)
+                    cat = api.get_collection_catalogue()
+                    rows = []
+                    for c in cat:
+                        nm = c.get("nomeCollezione", c.get("nome", ""))
+                        low = str(nm).lower()
+                        if any(k in low for k in ["vigent", "abrog", "multivigent"]):
+                            rows.append({
+                                "collection": nm,
+                                "acts": c.get("numeroAtti", 0),
+                                "key": "multivigente" if "multivigent" in low else ("abrogato" if "abrog" in low else "vigente"),
+                            })
+                    if rows:
+                        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+                    else:
+                        st.info("No explicit multivigente collection name returned in current catalogue.")
+                except Exception as e:
+                    st.error(f"API scan failed: {e}")
+
+    with tabs[1]:
+        st.subheader("Daily Gazzetta Ufficiale feed")
+        rss_url = st.text_input(
+            "RSS URL",
+            value="https://www.gazzettaufficiale.it/rss/serie_generale.xml",
+            key="gu-rss-url"
+        )
+        if st.button("Fetch daily Gazzetta flow"):
+            try:
+                from xml.etree import ElementTree as ET
+                xml_text = _http_get_text(rss_url)
+                root = ET.fromstring(xml_text)
+                items = []
+                for item in root.findall(".//item"):
+                    items.append({
+                        "title": item.findtext("title"),
+                        "pubDate": item.findtext("pubDate"),
+                        "link": item.findtext("link"),
+                        "description": (item.findtext("description") or "")[:240],
+                    })
+                if not items:
+                    st.warning("No RSS items found.")
+                else:
+                    st.success(f"Fetched {len(items)} daily entries.")
+                    st.dataframe(pd.DataFrame(items), width='stretch', hide_index=True)
+            except Exception as e:
+                st.error(f"Gazzetta fetch failed: {e}")
+
+    with tabs[2]:
+        st.subheader("Banca d'Italia SDMX preview")
+        st.caption("Endpoint can vary by dataset family; this tab provides on-demand endpoint probing.")
+        bdi_url = st.text_input(
+            "Banca d'Italia endpoint",
+            value="https://api.bancaditalia.it/sdmx/v1/dataflow",
+            key="bdi-url"
+        )
+        if st.button("Fetch Banca d'Italia"):
+            try:
+                data = _http_get_json(bdi_url)
+                st.json(data if isinstance(data, dict) else {"type": str(type(data)), "preview": str(data)[:2000]})
+            except Exception as e:
+                st.error(f"Banca d'Italia fetch failed: {e}")
+                st.info("Try an alternate official SDMX endpoint URL if this one is unavailable.")
+
+    with tabs[3]:
+        st.subheader("ISTAT SDMX preview")
+        istat_url = st.text_input(
+            "ISTAT endpoint",
+            value="https://esploradati.istat.it/SDMXWS/rest/dataflow/IT1",
+            key="istat-url"
+        )
+        if st.button("Fetch ISTAT"):
+            try:
+                text = _http_get_text(istat_url)
+                st.code(text[:12000], language="xml")
+            except Exception as e:
+                st.error(f"ISTAT fetch failed: {e}")
+
+    with tabs[4]:
+        st.subheader("Senato Akoma Ntoso bulk explorer")
+        st.caption("Browsable view over SenatoDellaRepubblica/AkomaNtosoBulkData repository contents.")
+        path = st.text_input("Repository path", value="", key="senato-path")
+        if st.button("List AKN repository path"):
+            try:
+                api_url = f"https://api.github.com/repos/SenatoDellaRepubblica/AkomaNtosoBulkData/contents/{path}".rstrip("/")
+                data = _http_get_json(api_url)
+                if isinstance(data, dict):
+                    data = [data]
+                rows = [{"name": x.get("name"), "type": x.get("type"), "size": x.get("size"), "download_url": x.get("download_url")} for x in data]
+                st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+            except Exception as e:
+                st.error(f"Senato AKN listing failed: {e}")
+
+    with tabs[5]:
+        st.subheader("Institutional APIs catalog")
+        catalog = [
+            {"source": "OpenGazzetta (openGA)", "url": "https://api.gazzettaufficiale.it/"},
+            {"source": "Corte Costituzionale", "url": "https://www.cortecostituzionale.it/actionSchedePronunce.do"},
+            {"source": "Senato Open Data", "url": "https://dati.senato.it/"},
+            {"source": "Camera Open Data", "url": "https://dati.camera.it/"},
+            {"source": "Gov.it datasets", "url": "https://www.dati.gov.it/"},
+            {"source": "ANAC (public officials/anticorruzione)", "url": "https://dati.anticorruzione.it/"},
+            {"source": "MEF Open Data", "url": "https://www1.finanze.gov.it/finanze3/opendata/"},
+        ]
+        df_cat = pd.DataFrame(catalog)
+        st.dataframe(df_cat, width='stretch', hide_index=True)
+
+        st.subheader("Public officials legislation quick explorer")
+        preset_q = st.selectbox(
+            "Preset query",
+            [
+                "pubblico impiego", "incompatibilita incarichi pubblici", "anticorruzione", "trasparenza amministrativa",
+                "responsabilita dirigenza pubblica", "contabilita pubblica"
+            ],
+            key="officials-preset"
+        )
+        if st.button("Search preset in Normattiva"):
+            try:
+                out = db.search_fts(preset_q, limit=30)
+                out = [r for r in out if _normalize_status(r.get("status")) == "in_force"]
+                st.dataframe(pd.DataFrame([
+                    {
+                        "status": _status_label(r.get("status")),
+                        "year": r.get("year"),
+                        "type": r.get("type"),
+                        "title": r.get("title"),
+                        "urn": r.get("urn"),
+                    }
+                    for r in out
+                ]), width='stretch', hide_index=True)
+            except Exception as e:
+                st.error(f"Preset search failed: {e}")
+
+
 def page_law_detail():
     st.header("📖 Law Detail - Full Context & Relationships")
     db = load_db()
@@ -2199,6 +2418,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 def main():
     pages = {
         "📊 Dashboard": page_dashboard,
+        "🧪 Italian Legal Lab": page_italian_legal_lab,
         "🧭 Rights Explorer": page_rights_explorer,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,

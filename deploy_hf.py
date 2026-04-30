@@ -17,6 +17,10 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description="Deploy to HuggingFace")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN", ""))
+    parser.add_argument("--space-name", default="normattiva-search",
+                        help="HF Space repo name (default: normattiva-search)")
+    parser.add_argument("--dataset-name", default="normattiva-data",
+                        help="HF Dataset repo name (default: normattiva-data)")
     parser.add_argument("--skip-space", action="store_true")
     parser.add_argument("--skip-dataset", action="store_true")
     args = parser.parse_args()
@@ -31,8 +35,8 @@ def main():
     username = user["name"]
     print(f"Authenticated as: {username}")
 
-    space_id = f"{username}/normattiva-search"
-    dataset_id = f"{username}/normattiva-data"
+    space_id = f"{username}/{args.space_name}"
+    dataset_id = f"{username}/{args.dataset_name}"
 
     # ── Deploy Space ──────────────────────────────────────────────────────
     if not args.skip_space:
