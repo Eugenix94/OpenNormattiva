@@ -17,8 +17,8 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description="Deploy to HuggingFace")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN", ""))
-    parser.add_argument("--space-name", default="normattiva-search",
-                        help="HF Space repo name (default: normattiva-search)")
+    parser.add_argument("--space-name", default="normattiva-search-master-normattiva-data",
+                        help="HF Space repo name (default: normattiva-search-master-normattiva-data)")
     parser.add_argument("--dataset-name", default="normattiva-data",
                         help="HF Dataset repo name (default: normattiva-data)")
     parser.add_argument("--skip-space", action="store_true")
