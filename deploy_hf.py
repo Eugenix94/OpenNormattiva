@@ -42,6 +42,15 @@ def main():
     if not args.skip_space:
         print("\n[1/2] Deploying HF Space...")
 
+        # Determine per-space profile and default dataset to inject into the container
+        profile_defaults = {
+            "opennormattiva-search": ("search", "diatribe00/normattiva-data"),
+            "opennormattiva-lab": ("lab", "diatribe00/normattiva-lab-data"),
+            "italian-legal-lab": ("italianlab", "diatribe00/italian-legal-lab-data"),
+            "openitalaw": ("models", "diatribe00/openitalaw-data"),
+        }
+        profile, ds = profile_defaults.get(args.space_name, ("search", f"{username}/{args.dataset_name}"))
+
         # Try to create the space (Docker SDK for Streamlit)
         # If it already exists with a different SDK, that's fine too
         try:
@@ -51,14 +60,6 @@ def main():
             )
             print(f"  Space created/confirmed: {space_id}")
         except Exception as e:
-                    # Determine per-space profile and default dataset to inject into the container
-                    profile_defaults = {
-                        "opennormattiva-search": ("search", "diatribe00/normattiva-data"),
-                        "opennormattiva-lab": ("lab", "diatribe00/normattiva-lab-data"),
-                        "italian-legal-lab": ("italianlab", "diatribe00/italian-legal-lab-data"),
-                        "openitalaw": ("models", "diatribe00/openitalaw-data"),
-                    }
-                    profile, ds = profile_defaults.get(args.space_name, ("search", f"{username}/{args.dataset_name}"))
             print(f"  Note: create_repo: {e} — will try uploading anyway")
 
         # Build a temp directory with the needed files

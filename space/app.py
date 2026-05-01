@@ -468,8 +468,7 @@ IS_LAB = APP_PROFILE == "lab"
 IS_ITALIAN_LAB = APP_PROFILE == "italianlab"
 
 # Show active profile in the sidebar for clarity
-st.sidebar.info(f"Running profile: `{APP_PROFILE}`  
-Dataset: `{HF_DATASET_NAME or 'diatribe00/normattiva-data'}`")
+st.sidebar.info(f"Running profile: `{APP_PROFILE}`\nDataset: `{HF_DATASET_NAME or 'diatribe00/normattiva-data'}`")
 # ------------------------------------------------------------------------
 
 
