@@ -448,6 +448,30 @@ st.set_page_config(
 st.title("\u2696\ufe0f Normattiva Jurisprudence Research Platform")
 st.markdown("Explore Italian law: search, citations, domains, and legal evolution (v2.2)")
 
+# ---- App profile selection ---------------------------------------------
+# Controls which pages are exposed and which dataset is used by default.
+APP_PROFILE = os.environ.get("APP_PROFILE", "").lower().strip()
+HF_DATASET_NAME = os.environ.get("HF_DATASET_NAME", "").strip()
+_env_space = os.environ.get("HF_SPACE_ID") or os.environ.get("SPACE_NAME") or os.environ.get("SPACE") or ""
+SPACE_NAME = str(_env_space).lower()
+
+if not APP_PROFILE:
+    if "italian" in HF_DATASET_NAME or "italian" in SPACE_NAME or "legal" in HF_DATASET_NAME:
+        APP_PROFILE = "italianlab"
+    elif "multivigente" in HF_DATASET_NAME or "multivigente" in SPACE_NAME or ("lab" in SPACE_NAME and "normattiva" in SPACE_NAME):
+        APP_PROFILE = "lab"
+    else:
+        APP_PROFILE = "search"
+
+IS_SEARCH = APP_PROFILE == "search"
+IS_LAB = APP_PROFILE == "lab"
+IS_ITALIAN_LAB = APP_PROFILE == "italianlab"
+
+# Show active profile in the sidebar for clarity
+st.sidebar.info(f"Running profile: `{APP_PROFILE}`  
+Dataset: `{HF_DATASET_NAME or 'diatribe00/normattiva-data'}`")
+# ------------------------------------------------------------------------
+
 
 # HELPERS
 
@@ -2603,7 +2627,9 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 # ─────────────────────────────────────────────────────────────────
 
 def main():
-    pages = {
+    # Build a complete registry of pages and then expose only the subset
+    # appropriate for the active `APP_PROFILE` (search / lab / italianlab).
+    all_pages = {
         "📊 Dashboard": page_dashboard,
         "🧪 Italian Legal Lab": page_italian_legal_lab,
         "🧭 Rights Explorer": page_rights_explorer,
@@ -2621,6 +2647,49 @@ def main():
         "📝 Update Log": page_update_log,
         "📥 Export": page_export,
     }
+
+    # Select visible pages per profile
+    if IS_ITALIAN_LAB:
+        pages = {
+            "📊 Dashboard": all_pages["📊 Dashboard"],
+            "🧪 Italian Legal Lab": all_pages["🧪 Italian Legal Lab"],
+            "📖 Law Detail": all_pages["📖 Law Detail"],
+            "🔔 Notifications": all_pages["🔔 Notifications"],
+            "📝 Update Log": all_pages["📝 Update Log"],
+            "📥 Export": all_pages["📥 Export"],
+        }
+        st.sidebar.success("Italian Legal Lab profile active — unified research hub.")
+    elif IS_LAB:
+        pages = {
+            "📊 Dashboard": all_pages["📊 Dashboard"],
+            "🔍 Search": all_pages["🔍 Search"],
+            "⚡ Vigenti": all_pages["⚡ Vigenti"],
+            "🚫 Abrogati": all_pages["🚫 Abrogati"],
+            "📋 Browse (All)": all_pages["📋 Browse (All)"],
+            "🤖 LLM Lab": all_pages["🤖 LLM Lab"],
+            "💶 Fiscal Burden Lab": all_pages["💶 Fiscal Burden Lab"],
+            "📖 Law Detail": all_pages["📖 Law Detail"],
+            "🔔 Notifications": all_pages["🔔 Notifications"],
+            "📝 Update Log": all_pages["📝 Update Log"],
+            "📥 Export": all_pages["📥 Export"],
+        }
+        st.sidebar.success("Normattiva Lab profile active — multivigente dataset and developer tools.")
+    else:
+        pages = {
+            "📊 Dashboard": all_pages["📊 Dashboard"],
+            "🔍 Search": all_pages["🔍 Search"],
+            "⚡ Vigenti": all_pages["⚡ Vigenti"],
+            "🚫 Abrogati": all_pages["🚫 Abrogati"],
+            "📋 Browse (All)": all_pages["📋 Browse (All)"],
+            "🧭 Rights Explorer": all_pages["🧭 Rights Explorer"],
+            "📖 Law Detail": all_pages["📖 Law Detail"],
+            "🔗 Citations": all_pages["🔗 Citations"],
+            "🏛️ Domains": all_pages["🏛️ Domains"],
+            "🔔 Notifications": all_pages["🔔 Notifications"],
+            "📝 Update Log": all_pages["📝 Update Log"],
+            "📥 Export": all_pages["📥 Export"],
+        }
+        st.sidebar.success("OpenNormattiva Search profile active — vigente/abrogato focused.")
 
     # Allow in-page navigation to Law Detail (from cards)
     if "goto_page" in st.session_state and st.session_state["goto_page"] in pages:
