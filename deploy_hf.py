@@ -58,37 +58,42 @@ def main():
         try:
             # README with HF Spaces YAML frontmatter
             readme = staging / "README.md"
-            readme.write_text(
-                "---\n"
-                "title: OpenNormattiva\n"
-                "emoji: ⚖️\n"
-                "colorFrom: blue\n"
-                "colorTo: indigo\n"
-                "sdk: docker\n"
-                "pinned: true\n"
-                "license: mit\n"
-                "app_port: 8501\n"
-                "---\n\n"
-                "# OpenNormattiva — Italian Law Research Platform\n\n"
-                "Search, browse, and analyse 160,000+ Italian laws with "
-                "full-text search, citation graphs, and domain classification.\n\n"
-                "## Deployment\n\n"
-                "This Space automatically downloads the laws database (~970MB) from HF Dataset on first run.\n"
-                "Subsequent restarts use the cached copy.\n\n"
-                "### Environment Variables\n\n"
-                "- `HF_DATASET_OWNER`: Owner of the dataset repo (default: `diatribe00`)\n"
-                "- `HF_DATASET_NAME`: Name of the dataset repo (default: `normattiva-data`)\n"
-                "- `HF_TOKEN`: HuggingFace API token (auto-set if deploying to your Space)\n\n"
-                "### Logs\n\n"
-                "Check container logs for startup progress:\n"
-                "```\n"
-                "[startup] Downloading database (attempt 1/3, ~970MB)...\n"
-                "[download_db] Fetching diatribe00/normattiva-data/data/laws.db...\n"
-                "[startup] Database ready: 969MB\n"
-                "[startup] Starting Streamlit...\n"
-                "```\n",
-                encoding="utf-8",
-            )
+            # Allow per-space README overrides placed under hf_readmes/README.<space>.md
+            custom_readme = Path(f"hf_readmes/README.{args.space_name}.md")
+            if custom_readme.exists():
+                readme.write_text(custom_readme.read_text(encoding="utf-8"), encoding="utf-8")
+            else:
+                readme.write_text(
+                    "---\n"
+                    "title: OpenNormattiva\n"
+                    "emoji: ⚖️\n"
+                    "colorFrom: blue\n"
+                    "colorTo: indigo\n"
+                    "sdk: docker\n"
+                    "pinned: true\n"
+                    "license: mit\n"
+                    "app_port: 8501\n"
+                    "---\n\n"
+                    "# OpenNormattiva — Italian Law Research Platform\n\n"
+                    "Search, browse, and analyse 160,000+ Italian laws with "
+                    "full-text search, citation graphs, and domain classification.\n\n"
+                    "## Deployment\n\n"
+                    "This Space automatically downloads the laws database (~970MB) from HF Dataset on first run.\n"
+                    "Subsequent restarts use the cached copy.\n\n"
+                    "### Environment Variables\n\n"
+                    "- `HF_DATASET_OWNER`: Owner of the dataset repo (default: `diatribe00`)\n"
+                    "- `HF_DATASET_NAME`: Name of the dataset repo (default: `normattiva-data`)\n"
+                    "- `HF_TOKEN`: HuggingFace API token (auto-set if deploying to your Space)\n\n"
+                    "### Logs\n\n"
+                    "Check container logs for startup progress:\n"
+                    "```\n"
+                    "[startup] Downloading database (attempt 1/3, ~970MB)...\n"
+                    "[download_db] Fetching diatribe00/normattiva-data/data/laws.db...\n"
+                    "[startup] Database ready: 969MB\n"
+                    "[startup] Starting Streamlit...\n"
+                    "```\n",
+                    encoding="utf-8",
+                )
 
             # Dockerfile for Streamlit (DB pre-downloads on first run)
             (staging / "Dockerfile").write_text(
