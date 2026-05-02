@@ -174,6 +174,8 @@ def main():
                 "# Injected environment for Space profile (set by deploy_hf.py)\n"
                 f"export APP_PROFILE=\"{profile}\"\n"
                 f"export HF_DATASET_NAME=\"{ds}\"\n"
+                f"export HF_DATASET_OWNER=\"{ds.split('/')[0]}\"\n"
+                f"export HF_DATASET_NAME=\"{ds.split('/')[-1]}\"\n"
                 "DB_PATH=\"/app/data/laws.db\"\n"
                 "MIN_DB_SIZE=100000000  # 100MB threshold\n"
                 "MAX_RETRIES=3\n"
