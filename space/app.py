@@ -1251,19 +1251,21 @@ def page_italian_legal_lab():
         st.info("Database required for Legal Lab.")
         return
 
-    tabs = st.tabs([
-        "🧭 Mission Control",
-        "⚖️ Normattiva Status Hub",
-        "🔎 Full Normattiva Experience",
-        "🔄 Status Timeline",
-        "🏦 SIOPE+ (Bank of Italy)",
-        "🗞️ Gazzetta Ufficiale Daily",
-        "📊 ISTAT SDMX",
-        "🏛️ Senato AKN Bulk",
-        "🧩 Institutional APIs",
-    ])
+    section = st.radio(
+        "Italian Legal Lab sections",
+        [
+            "Overview",
+            "Normattiva Tracks",
+            "Status Timeline",
+            "SIOPE+",
+            "Public Data Feeds",
+        ],
+        horizontal=True,
+        key="italian-lab-section",
+        label_visibility="collapsed",
+    )
 
-    with tabs[0]:
+    if section == "Overview":
         st.subheader("Italian Legal Lab control center")
         st.markdown(
             "This Space is now designed as the full legal analysis hub: "
@@ -1280,10 +1282,12 @@ def page_italian_legal_lab():
             st.session_state["goto_page"] = "🔍 Search"
             st.rerun()
         if qa2.button("Open Vigenti", key="lab-go-vigenti"):
-            st.session_state["goto_page"] = "⚡ Vigenti"
+            st.session_state["italian-lab-section"] = "Normattiva Tracks"
+            st.session_state["italian-lab-track-select"] = "vigente"
             st.rerun()
         if qa3.button("Open Abrogati", key="lab-go-abrogati"):
-            st.session_state["goto_page"] = "🚫 Abrogati"
+            st.session_state["italian-lab-section"] = "Normattiva Tracks"
+            st.session_state["italian-lab-track-select"] = "abrogato"
             st.rerun()
         if qa4.button("Open Citations", key="lab-go-citations"):
             st.session_state["goto_page"] = "🔗 Citations"
@@ -1296,7 +1300,32 @@ def page_italian_legal_lab():
             "- italian-legal-lab -> diatribe00/italian-legal-lab-data"
         )
 
-    with tabs[1]:
+        st.divider()
+        st.subheader("Full Normattiva experience")
+        st.caption("Direct access to the full analysis stack available in this Space.")
+        r1, r2, r3 = st.columns(3)
+        if r1.button("🔍 Advanced Search", key="lab-open-search"):
+            st.session_state["goto_page"] = "🔍 Search"
+            st.rerun()
+        if r2.button("📋 Browse All Laws", key="lab-open-browse"):
+            st.session_state["goto_page"] = "📋 Browse (All)"
+            st.rerun()
+        if r3.button("📖 Law Detail", key="lab-open-detail"):
+            st.session_state["goto_page"] = "📖 Law Detail"
+            st.rerun()
+
+        r4, r5, r6 = st.columns(3)
+        if r4.button("🔗 Citation Network", key="lab-open-cit-net"):
+            st.session_state["goto_page"] = "🔗 Citations"
+            st.rerun()
+        if r5.button("🏛️ Domain Analytics", key="lab-open-domains"):
+            st.session_state["goto_page"] = "🏛️ Domains"
+            st.rerun()
+        if r6.button("📥 Export Studio", key="lab-open-export"):
+            st.session_state["goto_page"] = "📥 Export"
+            st.rerun()
+
+    elif section == "Normattiva Tracks":
         st.subheader("Normattiva: vigente / multivigente / abrogato")
         laws = _get_laws()
         if not laws:
@@ -1320,7 +1349,11 @@ def page_italian_legal_lab():
             fig = px.pie(df, names="track", title="Dataset status tracks")
             st.plotly_chart(fig, width='stretch')
 
-            sel_track = st.selectbox("Explore track", ["vigente", "multivigente", "abrogato"])
+            sel_track = st.selectbox(
+                "Explore track",
+                ["vigente", "multivigente", "abrogato"],
+                key="italian-lab-track-select",
+            )
             view = df[df["track"] == sel_track].copy().sort_values("year", ascending=False)
             st.write(f"Showing {len(view):,} laws in track: {sel_track}")
             st.dataframe(
@@ -1354,32 +1387,7 @@ def page_italian_legal_lab():
                 except Exception as e:
                     st.error(f"API scan failed: {e}")
 
-    with tabs[2]:
-        st.subheader("Full Normattiva experience")
-        st.caption("Direct access to the full analysis stack available in this Space.")
-        r1, r2, r3 = st.columns(3)
-        if r1.button("🔍 Advanced Search", key="lab-open-search"):
-            st.session_state["goto_page"] = "🔍 Search"
-            st.rerun()
-        if r2.button("📋 Browse All Laws", key="lab-open-browse"):
-            st.session_state["goto_page"] = "📋 Browse (All)"
-            st.rerun()
-        if r3.button("📖 Law Detail", key="lab-open-detail"):
-            st.session_state["goto_page"] = "📖 Law Detail"
-            st.rerun()
-
-        r4, r5, r6 = st.columns(3)
-        if r4.button("🔗 Citation Network", key="lab-open-cit-net"):
-            st.session_state["goto_page"] = "🔗 Citations"
-            st.rerun()
-        if r5.button("🏛️ Domain Analytics", key="lab-open-domains"):
-            st.session_state["goto_page"] = "🏛️ Domains"
-            st.rerun()
-        if r6.button("📥 Export Studio", key="lab-open-export"):
-            st.session_state["goto_page"] = "📥 Export"
-            st.rerun()
-
-    with tabs[3]:
+    elif section == "Status Timeline":
         st.subheader("Status transition timeline (vigente ↔ abrogato / track changes)")
         st.caption(
             "Capture periodic status snapshots and detect transitions per URN. "
@@ -1422,7 +1430,7 @@ def page_italian_legal_lab():
         else:
             st.info("No transitions detected yet. Capture at least two snapshots to compute diffs.")
 
-    with tabs[4]:
+    elif section == "SIOPE+":
         st.subheader("SIOPE+ API integration (Bank of Italy)")
         st.caption(
             "SIOPE+ exposes treasury and payment-exchange operations and generally requires TLS client certificates. "
@@ -1470,7 +1478,7 @@ def page_italian_legal_lab():
         st.code(built, language="text")
         st.caption("Use this generated path against your certified SIOPE+ base server in secure environments.")
 
-    with tabs[5]:
+    elif section == "Public Data Feeds":
         st.subheader("Daily Gazzetta Ufficiale feed")
         rss_url = st.text_input(
             "RSS URL",
@@ -1498,7 +1506,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Gazzetta fetch failed: {e}")
 
-    with tabs[6]:
+        st.divider()
         st.subheader("ISTAT SDMX preview")
         istat_url = st.text_input(
             "ISTAT endpoint",
@@ -1512,7 +1520,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"ISTAT fetch failed: {e}")
 
-    with tabs[7]:
+        st.divider()
         st.subheader("Senato Akoma Ntoso bulk explorer")
         st.caption("Browsable view over SenatoDellaRepubblica/AkomaNtosoBulkData repository contents.")
         path = st.text_input("Repository path", value="", key="senato-path")
@@ -1527,7 +1535,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Senato AKN listing failed: {e}")
 
-    with tabs[8]:
+        st.divider()
         st.subheader("Institutional APIs catalog")
         catalog = [
             {"source": "OpenGazzetta (openGA)", "url": "https://api.gazzettaufficiale.it/"},
