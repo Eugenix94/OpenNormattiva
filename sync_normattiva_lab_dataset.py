@@ -373,6 +373,81 @@ def apply_abrogated_from_originale(conn: sqlite3.Connection, originale_jsonl: Pa
     return count
 
 
+def apply_abrogated_from_jsonl(conn: sqlite3.Connection, abrogated_jsonl: Path) -> int:
+    """Apply/insert abrogated laws from canonical abrogated JSONL."""
+    rows = []
+    count = 0
+    for law in iter_jsonl(abrogated_jsonl):
+        urn = law.get("urn")
+        if not urn:
+            continue
+
+        rows.append(
+            (
+                urn,
+                law.get("title", ""),
+                law.get("type", ""),
+                law.get("date"),
+                int(law.get("year")) if law.get("year") not in (None, "") else None,
+                law.get("text", ""),
+                int(law.get("text_length", 0) or 0),
+                int(law.get("article_count", 0) or 0),
+                "abrogated",
+                law.get("source_collection", "abrogated_feed"),
+                law.get("parsed_at") or datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+        if len(rows) >= 500:
+            conn.executemany(
+                """
+                INSERT INTO laws
+                    (urn, title, type, date, year, text, text_length, article_count, status, source_collection, parsed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(urn) DO UPDATE SET
+                    title=excluded.title,
+                    type=excluded.type,
+                    date=excluded.date,
+                    year=excluded.year,
+                    text=excluded.text,
+                    text_length=excluded.text_length,
+                    article_count=excluded.article_count,
+                    status='abrogated',
+                    source_collection=excluded.source_collection,
+                    parsed_at=excluded.parsed_at
+                """,
+                rows,
+            )
+            conn.commit()
+            count += len(rows)
+            rows.clear()
+
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO laws
+                (urn, title, type, date, year, text, text_length, article_count, status, source_collection, parsed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(urn) DO UPDATE SET
+                title=excluded.title,
+                type=excluded.type,
+                date=excluded.date,
+                year=excluded.year,
+                text=excluded.text,
+                text_length=excluded.text_length,
+                article_count=excluded.article_count,
+                status='abrogated',
+                source_collection=excluded.source_collection,
+                parsed_at=excluded.parsed_at
+            """,
+            rows,
+        )
+        conn.commit()
+        count += len(rows)
+
+    return count
+
+
 def export_bundle(conn: sqlite3.Connection, bundle_path: Path) -> int:
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -654,6 +729,20 @@ def main() -> int:
                 print(f"[sync] applied abrogated status from originale: {marked:,}")
             else:
                 print(f"[sync] originale file missing, skipped abrogated mapping: {originale_path}")
+
+            abrogated_candidates = [
+                processed_dir / "laws_abrogated.jsonl",
+                processed_dir / "laws_abrogate.jsonl",
+            ]
+            applied_abrogated = 0
+            for abrogated_path in abrogated_candidates:
+                if not abrogated_path.exists():
+                    continue
+                cur = apply_abrogated_from_jsonl(conn, abrogated_path)
+                applied_abrogated += cur
+                print(f"[sync] applied canonical abrogated feed: {cur:,} from {abrogated_path.name}")
+            if applied_abrogated == 0:
+                print("[sync] no canonical abrogated JSONL found (laws_abrogated/laws_abrogate)")
 
             conn.execute("INSERT INTO laws_fts(laws_fts) VALUES('rebuild')")
             conn.commit()

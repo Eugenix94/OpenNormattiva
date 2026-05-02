@@ -322,6 +322,42 @@ def _dataset_track(law: Dict) -> str:
     return "multivigente"
 
 
+@st.cache_data(ttl=1200, show_spinner=False)
+def _get_live_api_track_snapshot() -> Dict:
+    from normattiva_api_client import NormattivaAPI
+
+    api = NormattivaAPI(timeout_s=20, retries=1)
+    catalogue = api.get_collection_catalogue()
+
+    by_track = {"vigente": 0, "multivigente": 0, "abrogato": 0}
+    latest_update = {"vigente": None, "multivigente": None, "abrogato": None}
+
+    for c in catalogue:
+        name = str(c.get("nomeCollezione", "")).lower()
+        variant = str(c.get("formatoCollezione", "")).upper()
+        acts = int(c.get("numeroAtti") or 0)
+        created = c.get("dataCreazione")
+
+        if "abrogat" in name and variant == "O":
+            key = "abrogato"
+        elif variant == "M":
+            key = "multivigente"
+        elif variant == "V":
+            key = "vigente"
+        else:
+            continue
+
+        by_track[key] += acts
+        if created and (not latest_update[key] or created > latest_update[key]):
+            latest_update[key] = created
+
+    return {
+        "catalogue_size": len(catalogue),
+        "by_track": by_track,
+        "latest_update": latest_update,
+    }
+
+
 def _render_graph_plotly(nodes, edges, title="Citation Graph"):
     """Render a citation graph using Plotly scatter."""
     if not nodes or not edges:
@@ -941,6 +977,218 @@ def page_track_analysis():
     cols = [c for c in ["year", "type", "status", "title", "urn"] if c in view.columns]
     st.dataframe(view[cols].head(max_rows), width='stretch', hide_index=True)
 
+    st.divider()
+    st.subheader("🔄 Live Normattiva API update check")
+    st.caption(
+        "Compares local track counts with the latest catalogue counts from the live Normattiva API. "
+        "This helps detect if new laws are available upstream."
+    )
+    if st.button("Check API deltas", key="track-api-delta"):
+        try:
+            from normattiva_api_client import NormattivaAPI
+            api = NormattivaAPI(timeout_s=20, retries=1)
+            catalogue = api.get_collection_catalogue()
+
+            live = {"vigente": 0, "multivigente": 0, "abrogato": 0}
+            latest_date = {"vigente": None, "multivigente": None, "abrogato": None}
+            for c in catalogue:
+                name = str(c.get("nomeCollezione", "")).lower()
+                variant = str(c.get("formatoCollezione", "")).upper()
+                n = int(c.get("numeroAtti") or 0)
+                d = c.get("dataCreazione")
+
+                if "abrogat" in name and variant == "O":
+                    live["abrogato"] += n
+                    if d and (not latest_date["abrogato"] or d > latest_date["abrogato"]):
+                        latest_date["abrogato"] = d
+                elif variant == "V":
+                    live["vigente"] += n
+                    if d and (not latest_date["vigente"] or d > latest_date["vigente"]):
+                        latest_date["vigente"] = d
+                elif variant == "M":
+                    live["multivigente"] += n
+                    if d and (not latest_date["multivigente"] or d > latest_date["multivigente"]):
+                        latest_date["multivigente"] = d
+
+            local = {
+                "vigente": int((df["track"] == "vigente").sum()),
+                "multivigente": int((df["track"] == "multivigente").sum()),
+                "abrogato": int((df["track"] == "abrogato").sum()),
+            }
+
+            rows = []
+            for t in ["vigente", "multivigente", "abrogato"]:
+                delta = live[t] - local[t]
+                rows.append(
+                    {
+                        "track": t,
+                        "local_dataset": local[t],
+                        "live_api_catalogue": live[t],
+                        "delta_live_minus_local": delta,
+                        "latest_api_update": latest_date[t],
+                    }
+                )
+
+            rep = pd.DataFrame(rows)
+            st.dataframe(rep, width='stretch', hide_index=True)
+
+            total_gap = int(rep["delta_live_minus_local"].clip(lower=0).sum())
+            if total_gap > 0:
+                st.warning(f"Potentially missing laws detected from live API catalogue: ~{total_gap:,}")
+            else:
+                st.success("No positive gap detected from catalogue-level comparison.")
+        except Exception as e:
+            st.error(f"API delta check failed: {e}")
+
+
+def _table_exists(db, table_name: str) -> bool:
+    row = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def _variant_history_for_urn(db, urn: str, limit: int = 12) -> List[Dict]:
+    if not _table_exists(db, "law_variants"):
+        return []
+    rows = db.conn.execute(
+        """
+        SELECT variant, status, date, year, text_length, article_count, source_collection, parsed_at
+        FROM law_variants
+        WHERE urn = ?
+        ORDER BY
+            CASE variant
+                WHEN 'vigente' THEN 0
+                WHEN 'multivigente' THEN 1
+                WHEN 'originale' THEN 2
+                ELSE 3
+            END,
+            parsed_at DESC
+        LIMIT ?
+        """,
+        (urn, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _build_rag_context_pack(db, query: str, top_k: int, tracks: List[str]) -> Dict:
+    candidates = db.search_fts(query, limit=max(120, top_k * 12))
+    filtered = [r for r in candidates if _dataset_track(r) in tracks]
+    evidence = filtered[:top_k]
+
+    context_blocks = []
+    for i, law in enumerate(evidence, 1):
+        urn = law.get("urn", "")
+        txt = law.get("text", "") if isinstance(law.get("text"), str) else ""
+        history = _variant_history_for_urn(db, urn, limit=10)
+
+        incoming = 0
+        outgoing = 0
+        try:
+            incoming = len(db.get_citations_incoming(urn, limit=200))
+            outgoing = len(db.get_citations_outgoing(urn, limit=200))
+        except Exception:
+            pass
+
+        context_blocks.append(
+            {
+                "rank": i,
+                "urn": urn,
+                "title": law.get("title"),
+                "type": law.get("type"),
+                "year": law.get("year"),
+                "status": _normalize_status(law.get("status")),
+                "track": _dataset_track(law),
+                "source_collection": law.get("source_collection"),
+                "article_count": int(law.get("article_count") or 0),
+                "text_length": int(law.get("text_length") or 0),
+                "citation_incoming": incoming,
+                "citation_outgoing": outgoing,
+                "history_variants": history,
+                "excerpt": txt[:2000],
+            }
+        )
+
+    system_instructions = (
+        "You are a legal reasoning assistant for Italian law. Use ONLY provided context blocks. "
+        "Prioritize vigente law for current-state answers, use multivigente history for temporal evolution, "
+        "and clearly label abrogated law as non-vigente. Always cite URNs used in conclusions."
+    )
+
+    return {
+        "query": query,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tracks_requested": tracks,
+        "evidence_count": len(context_blocks),
+        "system_instructions": system_instructions,
+        "context_blocks": context_blocks,
+    }
+
+
+def page_context_rag_lab():
+    st.header("🧠 Context Engineering RAG Lab")
+    st.caption(
+        "Build a status-aware legal context pack for LLM reasoning across vigente, multivigente history, and abrogated corpus."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database required for Context RAG lab.")
+        return
+
+    q = st.text_input(
+        "Legal question",
+        placeholder="Esempio: Qual e l'evoluzione normativa della disciplina del lavoro pubblico?",
+        key="rag-question",
+    ).strip()
+
+    c1, c2 = st.columns(2)
+    top_k = c1.slider("Top laws for context", min_value=4, max_value=25, value=10)
+    tracks = c2.multiselect(
+        "Tracks to include",
+        ["vigente", "multivigente", "abrogato"],
+        default=["vigente", "multivigente"],
+        key="rag-tracks",
+    )
+
+    if st.button("Build Context Pack", key="build-rag-pack"):
+        if not q:
+            st.warning("Insert a question first.")
+            return
+        if not tracks:
+            st.warning("Select at least one track.")
+            return
+
+        pack = _build_rag_context_pack(db, q, top_k=top_k, tracks=tracks)
+        st.success(f"Built context pack with {pack['evidence_count']} laws.")
+
+        st.subheader("Context-engineered answer draft")
+        lines = [
+            f"Question: {pack['query']}",
+            f"Tracks: {', '.join(pack['tracks_requested'])}",
+            f"Evidence blocks: {pack['evidence_count']}",
+            "",
+            "Use this with your LLM system prompt:",
+            pack["system_instructions"],
+            "",
+            "Primary evidence:",
+        ]
+        for b in pack["context_blocks"]:
+            lines.append(
+                f"- [{b['track']}|{b['status']}] {b['title']} ({b['year']}) — {b['urn']}"
+            )
+        st.text("\n".join(lines))
+
+        pack_json = json.dumps(pack, ensure_ascii=False, indent=2)
+        st.download_button(
+            "Download context pack JSON",
+            data=pack_json,
+            file_name="normattiva_rag_context_pack.json",
+            mime="application/json",
+        )
+        st.code(pack_json[:100000], language="json")
+
 
 def page_law_detail():
     st.header("📖 Law Detail - Full Context & Relationships")
@@ -1553,6 +1801,54 @@ def page_dataset_updates():
     st.caption(
         "Tracks which laws were recently updated in the lab dataset and how the nightly sync is evolving."
     )
+
+    laws = _get_laws()
+    if laws:
+        df_laws = pd.DataFrame(laws)
+        df_laws["track"] = df_laws.apply(_dataset_track, axis=1)
+        local_counts = {
+            "vigente": int((df_laws["track"] == "vigente").sum()),
+            "multivigente": int((df_laws["track"] == "multivigente").sum()),
+            "abrogato": int((df_laws["track"] == "abrogato").sum()),
+        }
+
+        st.subheader("Live API vs local dataset")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Local vigente", f"{local_counts['vigente']:,}")
+        c2.metric("Local multivigente", f"{local_counts['multivigente']:,}")
+        c3.metric("Local abrogato", f"{local_counts['abrogato']:,}")
+
+        if st.button("Refresh live API snapshot", key="dataset-updates-api-refresh"):
+            st.cache_data.clear()
+
+        try:
+            live = _get_live_api_track_snapshot()
+            rows = []
+            for key in ["vigente", "multivigente", "abrogato"]:
+                live_count = int(live["by_track"].get(key, 0))
+                local_count = int(local_counts.get(key, 0))
+                rows.append(
+                    {
+                        "track": key,
+                        "local_dataset": local_count,
+                        "live_api_catalogue": live_count,
+                        "delta_live_minus_local": live_count - local_count,
+                        "latest_api_update": live["latest_update"].get(key),
+                    }
+                )
+
+            rep = pd.DataFrame(rows)
+            st.dataframe(rep, width='stretch', hide_index=True)
+            total_positive_gap = int(rep["delta_live_minus_local"].clip(lower=0).sum())
+            if total_positive_gap > 0:
+                st.warning(f"Potential missing laws from live API: ~{total_positive_gap:,}")
+            else:
+                st.success("No positive gap detected at catalogue level.")
+            st.caption(f"Catalogue collections observed: {live['catalogue_size']}")
+        except Exception as e:
+            st.warning(f"Live API snapshot unavailable: {e}")
+
+        st.divider()
 
     db = load_db()
     if not db:
@@ -2323,6 +2619,7 @@ def main():
     pages = {
         "📊 Dashboard": page_dashboard,
         "🧪 Track Analysis": page_track_analysis,
+        "🧠 Context RAG": page_context_rag_lab,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
         "📋 Browse": page_browse,
