@@ -747,7 +747,7 @@ def page_dashboard():
 
 
 def page_search():
-    st.header("\U0001f50d Advanced Search")
+    st.header("🔍 Cerca Leggi — Ricerca Avanzata")
     db = load_db()
 
     query = st.text_input(
@@ -995,7 +995,7 @@ def _render_browse_table(laws: List[Dict], title: str, locked_status: str | None
 
 def page_browse():
     laws = _get_laws()
-    _render_browse_table(laws, "📋 Browse Laws (All)", locked_status=None)
+    _render_browse_table(laws, "📋 Sfoglia Archivio", locked_status=None)
 
 
 def page_vigenti():
@@ -1240,10 +1240,10 @@ def _load_status_transitions(db, limit: int = 1000):
 
 
 def page_italian_legal_lab():
-    st.header("🧪 Italian Legal Lab")
+    st.header("🇮🇹 Italian Legal Lab")
     st.caption(
-        "Unified exploration hub across full Normattiva datasets, SIOPE+ operational data, "
-        "institutional statistics, and parliamentary sources."
+        "Intelligence giuridica integrata: dataset Normattiva, dati finanziari SIOPE+, "
+        "statistiche istituzionali e fonti parlamentari."
     )
 
     db = load_db()
@@ -1278,19 +1278,19 @@ def page_italian_legal_lab():
 
         st.caption("Quick actions")
         qa1, qa2, qa3, qa4 = st.columns(4)
-        if qa1.button("Open Search", key="lab-go-search"):
-            st.session_state["goto_page"] = "🔍 Search"
+        if qa1.button("Cerca Leggi", key="lab-go-search"):
+            st.session_state["goto_page"] = "🔍 Cerca Leggi"
             st.rerun()
-        if qa2.button("Open Vigenti", key="lab-go-vigenti"):
+        if qa2.button("Vigenti", key="lab-go-vigenti"):
             st.session_state["italian-lab-section"] = "Normattiva Tracks"
             st.session_state["italian-lab-track-select"] = "vigente"
             st.rerun()
-        if qa3.button("Open Abrogati", key="lab-go-abrogati"):
+        if qa3.button("Abrogati", key="lab-go-abrogati"):
             st.session_state["italian-lab-section"] = "Normattiva Tracks"
             st.session_state["italian-lab-track-select"] = "abrogato"
             st.rerun()
-        if qa4.button("Open Citations", key="lab-go-citations"):
-            st.session_state["goto_page"] = "🔗 Citations"
+        if qa4.button("Rete Citazioni", key="lab-go-citations"):
+            st.session_state["goto_page"] = "🔗 Rete Citazioni"
             st.rerun()
 
         st.info(
@@ -1304,25 +1304,25 @@ def page_italian_legal_lab():
         st.subheader("Full Normattiva experience")
         st.caption("Direct access to the full analysis stack available in this Space.")
         r1, r2, r3 = st.columns(3)
-        if r1.button("🔍 Advanced Search", key="lab-open-search"):
-            st.session_state["goto_page"] = "🔍 Search"
+        if r1.button("🔍 Cerca Leggi", key="lab-open-search"):
+            st.session_state["goto_page"] = "🔍 Cerca Leggi"
             st.rerun()
-        if r2.button("📋 Browse All Laws", key="lab-open-browse"):
-            st.session_state["goto_page"] = "📋 Browse (All)"
+        if r2.button("📋 Sfoglia Archivio", key="lab-open-browse"):
+            st.session_state["goto_page"] = "📋 Sfoglia Archivio"
             st.rerun()
-        if r3.button("📖 Law Detail", key="lab-open-detail"):
-            st.session_state["goto_page"] = "📖 Law Detail"
+        if r3.button("📖 Scheda Legge", key="lab-open-detail"):
+            st.session_state["goto_page"] = "📖 Scheda Legge"
             st.rerun()
 
         r4, r5, r6 = st.columns(3)
-        if r4.button("🔗 Citation Network", key="lab-open-cit-net"):
-            st.session_state["goto_page"] = "🔗 Citations"
+        if r4.button("🔗 Rete Citazioni", key="lab-open-cit-net"):
+            st.session_state["goto_page"] = "🔗 Rete Citazioni"
             st.rerun()
-        if r5.button("🏛️ Domain Analytics", key="lab-open-domains"):
-            st.session_state["goto_page"] = "🏛️ Domains"
+        if r5.button("🏛️ Aree Giuridiche", key="lab-open-domains"):
+            st.session_state["goto_page"] = "🏛️ Aree Giuridiche"
             st.rerun()
-        if r6.button("📥 Export Studio", key="lab-open-export"):
-            st.session_state["goto_page"] = "📥 Export"
+        if r6.button("📥 Esporta Dati", key="lab-open-export"):
+            st.session_state["goto_page"] = "📥 Esporta"
             st.rerun()
 
     elif section == "Normattiva Tracks":
@@ -1577,7 +1577,7 @@ def page_italian_legal_lab():
 
 
 def page_law_detail():
-    st.header("📖 Law Detail - Full Context & Relationships")
+    st.header("📖 Scheda Legge")
     db = load_db()
     if not db:
         st.info("Database required for detailed law view.")
@@ -1811,7 +1811,7 @@ def page_law_detail():
 
 
 def page_citations():
-    st.header("\U0001f517 Citation Network")
+    st.header("🔗 Rete Citazioni")
     db = load_db()
 
     if db:
@@ -1900,7 +1900,7 @@ def page_citations():
 
 
 def page_domains():
-    st.header("\U0001f3db Legal Domains")
+    st.header("🏛️ Aree Giuridiche")
     db = load_db()
     if not db:
         st.info("Database required for domain analysis.")
@@ -2463,7 +2463,7 @@ def _render_law_card(law: dict, db, key_prefix: str = ""):
         with c2:
             if st.button("Apri →", key=f"{key_prefix}-open-{urn}"):
                 st.session_state["detail_urn"] = urn
-                st.session_state["goto_page"] = "📖 Law Detail"
+                st.session_state["goto_page"] = "📖 Scheda Legge"
                 st.rerun()
 
 
@@ -2697,7 +2697,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 
                         if st.button(f"Apri {name} →", key=f"codice-{urn}"):
                             st.session_state["detail_urn"] = law_d["urn"]
-                            st.session_state["goto_page"] = "📖 Law Detail"
+                            st.session_state["goto_page"] = "📖 Scheda Legge"
                             st.rerun()
                     else:
                         st.warning(f"Non trovato nel database: `{urn}`")
@@ -2776,18 +2776,18 @@ def main():
     # Select visible pages per profile
     if IS_ITALIAN_LAB:
         pages = {
-            "🇮🇹 Italian Legal Lab": all_pages["🧪 Italian Legal Lab"],
-            "🔍 Search": all_pages["🔍 Search"],
-            "📋 Browse (All)": all_pages["📋 Browse (All)"],
+            "🇮🇹 Lab Overview": all_pages["🧪 Italian Legal Lab"],
+            "🔍 Cerca Leggi": all_pages["🔍 Search"],
+            "📋 Sfoglia Archivio": all_pages["📋 Browse (All)"],
             "🇮🇹 Costituzione & Codici": all_pages["🇮🇹 Costituzione & Codici"],
-            "🔗 Citations": all_pages["🔗 Citations"],
-            "🏛️ Domains": all_pages["🏛️ Domains"],
-            "📖 Law Detail": all_pages["📖 Law Detail"],
-            "🔔 Notifications": all_pages["🔔 Notifications"],
-            "📝 Update Log": all_pages["📝 Update Log"],
-            "📥 Export": all_pages["📥 Export"],
+            "🔗 Rete Citazioni": all_pages["🔗 Citations"],
+            "🏛️ Aree Giuridiche": all_pages["🏛️ Domains"],
+            "📖 Scheda Legge": all_pages["📖 Law Detail"],
+            "🔔 Aggiornamenti": all_pages["🔔 Notifications"],
+            "📝 Cronologia": all_pages["📝 Update Log"],
+            "📥 Esporta": all_pages["📥 Export"],
         }
-        st.sidebar.success("Italian Legal Lab profile active — dedicated legal intelligence workspace.")
+        st.sidebar.success("Italian Legal Lab — intelligence giuridica integrata.")
     elif IS_LAB:
         pages = {
             "📊 Dashboard": all_pages["📊 Dashboard"],
