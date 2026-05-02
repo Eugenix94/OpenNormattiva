@@ -17,16 +17,38 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+def get_current_branch() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except Exception:
+        return "unknown"
 
 def main():
     parser = argparse.ArgumentParser(description="Deploy to HuggingFace (normattiva-lab branch)")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN", ""))
     parser.add_argument("--skip-space", action="store_true")
     parser.add_argument("--skip-dataset", action="store_true")
+    parser.add_argument("--allow-unsafe-targets", action="store_true",
+                        help="Allow running deploy from a branch different than normattiva-lab")
     args = parser.parse_args()
+
+    branch = get_current_branch()
+    print(f"Current git branch: {branch}")
+    if branch != "normattiva-lab" and not args.allow_unsafe_targets:
+        print("ERROR: This deploy script is dedicated to branch normattiva-lab.")
+        print("Use --allow-unsafe-targets only for intentional cross-branch recovery operations.")
+        sys.exit(2)
 
     if not args.token:
         print("ERROR: No HF token. Set HF_TOKEN or use --token")
@@ -39,7 +61,7 @@ def main():
     print(f"Authenticated as: {username}")
 
     # normattiva-lab branch targets the lab space/dataset, NOT production
-    space_id = f"{username}/normattiva-lab"
+    space_id = f"{username}/opennormattiva-lab"
     dataset_id = f"{username}/normattiva-lab-data"
 
     # ── Deploy Space ──────────────────────────────────────────────────────

@@ -46,7 +46,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 HF_DATASET_OWNER = os.environ.get("HF_DATASET_OWNER", "diatribe00")
-HF_DATASET_NAME = os.environ.get("HF_DATASET_NAME", "normattiva-data")
+HF_DATASET_NAME = os.environ.get("HF_DATASET_NAME", "normattiva-lab-data")
 
 
 def get_hf_dataset_repo_id() -> str:
@@ -164,6 +164,7 @@ def load_db():
 def load_laws_from_jsonl():
     """Fallback: load laws from JSONL if no database."""
     paths = [
+        Path('data/processed/laws_multivigente.jsonl'),
         Path('data/processed/laws_vigente.jsonl'),
         Path('/app/data/processed/laws_vigente.jsonl'),
         Path(__file__).parent.parent / 'data' / 'processed' / 'laws_vigente.jsonl',
@@ -263,14 +264,14 @@ def trigger_api_check():
 # PAGE CONFIG
 
 st.set_page_config(
-    page_title="Normattiva Jurisprudence",
-    page_icon="\u2696\ufe0f",
+    page_title="OpenNormattiva Lab",
+    page_icon="\U0001f9ea",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("\u2696\ufe0f Normattiva Jurisprudence Research Platform")
-st.markdown("Explore Italian law: search, citations, domains, and legal evolution (v2.2)")
+st.title("\U0001f9ea OpenNormattiva Lab")
+st.markdown("Experimental analysis: vigente, multivigente & abrogato law tracks across the full Normattiva dataset.")
 
 
 # HELPERS
@@ -284,7 +285,7 @@ def _get_laws_cached(db_path: str):
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT urn, title, type, date, year, status, article_count, "
-            "text_length, importance_score FROM laws ORDER BY year DESC LIMIT 100000"
+            "text_length, importance_score FROM laws ORDER BY year DESC"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -304,12 +305,21 @@ def _get_laws():
             # Fallback: direct query without cache
             rows = db.conn.execute(
                 "SELECT urn, title, type, date, year, status, article_count, "
-                "text_length, importance_score FROM laws ORDER BY year DESC LIMIT 100000"
+                "text_length, importance_score FROM laws ORDER BY year DESC"
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception as e:
             logger.error(f"Error loading laws from DB: {e}")
     return load_laws_from_jsonl()
+
+
+def _dataset_track(law: Dict) -> str:
+    status = str(law.get("status") or "").lower()
+    if status in {"abrogated", "abrogato", "abrogata", "a"}:
+        return "abrogato"
+    if status in {"in_force", "vigente", "v"}:
+        return "vigente"
+    return "multivigente"
 
 
 def _render_graph_plotly(nodes, edges, title="Citation Graph"):
@@ -874,6 +884,62 @@ def page_browse():
                            else "No text")
                 st.text_area("Text preview", txt, height=250, disabled=True,
                              key=f"browse_{law.get('urn', start)}")
+
+
+def page_track_analysis():
+    st.header("🧪 Dataset Track Analysis")
+    st.caption("Full-track overview for vigente, multivigente, and abrogato laws in the lab dataset.")
+
+    laws = _get_laws()
+    if not laws:
+        st.info("No data loaded.")
+        return
+
+    df = pd.DataFrame(laws)
+    df["track"] = df.apply(_dataset_track, axis=1)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total laws", f"{len(df):,}")
+    c2.metric("Vigente", f"{int((df['track'] == 'vigente').sum()):,}")
+    c3.metric("Multivigente", f"{int((df['track'] == 'multivigente').sum()):,}")
+    c4.metric("Abrogato", f"{int((df['track'] == 'abrogato').sum()):,}")
+
+    dist = df.groupby("track").size().reset_index(name="count")
+    fig = px.pie(dist, names="track", values="count", title="Track distribution")
+    st.plotly_chart(fig, width='stretch')
+
+    if "year" in df.columns:
+        by_year = (
+            df.dropna(subset=["year"]) 
+            .groupby(["year", "track"]).size()
+            .reset_index(name="count")
+            .sort_values("year")
+        )
+        if not by_year.empty:
+            fig_y = px.area(
+                by_year,
+                x="year",
+                y="count",
+                color="track",
+                title="Track evolution over time",
+            )
+            st.plotly_chart(fig_y, width='stretch')
+
+    st.subheader("Explore track records")
+    track = st.selectbox("Track", ["vigente", "multivigente", "abrogato"], key="track-analysis-select")
+    q = st.text_input("Title contains", value="", key="track-analysis-query").strip().lower()
+    max_rows = st.slider("Rows to show", min_value=20, max_value=500, value=120, step=20)
+
+    view = df[df["track"] == track].copy()
+    if q:
+        view = view[view["title"].fillna("").str.lower().str.contains(q, na=False)]
+
+    sort_col = "year" if "year" in view.columns else "title"
+    view = view.sort_values(sort_col, ascending=False)
+    st.write(f"Showing {len(view):,} records")
+
+    cols = [c for c in ["year", "type", "status", "title", "urn"] if c in view.columns]
+    st.dataframe(view[cols].head(max_rows), width='stretch', hide_index=True)
 
 
 def page_law_detail():
@@ -2256,6 +2322,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 def main():
     pages = {
         "📊 Dashboard": page_dashboard,
+        "🧪 Track Analysis": page_track_analysis,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
         "📋 Browse": page_browse,
@@ -2316,6 +2383,7 @@ def main():
             st.sidebar.caption(f"Ultimo aggiornamento: {last}")
 
     st.sidebar.divider()
+    st.sidebar.caption(f"Dataset repo: {get_hf_dataset_repo_id()}")
     st.sidebar.markdown(
         "⚖️ **OpenNormattiva** — Piattaforma di ricerca giuridica italiana\n\n"
         "190.000+ leggi | Ricerca FTS5 | Grafi citazioni | Cronologia modifiche"
