@@ -1070,6 +1070,42 @@ def _dataset_track(rec: dict) -> str:
     return "vigente"
 
 
+@st.cache_data(ttl=1200, show_spinner=False)
+def _get_live_api_track_snapshot() -> Dict:
+    from normattiva_api_client import NormattivaAPI
+
+    api = NormattivaAPI(timeout_s=20, retries=1)
+    catalogue = api.get_collection_catalogue()
+
+    by_track = {"vigente": 0, "multivigente": 0, "abrogato": 0}
+    latest_update = {"vigente": None, "multivigente": None, "abrogato": None}
+
+    for c in catalogue:
+        name = str(c.get("nomeCollezione", "")).lower()
+        variant = str(c.get("formatoCollezione", "")).upper()
+        acts = int(c.get("numeroAtti") or 0)
+        created = c.get("dataCreazione")
+
+        if "abrogat" in name and variant == "O":
+            key = "abrogato"
+        elif variant == "M":
+            key = "multivigente"
+        elif variant == "V":
+            key = "vigente"
+        else:
+            continue
+
+        by_track[key] += acts
+        if created and (not latest_update[key] or created > latest_update[key]):
+            latest_update[key] = created
+
+    return {
+        "catalogue_size": len(catalogue),
+        "by_track": by_track,
+        "latest_update": latest_update,
+    }
+
+
 def _ensure_status_timeline_schema(db):
     db.conn.execute(
         """
@@ -1924,6 +1960,72 @@ This keeps you in full control of what enters the dataset.
     """)
 
 
+def page_dataset_coverage():
+    st.header("📡 Dataset Coverage")
+    st.caption(
+        "Compare local dataset tracks (vigente/abrogato/multivigente) with the live Normattiva API catalogue "
+        "to quickly identify potential missing laws."
+    )
+
+    laws = _get_laws()
+    if not laws:
+        st.info("No data loaded.")
+        return
+
+    df = pd.DataFrame(laws)
+    df["track"] = df.apply(_dataset_track, axis=1)
+    local_counts = {
+        "vigente": int((df["track"] == "vigente").sum()),
+        "multivigente": int((df["track"] == "multivigente").sum()),
+        "abrogato": int((df["track"] == "abrogato").sum()),
+    }
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Local vigente", f"{local_counts['vigente']:,}")
+    c2.metric("Local multivigente", f"{local_counts['multivigente']:,}")
+    c3.metric("Local abrogato", f"{local_counts['abrogato']:,}")
+
+    if st.button("Check live API coverage", key="dataset-coverage-refresh"):
+        st.cache_data.clear()
+
+    try:
+        live = _get_live_api_track_snapshot()
+    except Exception as e:
+        st.error(f"Live API check failed: {e}")
+        return
+
+    rows = []
+    for key in ["vigente", "multivigente", "abrogato"]:
+        live_count = int(live["by_track"].get(key, 0))
+        local_count = int(local_counts.get(key, 0))
+        rows.append(
+            {
+                "track": key,
+                "local_dataset": local_count,
+                "live_api_catalogue": live_count,
+                "delta_live_minus_local": live_count - local_count,
+                "latest_api_update": live["latest_update"].get(key),
+            }
+        )
+
+    rep = pd.DataFrame(rows)
+    st.dataframe(rep, width='stretch', hide_index=True)
+
+    total_positive_gap = int(rep["delta_live_minus_local"].clip(lower=0).sum())
+    if total_positive_gap > 0:
+        st.warning(f"Potential missing laws from live API: ~{total_positive_gap:,}")
+    else:
+        st.success("No positive gap detected at catalogue level.")
+
+    with _monitor_lock:
+        pending = list(_monitor_state["pending_changes"])
+        last_check = _monitor_state["last_check"]
+    st.caption(
+        f"Catalogue collections observed: {live['catalogue_size']} | "
+        f"Pending API collection changes: {len(pending)} | Last notification check: {last_check or 'N/A'}"
+    )
+
+
 def page_fiscal_citizen_tax_lab():
     st.header("💶 Fiscal Burden Lab (Experimental)")
     st.caption(
@@ -2631,6 +2733,7 @@ def main():
     all_pages = {
         "📊 Dashboard": page_dashboard,
         "🧪 Italian Legal Lab": page_italian_legal_lab,
+        "📡 Dataset Coverage": page_dataset_coverage,
         "🧭 Rights Explorer": page_rights_explorer,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
@@ -2661,6 +2764,7 @@ def main():
     elif IS_LAB:
         pages = {
             "📊 Dashboard": all_pages["📊 Dashboard"],
+            "📡 Dataset Coverage": all_pages["📡 Dataset Coverage"],
             "🔍 Search": all_pages["🔍 Search"],
             "⚡ Vigenti": all_pages["⚡ Vigenti"],
             "🚫 Abrogati": all_pages["🚫 Abrogati"],
@@ -2676,6 +2780,7 @@ def main():
     else:
         pages = {
             "📊 Dashboard": all_pages["📊 Dashboard"],
+            "📡 Dataset Coverage": all_pages["📡 Dataset Coverage"],
             "🔍 Search": all_pages["🔍 Search"],
             "⚡ Vigenti": all_pages["⚡ Vigenti"],
             "🚫 Abrogati": all_pages["🚫 Abrogati"],
