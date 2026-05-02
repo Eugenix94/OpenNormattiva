@@ -2768,24 +2768,18 @@ def main():
     # Select visible pages per profile
     if IS_ITALIAN_LAB:
         pages = {
-            "📊 Dashboard": all_pages["📊 Dashboard"],
-            "🧪 Italian Legal Lab": all_pages["🧪 Italian Legal Lab"],
+            "🇮🇹 Italian Legal Lab": all_pages["🧪 Italian Legal Lab"],
             "🔍 Search": all_pages["🔍 Search"],
-            "⚡ Vigenti": all_pages["⚡ Vigenti"],
-            "🚫 Abrogati": all_pages["🚫 Abrogati"],
             "📋 Browse (All)": all_pages["📋 Browse (All)"],
-            "🧭 Rights Explorer": all_pages["🧭 Rights Explorer"],
             "🇮🇹 Costituzione & Codici": all_pages["🇮🇹 Costituzione & Codici"],
             "🔗 Citations": all_pages["🔗 Citations"],
             "🏛️ Domains": all_pages["🏛️ Domains"],
-            "💶 Fiscal Burden Lab": all_pages["💶 Fiscal Burden Lab"],
-            "🤖 LLM Lab": all_pages["🤖 LLM Lab"],
             "📖 Law Detail": all_pages["📖 Law Detail"],
             "🔔 Notifications": all_pages["🔔 Notifications"],
             "📝 Update Log": all_pages["📝 Update Log"],
             "📥 Export": all_pages["📥 Export"],
         }
-        st.sidebar.success("Italian Legal Lab profile active — unified research hub.")
+        st.sidebar.success("Italian Legal Lab profile active — dedicated legal intelligence workspace.")
     elif IS_LAB:
         pages = {
             "📊 Dashboard": all_pages["📊 Dashboard"],
