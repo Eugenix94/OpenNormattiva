@@ -10,20 +10,61 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+
+def get_current_branch() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def enforce_branch_targets(branch: str, space_name: str, dataset_name: str, allow_unsafe: bool) -> None:
+    expected = {
+        "master": ("opennormattiva-search", "normattiva-data"),
+        "italian-legal-lab": ("italian-legal-lab", "italian-legal-lab-data"),
+        "normattiva-lab": ("opennormattiva-lab", "normattiva-lab-data"),
+        "lab-space": ("opennormattiva-lab", "normattiva-lab-data"),
+    }
+    if branch not in expected or allow_unsafe:
+        return
+
+    exp_space, exp_dataset = expected[branch]
+    if space_name != exp_space or dataset_name != exp_dataset:
+        print("ERROR: Deploy target mismatch for current branch")
+        print(f"  Branch:          {branch}")
+        print(f"  Expected Space:  {exp_space}")
+        print(f"  Expected Dataset:{exp_dataset}")
+        print(f"  Requested Space: {space_name}")
+        print(f"  Requested Dataset:{dataset_name}")
+        print("Use --allow-unsafe-targets only if you intentionally need cross-target deploy.")
+        sys.exit(2)
+
 def main():
     parser = argparse.ArgumentParser(description="Deploy to HuggingFace")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN", ""))
-    parser.add_argument("--space-name", default="opennormattiva-search",
-                        help="HF Space repo name (default: opennormattiva-search)")
-    parser.add_argument("--dataset-name", default="normattiva-data",
-                        help="HF Dataset repo name (default: normattiva-data)")
+    parser.add_argument("--space-name", default="italian-legal-lab",
+                        help="HF Space repo name (default: italian-legal-lab)")
+    parser.add_argument("--dataset-name", default="italian-legal-lab-data",
+                        help="HF Dataset repo name (default: italian-legal-lab-data)")
     parser.add_argument("--skip-space", action="store_true")
     parser.add_argument("--skip-dataset", action="store_true")
+    parser.add_argument("--allow-unsafe-targets", action="store_true",
+                        help="Allow deploying to non-standard space/dataset for the current branch")
     args = parser.parse_args()
+
+    branch = get_current_branch()
+    print(f"Current git branch: {branch}")
+    enforce_branch_targets(branch, args.space_name, args.dataset_name, args.allow_unsafe_targets)
 
     if not args.token:
         print("ERROR: No HF token. Set HF_TOKEN or use --token")

@@ -211,13 +211,21 @@ def get_db_paths():
     _app_file = Path(__file__)
     _app_dir = _app_file.parent
     _root_dir = _app_dir.parent
+
+    dataset_repo = os.environ.get("HF_DATASET_NAME", "").strip()
+    if "/" in dataset_repo:
+        ds_owner, ds_name = dataset_repo.split("/", 1)
+    else:
+        ds_owner = os.environ.get("HF_DATASET_OWNER", "diatribe00")
+        ds_name = dataset_repo or "normattiva-data"
     
     hf_cache_hub = Path.home() / '.cache' / 'huggingface' / 'hub'
     
     # Scan HF hub cache for any normattiva dataset snapshot that has laws.db
     hf_cached_paths = []
     if hf_cache_hub.exists():
-        for snap in hf_cache_hub.glob('datasets--diatribe00--normattiva-data/snapshots/*/data/laws.db'):
+        cache_glob = f"datasets--{ds_owner}--{ds_name}/snapshots/*/data/laws.db"
+        for snap in hf_cache_hub.glob(cache_glob):
             hf_cached_paths.append(snap)
     
     base_paths = [
@@ -245,9 +253,17 @@ def download_database_from_hf():
         return None
     
     try:
-        logger.info("Downloading database from HF Dataset (this may take ~5 min)...")
+        dataset_repo = os.environ.get("HF_DATASET_NAME", "").strip()
+        if "/" in dataset_repo:
+            repo_id = dataset_repo
+        else:
+            owner = os.environ.get("HF_DATASET_OWNER", "diatribe00")
+            name = dataset_repo or "normattiva-data"
+            repo_id = f"{owner}/{name}"
+
+        logger.info(f"Downloading database from HF Dataset {repo_id} (this may take ~5 min)...")
         cached = hf_hub_download(
-            repo_id="diatribe00/normattiva-data",
+            repo_id=repo_id,
             filename="data/laws.db",
             repo_type="dataset",
         )
@@ -439,14 +455,14 @@ def trigger_api_check():
 # PAGE CONFIG
 
 st.set_page_config(
-    page_title="Normattiva Jurisprudence",
-    page_icon="\u2696\ufe0f",
+    page_title="Italian Legal Lab",
+    page_icon="\U0001f1ee\U0001f1f9",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("\u2696\ufe0f Normattiva Jurisprudence Research Platform")
-st.markdown("Explore Italian law: search, citations, domains, and legal evolution (v2.2)")
+st.title("\U0001f1ee\U0001f1f9 Italian Legal Lab")
+st.markdown("Full-spectrum Italian law intelligence: Normattiva datasets, SIOPE+ finance APIs, and institutional data sources.")
 
 # ---- App profile selection ---------------------------------------------
 # Controls which pages are exposed and which dataset is used by default.
@@ -454,6 +470,15 @@ APP_PROFILE = os.environ.get("APP_PROFILE", "").lower().strip()
 HF_DATASET_NAME = os.environ.get("HF_DATASET_NAME", "").strip()
 _env_space = os.environ.get("HF_SPACE_ID") or os.environ.get("SPACE_NAME") or os.environ.get("SPACE") or ""
 SPACE_NAME = str(_env_space).lower()
+
+
+def _default_dataset_repo(profile: str) -> str:
+    mapping = {
+        "search": "diatribe00/normattiva-data",
+        "lab": "diatribe00/normattiva-lab-data",
+        "italianlab": "diatribe00/italian-legal-lab-data",
+    }
+    return mapping.get(profile, "diatribe00/normattiva-data")
 
 if not APP_PROFILE:
     if "italian" in HF_DATASET_NAME or "italian" in SPACE_NAME or "legal" in HF_DATASET_NAME:
@@ -466,9 +491,10 @@ if not APP_PROFILE:
 IS_SEARCH = APP_PROFILE == "search"
 IS_LAB = APP_PROFILE == "lab"
 IS_ITALIAN_LAB = APP_PROFILE == "italianlab"
+ACTIVE_DATASET_REPO = HF_DATASET_NAME or _default_dataset_repo(APP_PROFILE)
 
 # Show active profile in the sidebar for clarity
-st.sidebar.info(f"Running profile: `{APP_PROFILE}`\nDataset: `{HF_DATASET_NAME or 'diatribe00/normattiva-data'}`")
+st.sidebar.info(f"Running profile: `{APP_PROFILE}`\nDataset: `{ACTIVE_DATASET_REPO}`")
 # ------------------------------------------------------------------------
 
 
@@ -1216,8 +1242,8 @@ def _load_status_transitions(db, limit: int = 1000):
 def page_italian_legal_lab():
     st.header("🧪 Italian Legal Lab")
     st.caption(
-        "Unified exploration hub across Normattiva status tracks, daily Gazzetta flow, "
-        "institutional statistics (Banca d'Italia/ISTAT SDMX), and parliamentary datasets."
+        "Unified exploration hub across full Normattiva datasets, SIOPE+ operational data, "
+        "institutional statistics, and parliamentary sources."
     )
 
     db = load_db()
@@ -1226,16 +1252,51 @@ def page_italian_legal_lab():
         return
 
     tabs = st.tabs([
+        "🧭 Mission Control",
         "⚖️ Normattiva Status Hub",
+        "🔎 Full Normattiva Experience",
         "🔄 Status Timeline",
+        "🏦 SIOPE+ (Bank of Italy)",
         "🗞️ Gazzetta Ufficiale Daily",
-        "🏦 Banca d'Italia SDMX",
         "📊 ISTAT SDMX",
         "🏛️ Senato AKN Bulk",
         "🧩 Institutional APIs",
     ])
 
     with tabs[0]:
+        st.subheader("Italian Legal Lab control center")
+        st.markdown(
+            "This Space is now designed as the full legal analysis hub: "
+            "Normattiva core (vigente/multivigente/abrogato), fiscal impact, institutional data, and exports."
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Active Profile", APP_PROFILE)
+        c2.metric("Dataset Repo", ACTIVE_DATASET_REPO)
+        c3.metric("Target Space", os.environ.get("HF_SPACE_ID") or os.environ.get("SPACE_NAME") or "N/A")
+
+        st.caption("Quick actions")
+        qa1, qa2, qa3, qa4 = st.columns(4)
+        if qa1.button("Open Search", key="lab-go-search"):
+            st.session_state["goto_page"] = "🔍 Search"
+            st.rerun()
+        if qa2.button("Open Vigenti", key="lab-go-vigenti"):
+            st.session_state["goto_page"] = "⚡ Vigenti"
+            st.rerun()
+        if qa3.button("Open Abrogati", key="lab-go-abrogati"):
+            st.session_state["goto_page"] = "🚫 Abrogati"
+            st.rerun()
+        if qa4.button("Open Citations", key="lab-go-citations"):
+            st.session_state["goto_page"] = "🔗 Citations"
+            st.rerun()
+
+        st.info(
+            "Recommended deployment mapping: \n"
+            "- opennormattiva-search -> diatribe00/normattiva-data\n"
+            "- opennormattiva-lab -> diatribe00/normattiva-lab-data\n"
+            "- italian-legal-lab -> diatribe00/italian-legal-lab-data"
+        )
+
+    with tabs[1]:
         st.subheader("Normattiva: vigente / multivigente / abrogato")
         laws = _get_laws()
         if not laws:
@@ -1293,7 +1354,32 @@ def page_italian_legal_lab():
                 except Exception as e:
                     st.error(f"API scan failed: {e}")
 
-    with tabs[1]:
+    with tabs[2]:
+        st.subheader("Full Normattiva experience")
+        st.caption("Direct access to the full analysis stack available in this Space.")
+        r1, r2, r3 = st.columns(3)
+        if r1.button("🔍 Advanced Search", key="lab-open-search"):
+            st.session_state["goto_page"] = "🔍 Search"
+            st.rerun()
+        if r2.button("📋 Browse All Laws", key="lab-open-browse"):
+            st.session_state["goto_page"] = "📋 Browse (All)"
+            st.rerun()
+        if r3.button("📖 Law Detail", key="lab-open-detail"):
+            st.session_state["goto_page"] = "📖 Law Detail"
+            st.rerun()
+
+        r4, r5, r6 = st.columns(3)
+        if r4.button("🔗 Citation Network", key="lab-open-cit-net"):
+            st.session_state["goto_page"] = "🔗 Citations"
+            st.rerun()
+        if r5.button("🏛️ Domain Analytics", key="lab-open-domains"):
+            st.session_state["goto_page"] = "🏛️ Domains"
+            st.rerun()
+        if r6.button("📥 Export Studio", key="lab-open-export"):
+            st.session_state["goto_page"] = "📥 Export"
+            st.rerun()
+
+    with tabs[3]:
         st.subheader("Status transition timeline (vigente ↔ abrogato / track changes)")
         st.caption(
             "Capture periodic status snapshots and detect transitions per URN. "
@@ -1336,7 +1422,55 @@ def page_italian_legal_lab():
         else:
             st.info("No transitions detected yet. Capture at least two snapshots to compute diffs.")
 
-    with tabs[2]:
+    with tabs[4]:
+        st.subheader("SIOPE+ API integration (Bank of Italy)")
+        st.caption(
+            "SIOPE+ exposes treasury and payment-exchange operations and generally requires TLS client certificates. "
+            "Use this panel to inspect docs/specs and test public metadata endpoints."
+        )
+
+        st.markdown(
+            "**Operational note**\n"
+            "Production SIOPE+ calls are authenticated (mTLS). In this Space, only public or user-provided reachable endpoints can be probed."
+        )
+
+        siope_spec_url = st.text_input(
+            "SIOPE+ spec/document URL",
+            value="https://developers.italia.it/it/api/siope",
+            key="siope-spec-url"
+        )
+        if st.button("Fetch SIOPE+ documentation page", key="fetch-siope-doc"):
+            try:
+                doc_txt = _http_get_text(siope_spec_url)
+                st.code(doc_txt[:12000], language="html")
+            except Exception as e:
+                st.error(f"SIOPE+ documentation fetch failed: {e}")
+
+        st.subheader("SIOPE+ endpoint constructor")
+        c1, c2, c3 = st.columns(3)
+        id_a2a = c1.text_input("idA2A", value="DEMO", key="siope-id-a2a")
+        cod_ente = c2.text_input("codEnte", value="000000", key="siope-cod-ente")
+        cod_banca = c3.text_input("codBanca", value="00000", key="siope-cod-banca")
+        op = st.selectbox(
+            "Operation template",
+            [
+                "PA giornale list: /{idA2A}/PA/{codEnte}/giornale/",
+                "PA flusso list: /{idA2A}/PA/{codEnte}/flusso",
+                "PA disponibilita list: /{idA2A}/PA/{codEnte}/disponibilita",
+                "BT flusso list: /{idA2A}/BT/{codBanca}/flusso/",
+            ],
+            key="siope-op-template"
+        )
+
+        built = (
+            op.replace("{idA2A}", id_a2a)
+            .replace("{codEnte}", cod_ente)
+            .replace("{codBanca}", cod_banca)
+        )
+        st.code(built, language="text")
+        st.caption("Use this generated path against your certified SIOPE+ base server in secure environments.")
+
+    with tabs[5]:
         st.subheader("Daily Gazzetta Ufficiale feed")
         rss_url = st.text_input(
             "RSS URL",
@@ -1364,23 +1498,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Gazzetta fetch failed: {e}")
 
-    with tabs[3]:
-        st.subheader("Banca d'Italia SDMX preview")
-        st.caption("Endpoint can vary by dataset family; this tab provides on-demand endpoint probing.")
-        bdi_url = st.text_input(
-            "Banca d'Italia endpoint",
-            value="https://api.bancaditalia.it/sdmx/v1/dataflow",
-            key="bdi-url"
-        )
-        if st.button("Fetch Banca d'Italia"):
-            try:
-                data = _http_get_json(bdi_url)
-                st.json(data if isinstance(data, dict) else {"type": str(type(data)), "preview": str(data)[:2000]})
-            except Exception as e:
-                st.error(f"Banca d'Italia fetch failed: {e}")
-                st.info("Try an alternate official SDMX endpoint URL if this one is unavailable.")
-
-    with tabs[4]:
+    with tabs[6]:
         st.subheader("ISTAT SDMX preview")
         istat_url = st.text_input(
             "ISTAT endpoint",
@@ -1394,7 +1512,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"ISTAT fetch failed: {e}")
 
-    with tabs[5]:
+    with tabs[7]:
         st.subheader("Senato Akoma Ntoso bulk explorer")
         st.caption("Browsable view over SenatoDellaRepubblica/AkomaNtosoBulkData repository contents.")
         path = st.text_input("Repository path", value="", key="senato-path")
@@ -1409,7 +1527,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Senato AKN listing failed: {e}")
 
-    with tabs[6]:
+    with tabs[8]:
         st.subheader("Institutional APIs catalog")
         catalog = [
             {"source": "OpenGazzetta (openGA)", "url": "https://api.gazzettaufficiale.it/"},
@@ -2652,6 +2770,16 @@ def main():
         pages = {
             "📊 Dashboard": all_pages["📊 Dashboard"],
             "🧪 Italian Legal Lab": all_pages["🧪 Italian Legal Lab"],
+            "🔍 Search": all_pages["🔍 Search"],
+            "⚡ Vigenti": all_pages["⚡ Vigenti"],
+            "🚫 Abrogati": all_pages["🚫 Abrogati"],
+            "📋 Browse (All)": all_pages["📋 Browse (All)"],
+            "🧭 Rights Explorer": all_pages["🧭 Rights Explorer"],
+            "🇮🇹 Costituzione & Codici": all_pages["🇮🇹 Costituzione & Codici"],
+            "🔗 Citations": all_pages["🔗 Citations"],
+            "🏛️ Domains": all_pages["🏛️ Domains"],
+            "💶 Fiscal Burden Lab": all_pages["💶 Fiscal Burden Lab"],
+            "🤖 LLM Lab": all_pages["🤖 LLM Lab"],
             "📖 Law Detail": all_pages["📖 Law Detail"],
             "🔔 Notifications": all_pages["🔔 Notifications"],
             "📝 Update Log": all_pages["📝 Update Log"],
