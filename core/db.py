@@ -205,7 +205,8 @@ class LawDatabase:
             except Exception as e2:
                 logger.error(f"FTS rebuild failed ({e2}) — falling back to LIKE search for all queries")
                 self._fts_available = False
-    
+
+    def insert_law(self, law: Dict) -> bool:
         """Insert or update single law."""
         try:
             # Auto-compute legislature metadata from year if not provided

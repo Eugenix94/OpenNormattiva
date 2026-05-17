@@ -932,6 +932,7 @@ def _call_groq(
         if model == "auto-balanced":
             chosen_model = _select_balanced_groq_model(question, context_laws)
 
+        st.session_state["last_groq_model_used"] = chosen_model
         client = Groq(api_key=api_key)
         response = client.chat.completions.create(
             model=chosen_model,
@@ -5513,6 +5514,7 @@ def _citizen_mvp(db):
             context_laws: list = _retrieve_context(question, limit=12) if db else []
 
             with st.chat_message("assistant"):
+                used_model = None
                 if has_groq and context_laws:
                     with st.spinner("Consulto le norme…"):
                         answer, err = _call_groq(
@@ -5522,7 +5524,21 @@ def _citizen_mvp(db):
                             max_tokens=900,
                             temperature=0.15,
                         )
+                        used_model = st.session_state.get("last_groq_model_used")
                         reply = answer if answer else f"⚠️ Errore AI: {err}"
+                        # Guardrail: if the model omits URN citations, force an explicit evidence footer.
+                        if answer and "urn:nir:" not in answer.lower():
+                            min_refs = []
+                            for law in context_laws[:3]:
+                                urn = law.get("urn") or "N/A"
+                                title = law.get("title") or "N/A"
+                                min_refs.append(f"- {title} [{urn}]")
+                            reply = (
+                                f"{answer}\n\n"
+                                "⚠️ **Verifica automatica citazioni**: la risposta AI non include URN esplicite. "
+                                "Riporto riferimenti normativi minimi dal dataset:\n"
+                                f"{'\n'.join(min_refs)}"
+                            )
                 elif has_groq and not context_laws:
                     reply = (
                         "Non ho trovato evidenze sufficienti nel dataset per rispondere in modo affidabile a questa domanda. "
@@ -5542,6 +5558,8 @@ def _citizen_mvp(db):
                     reply = "Nessuna norma trovata per questa ricerca."
 
                 st.markdown(reply)
+                if used_model:
+                    st.caption(f"Modello usato: {GROQ_MODELS.get(used_model, used_model)} ({used_model})")
                 if context_laws:
                     with st.expander(f"📚 {len(context_laws)} norme consultate dal dataset", expanded=False):
                         for j, law in enumerate(context_laws[:8]):
