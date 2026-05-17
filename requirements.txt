@@ -18,3 +18,10 @@ python-dotenv>=1.0.0
 tqdm>=4.66.0
 datasets>=2.18.0
 requests>=2.31.0
+
+# Lightweight API for the LLM assistant
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+
+# Groq LLM (citizen AI assistant)
+groq>=0.9.0
