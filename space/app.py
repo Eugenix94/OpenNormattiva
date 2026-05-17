@@ -108,6 +108,183 @@ def _status_label(raw_status: str | None) -> str:
     return f"❓ {raw_status or 'N/A'}"
 
 
+def _status_explainer(raw_status: str | None) -> str:
+    norm = _normalize_status(raw_status)
+    if norm == "in_force":
+        return "V (Vigente): this law is currently in force and applicable."
+    if norm == "abrogated":
+        return "O (Originale/Abrogata): historical text, no longer in force."
+    return "Status unavailable in current record."
+
+
+def _status_chip(raw_status: str | None) -> str:
+    norm = _normalize_status(raw_status)
+    if norm == "in_force":
+        return "🟢 VIGENTE"
+    if norm == "abrogated":
+        return "🔴 ABROGATA"
+    return "⚪ SCONOSCIUTO"
+
+
+def _plain_language_summary(law: Dict) -> str:
+    """Return a short citizen-friendly explanation for a law result."""
+    status = _normalize_status(law.get("status"))
+    status_text = "in vigore" if status == "in_force" else "non in vigore"
+    law_type = (law.get("type") or "atto normativo").replace(".", " ")
+    year = law.get("year") or "n/d"
+    snippet = (law.get("snippet") or "").strip()
+    text = ((law.get("text") or "") + " " + snippet).lower()
+
+    court_signals = []
+    if "corte costituzionale" in text:
+        court_signals.append("Corte costituzionale")
+    if "corte di cassazione" in text:
+        court_signals.append("Cassazione")
+    if "consiglio di stato" in text:
+        court_signals.append("Consiglio di Stato")
+
+    base = f"Questa è una {law_type} del {year}, attualmente {status_text}."
+    if snippet:
+        base += f" Tema principale: {snippet[:180].strip()}"
+    if court_signals:
+        base += f" Contiene riferimenti a: {', '.join(court_signals[:2])}."
+    return base
+
+
+def _source_collection_for_urn(db, urn: str) -> str:
+    if not db or not urn:
+        return ""
+    try:
+        row = db.conn.execute("SELECT source_collection FROM laws WHERE urn = ? LIMIT 1", (urn,)).fetchone()
+        return row[0] if row and row[0] is not None else ""
+    except Exception:
+        return ""
+
+
+def _render_source_transparency_box(db, law: Dict, query_terms: str = "") -> None:
+    source_collection = law.get("source_collection") or _source_collection_for_urn(db, law.get("urn", ""))
+    status = _status_label(law.get("status"))
+    st.caption("Trasparenza fonte")
+    st.info(
+        "\n".join([
+            f"Data atto: {law.get('date', 'N/A')}",
+            f"Stato: {status}",
+            f"Fonte dataset: {ACTIVE_DATASET_REPO}",
+            f"Source collection: {source_collection or 'N/A'}",
+            f"Termini usati: {query_terms or 'N/A'}",
+        ])
+    )
+
+
+BEGINNER_GLOSSARY = {
+    "Vigente": "A law that is currently in force and applicable.",
+    "Abrogata": "A law repealed by a newer legal act.",
+    "Multivigente": "Historical timeline of how the same law changed over time.",
+    "URN": "Unique legal identifier used to reference a specific act.",
+    "FTS": "Full-text search on the complete legal text corpus.",
+}
+
+SEARCH_GLOSSARY = {
+    "Vigente": "Norma attualmente in vigore e applicabile.",
+    "Giurisprudenza": "Orientamenti dei giudici (es. Corte costituzionale, Cassazione) richiamati nel testo normativo.",
+    "URN": "Identificatore univoco dell'atto normativo.",
+    "FTS": "Ricerca full-text su titolo e testo delle norme vigenti.",
+    "Citazioni": "Collegamenti tra norme che citano o sono citate da altre norme.",
+}
+
+JURISPRUDENCE_TOPICS = {
+    "Corte costituzionale": "corte costituzionale sentenza illegittimita costituzionale",
+    "Corte di Cassazione": "corte di cassazione sezioni unite",
+    "Consiglio di Stato": "consiglio di stato giurisdizione amministrativa",
+    "TAR": "tribunale amministrativo regionale tar",
+    "Corte dei conti": "corte dei conti responsabilita erariale",
+    "CEDU e diritti fondamentali": "corte europea diritti dell'uomo cedu",
+}
+
+SCENARIO_PRESETS = {
+    "Lavoro e licenziamento": "licenziamento lavoro subordinato giusta causa statuto lavoratori",
+    "Affitto e casa": "locazione sfratto condominio canone",
+    "Famiglia e minori": "responsabilita genitoriale separazione minori mantenimento",
+    "Privacy e dati": "protezione dati personali gdpr privacy trattamento",
+    "Multe e circolazione": "codice della strada sanzioni ricorso verbale",
+    "Fisco di base": "irpef detrazioni dichiarazione contribuente",
+}
+
+WIZARD_INTENTS = {
+    "Capire i miei diritti": "diritti tutela obblighi garanzie",
+    "Verificare un obbligo": "adempimento obbligo termini sanzioni",
+    "Preparare un ricorso": "ricorso opposizione termine procedura",
+    "Capire documenti e scadenze": "termine comunicazione notifica documentazione",
+}
+
+DOCUMENT_TEMPLATES = {
+    "Accesso agli atti (FOIA/L.241)": {
+        "subject": "Richiesta di accesso agli atti",
+        "body": (
+            "Il/La sottoscritto/a {citizen_name}, residente in {city}, chiede accesso agli atti "
+            "ai sensi della normativa vigente, con riferimento a: {topic}.\n\n"
+            "Motivazione sintetica: {reason}.\n"
+            "Amministrazione destinataria: {recipient}.\n"
+            "Si chiede riscontro entro i termini di legge."
+        ),
+    },
+    "Diffida semplice": {
+        "subject": "Diffida ad adempiere",
+        "body": (
+            "Il/La sottoscritto/a {citizen_name} diffida {recipient} ad adempiere in relazione a: {topic}.\n\n"
+            "Fatti essenziali: {reason}.\n"
+            "Si invita ad adempiere entro {deadline_days} giorni dal ricevimento della presente."
+        ),
+    },
+    "Opposizione a verbale": {
+        "subject": "Opposizione a verbale",
+        "body": (
+            "Il/La sottoscritto/a {citizen_name} propone opposizione al verbale relativo a: {topic}.\n\n"
+            "Ragioni principali: {reason}.\n"
+            "Autorita/ufficio destinatario: {recipient}."
+        ),
+    },
+    "Richiesta di chiarimenti a PA": {
+        "subject": "Richiesta di chiarimenti",
+        "body": (
+            "Il/La sottoscritto/a {citizen_name} richiede chiarimenti in merito a: {topic}.\n\n"
+            "Contesto: {reason}.\n"
+            "Ente destinatario: {recipient}.\n"
+            "Si richiede risposta nei tempi previsti."
+        ),
+    },
+}
+
+
+LAB_LESSONS = {
+    "How to read a law card": {
+        "query": "codice civile",
+        "goal": "Identify title, type, year, URN, and current status.",
+    },
+    "How abrogation works": {
+        "query": "abrogazione",
+        "goal": "Compare vigente and abrogata acts and understand legal replacement.",
+    },
+    "How amendments change laws": {
+        "query": "decreto legislativo",
+        "goal": "Open timeline view and inspect version progression.",
+    },
+    "How to use citations": {
+        "query": "responsabilita civile",
+        "goal": "See which laws cite and are cited by the selected act.",
+    },
+}
+
+
+def _find_multivigente_db_path() -> Path | None:
+    mv_paths = [
+        Path("/app/data/multivigente.db"),
+        Path(__file__).parent.parent / "data" / "multivigente.db",
+        Path(__file__).parent / "data" / "multivigente.db",
+    ]
+    return next((p for p in mv_paths if p.exists() and p.stat().st_size > 10_000_000), None)
+
+
 def _full_laws_query() -> str:
     # No hard cap by default: load full dataset for complete visualization.
     return (
@@ -211,13 +388,21 @@ def get_db_paths():
     _app_file = Path(__file__)
     _app_dir = _app_file.parent
     _root_dir = _app_dir.parent
+
+    dataset_repo = os.environ.get("HF_DATASET_NAME", "").strip()
+    if "/" in dataset_repo:
+        ds_owner, ds_name = dataset_repo.split("/", 1)
+    else:
+        ds_owner = os.environ.get("HF_DATASET_OWNER", "diatribe00")
+        ds_name = dataset_repo or "normattivavigente-data"
     
     hf_cache_hub = Path.home() / '.cache' / 'huggingface' / 'hub'
     
     # Scan HF hub cache for any normattiva dataset snapshot that has laws.db
     hf_cached_paths = []
     if hf_cache_hub.exists():
-        for snap in hf_cache_hub.glob('datasets--diatribe00--normattiva-data/snapshots/*/data/laws.db'):
+        cache_glob = f"datasets--{ds_owner}--{ds_name}/snapshots/*/data/laws.db"
+        for snap in hf_cache_hub.glob(cache_glob):
             hf_cached_paths.append(snap)
     
     base_paths = [
@@ -245,9 +430,17 @@ def download_database_from_hf():
         return None
     
     try:
-        logger.info("Downloading database from HF Dataset (this may take ~5 min)...")
+        dataset_repo = os.environ.get("HF_DATASET_NAME", "").strip()
+        if "/" in dataset_repo:
+            repo_id = dataset_repo
+        else:
+            owner = os.environ.get("HF_DATASET_OWNER", "diatribe00")
+            name = dataset_repo or "normattivavigente-data"
+            repo_id = f"{owner}/{name}"
+
+        logger.info(f"Downloading database from HF Dataset {repo_id} (this may take ~5 min)...")
         cached = hf_hub_download(
-            repo_id="diatribe00/normattiva-data",
+            repo_id=repo_id,
             filename="data/laws.db",
             repo_type="dataset",
         )
@@ -436,24 +629,21 @@ def trigger_api_check():
     t.start()
 
 
-# PAGE CONFIG
-
-st.set_page_config(
-    page_title="Normattiva Jurisprudence",
-    page_icon="\u2696\ufe0f",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.title("\u2696\ufe0f Normattiva Jurisprudence Research Platform")
-st.markdown("Explore Italian law: search, citations, domains, and legal evolution (v2.2)")
-
-# ---- App profile selection ---------------------------------------------
+# ---- App profile selection (must run BEFORE set_page_config) ----------
 # Controls which pages are exposed and which dataset is used by default.
 APP_PROFILE = os.environ.get("APP_PROFILE", "").lower().strip()
 HF_DATASET_NAME = os.environ.get("HF_DATASET_NAME", "").strip()
 _env_space = os.environ.get("HF_SPACE_ID") or os.environ.get("SPACE_NAME") or os.environ.get("SPACE") or ""
 SPACE_NAME = str(_env_space).lower()
+
+
+def _default_dataset_repo(profile: str) -> str:
+    mapping = {
+        "search": "diatribe00/normattivavigente-data",
+        "lab": "diatribe00/normattiva-lab-data",
+        "italianlab": "diatribe00/italian-legal-lab-data",
+    }
+    return mapping.get(profile, "diatribe00/normattivavigente-data")
 
 if not APP_PROFILE:
     if "italian" in HF_DATASET_NAME or "italian" in SPACE_NAME or "legal" in HF_DATASET_NAME:
@@ -463,12 +653,106 @@ if not APP_PROFILE:
     else:
         APP_PROFILE = "search"
 
+# PAGE CONFIG
+
+_PAGE_TITLE = (
+    "Italian Legal Lab" if APP_PROFILE == "italianlab"
+    else "OpenNormattiva Lab" if APP_PROFILE == "lab"
+    else "NormattivaVigente"
+)
+_PAGE_ICON = "\U0001f1ee\U0001f1f9" if APP_PROFILE == "italianlab" else "\u2696\ufe0f"
+
+st.set_page_config(
+    page_title=_PAGE_TITLE,
+    page_icon=_PAGE_ICON,
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+def _inject_accessibility_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --on-primary: #0b2545;
+            --accent: #0a7a5a;
+            --muted-bg: #f6f8fb;
+        }
+        .block-container {
+            max-width: 1200px;
+            padding-top: 1.2rem;
+            padding-bottom: 2rem;
+        }
+        h1, h2, h3 {
+            letter-spacing: 0.01em;
+        }
+        p, li, label, .stCaption {
+            line-height: 1.5;
+            font-size: 1rem;
+        }
+        .stMetric {
+            background: var(--muted-bg);
+            border-radius: 12px;
+            padding: 0.6rem 0.8rem;
+            border: 1px solid #e6eaf0;
+        }
+        [data-testid="stSidebar"] {
+            border-right: 1px solid #e6eaf0;
+        }
+        [data-testid="stSidebar"] .stRadio > div {
+            gap: 0.2rem;
+        }
+        .stButton > button {
+            border-radius: 10px;
+            font-weight: 600;
+        }
+        @media (max-width: 900px) {
+            .block-container {
+                padding-left: 0.9rem;
+                padding-right: 0.9rem;
+            }
+            .stMetric {
+                padding: 0.5rem 0.65rem;
+            }
+            .stButton > button {
+                width: 100%;
+            }
+            [data-testid="stSidebar"] {
+                min-width: 250px;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_inject_accessibility_styles()
+
+if APP_PROFILE == "italianlab":
+    st.title("\U0001f1ee\U0001f1f9 Italian Legal Lab")
+    st.markdown("Full-spectrum Italian law intelligence: Normattiva datasets, SIOPE+ finance APIs, and institutional data sources.")
+elif APP_PROFILE == "lab":
+    st.title("\u2696\ufe0f OpenNormattiva Lab")
+    st.markdown("VOOM corpus — **67,052 vigenti** + **123,859 abrogati** = **190,911 laws** total. Full-text search, citations, legislative history.")
+else:
+    st.title("\u2696\ufe0f NormattivaVigente")
+    st.markdown("Ricerca sulle sole norme vigenti: full-text search sul corpus Normattiva in-force.")
+
 IS_SEARCH = APP_PROFILE == "search"
 IS_LAB = APP_PROFILE == "lab"
 IS_ITALIAN_LAB = APP_PROFILE == "italianlab"
+ACTIVE_DATASET_REPO = HF_DATASET_NAME or _default_dataset_repo(APP_PROFILE)
 
 # Show active profile in the sidebar for clarity
-st.sidebar.info(f"Running profile: `{APP_PROFILE}`\nDataset: `{HF_DATASET_NAME or 'diatribe00/normattiva-data'}`")
+if IS_SEARCH:
+    st.sidebar.info(
+        "Profilo attivo: cittadino (vigente)\n"
+        f"Dataset: {ACTIVE_DATASET_REPO}"
+    )
+else:
+    st.sidebar.info(f"Running profile: {APP_PROFILE}\nDataset: {ACTIVE_DATASET_REPO}")
 # ------------------------------------------------------------------------
 
 
@@ -545,6 +829,92 @@ def _render_graph_plotly(nodes, edges, title="Citation Graph"):
                       yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                       height=600)
     st.plotly_chart(fig, width='stretch')
+
+
+# ─────────────────────────────────────────────────────────────────
+# GROQ RAG HELPER
+# ─────────────────────────────────────────────────────────────────
+
+GROQ_MODELS = {
+    "llama-3.3-70b-versatile": "Llama 3.3 70B (Migliore qualità)",
+    "llama3-8b-8192": "Llama 3 8B (Veloce)",
+    "mixtral-8x7b-32768": "Mixtral 8x7B (Contesto lungo)",
+}
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+
+_GROQ_SYSTEM_PROMPT = """\
+Sei un assistente giuridico italiano al servizio del cittadino.
+
+Le tue regole fondamentali:
+1. Rispondi ESCLUSIVAMENTE basandoti sui testi normativi forniti nel contesto.
+2. Non inventare leggi, articoli o interpretazioni non presenti nel contesto.
+3. Cita SEMPRE il titolo esatto e l'URN (identificatore univoco) di ogni norma che menzioni.
+4. Usa un linguaggio chiaro e comprensibile al cittadino comune — evita tecnicismi non spiegati.
+5. Indica esplicitamente se una norma è VIGENTE o ABROGATA.
+6. Se la risposta non è ricavabile dal contesto fornito, dichiaralo apertamente.
+7. Concludi sempre con una nota: "Questa risposta si basa sui dati del dataset Normattiva. Per decisioni legali consulta un avvocato."
+
+NORME ESTRATTE DAL DATABASE NORMATTIVA:
+{context}
+"""
+
+
+def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
+    """Build a structured context string from retrieved law records."""
+    parts = []
+    for i, law in enumerate(laws, 1):
+        status = _normalize_status(law.get("status"))
+        status_label = "VIGENTE ✓" if status == "in_force" else "ABROGATA ✗"
+        text = (law.get("text") or law.get("snippet") or "").strip()
+        excerpt = text[:max_chars_per_law] + ("…" if len(text) > max_chars_per_law else "")
+        parts.append(
+            f"[NORMA {i}]\n"
+            f"Titolo: {law.get('title', 'N/A')}\n"
+            f"URN: {law.get('urn', 'N/A')}\n"
+            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: {status_label}\n"
+            f"Testo:\n{excerpt}"
+        )
+    return "\n\n---\n\n".join(parts)
+
+
+def _call_groq(
+    question: str,
+    context_laws: list,
+    model: str = GROQ_DEFAULT_MODEL,
+    max_tokens: int = 1500,
+    temperature: float = 0.1,
+) -> tuple[str | None, str | None]:
+    """
+    Call Groq API with the retrieved law context (RAG pattern).
+    Returns (answer_text, error_message). One of them will be None.
+    """
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return None, "GROQ_API_KEY non configurata. Imposta la variabile d'ambiente GROQ_API_KEY nelle impostazioni dello Space."
+
+    try:
+        from groq import Groq
+    except ImportError:
+        return None, "Libreria `groq` non installata. Aggiungi `groq>=0.9.0` a requirements.txt."
+
+    context = _build_groq_context(context_laws)
+    system_prompt = _GROQ_SYSTEM_PROMPT.format(context=context)
+
+    try:
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        answer = response.choices[0].message.content
+        return answer, None
+    except Exception as e:
+        return None, f"Errore Groq API: {e}"
 
 
 def linkify_law_text(text: str, db) -> dict:
@@ -652,10 +1022,26 @@ def page_dashboard():
     norm_statuses = [_normalize_status(l.get("status")) for l in laws]
     in_force_count = sum(1 for s in norm_statuses if s == "in_force")
     abrogated_count = sum(1 for s in norm_statuses if s == "abrogated")
-    sc1, sc2 = st.columns(2)
-    sc1.metric("In vigore", f"{in_force_count:,}")
-    sc2.metric("Abrogati", f"{abrogated_count:,}")
-    st.caption("Status harmonization active: vigente/in_force and abrogato/abrogated are unified.")
+    if IS_SEARCH:
+        sc1, sc2 = st.columns(2)
+        sc1.metric("Norme vigenti", f"{in_force_count:,}")
+        try:
+            court_mentions = db.conn.execute(
+                "SELECT COUNT(*) FROM laws WHERE status='in_force' AND ("
+                "LOWER(text) LIKE '%corte costituzionale%' OR "
+                "LOWER(text) LIKE '%corte di cassazione%' OR "
+                "LOWER(text) LIKE '%consiglio di stato%' OR "
+                "LOWER(text) LIKE '%tribunale amministrativo regionale%')"
+            ).fetchone()[0]
+        except Exception:
+            court_mentions = 0
+        sc2.metric("Con riferimenti giurisprudenziali", f"{court_mentions:,}")
+        st.caption("Vista ottimizzata per il profilo vigente: solo norme in force.")
+    else:
+        sc1, sc2 = st.columns(2)
+        sc1.metric("In vigore" if IS_ITALIAN_LAB else "In Force", f"{in_force_count:,}")
+        sc2.metric("Abrogati" if IS_ITALIAN_LAB else "Abrogated", f"{abrogated_count:,}")
+        st.caption("Status harmonization active: vigente/in_force and abrogato/abrogated are unified.")
 
     # DB info
     if db:
@@ -684,7 +1070,6 @@ def page_dashboard():
                       title="Laws by Year", labels={"x": "Year", "y": "Count"})
         st.plotly_chart(fig, width='stretch')
 
-    # Most important laws
     if db:
         st.subheader("Most Important Laws (PageRank)")
         try:
@@ -702,7 +1087,147 @@ def page_dashboard():
         except Exception:
             pass
 
-    # Domain distribution
+
+def page_citizen_hub():
+    st.header("🏠 Hub Cittadini")
+    st.caption("Percorso semplice per trovare risposte legali sulle norme vigenti senza perdersi tra strumenti tecnici.")
+
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    try:
+        in_f = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
+    except Exception:
+        in_f = 0
+
+    try:
+        court_hits = db.conn.execute(
+            "SELECT COUNT(*) FROM laws WHERE status='in_force' AND ("
+            "LOWER(text) LIKE '%corte costituzionale%' OR "
+            "LOWER(text) LIKE '%corte di cassazione%' OR "
+            "LOWER(text) LIKE '%consiglio di stato%' OR "
+            "LOWER(text) LIKE '%tribunale amministrativo regionale%')"
+        ).fetchone()[0]
+    except Exception:
+        court_hits = 0
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Norme vigenti", f"{in_f:,}")
+    m2.metric("Riferimenti giurisprudenziali", f"{court_hits:,}")
+    m3.metric("Dataset ufficiale", "NormattivaVigente")
+
+    st.subheader("Cosa vuoi fare?")
+    i1, i2, i3, i4 = st.columns(4)
+    if i1.button("Capire i miei diritti", key="hub-rights"):
+        st.session_state["goto_page"] = "🧭 Rights Explorer"
+        st.rerun()
+    if i2.button("Cercare una norma", key="hub-search"):
+        st.session_state["goto_page"] = "🔍 Search"
+        st.rerun()
+    if i3.button("Esplorare la giurisprudenza", key="hub-juris"):
+        st.session_state["goto_page"] = "⚖️ Giurisprudence"
+        st.rerun()
+    if i4.button("Leggere una scheda completa", key="hub-detail"):
+        st.session_state["goto_page"] = "📖 Law Detail"
+        st.rerun()
+
+    st.divider()
+    st.subheader("🧭 Racconta la tua situazione")
+    st.caption("Rispondi a poche domande guidate e ricevi un percorso normativo mirato alla tua situazione.")
+
+    w1, w2, w3, w4 = st.columns(4)
+    with w1:
+        area = st.selectbox(
+            "Area",
+            [
+                "Lavoro",
+                "Casa",
+                "Famiglia",
+                "Privacy",
+                "Circolazione stradale",
+                "Tributi",
+            ],
+            key="hub-wizard-area",
+        )
+    with w2:
+        intent = st.selectbox("Obiettivo", list(WIZARD_INTENTS.keys()), key="hub-wizard-intent")
+    with w3:
+        urgency = st.selectbox("Urgenza", ["Normale", "Breve termine", "Molto urgente"], key="hub-wizard-urgency")
+    with w4:
+        counterpart = st.selectbox(
+            "Controparte",
+            ["Privato", "Datore di lavoro", "Condominio", "Pubblica amministrazione", "Altro"],
+            key="hub-wizard-counterpart",
+        )
+
+    has_documents = st.radio("Hai già documenti/prove?", ["Sì", "No"], horizontal=True, key="hub-wizard-docs")
+
+    custom_words = st.text_input(
+        "Parole aggiuntive (facoltative)",
+        placeholder="es. contratto a termine, condominio, verbale",
+        key="hub-wizard-custom",
+    )
+
+    if st.button("Trova norme per la mia situazione", key="hub-wizard-run", type="primary"):
+        area_terms = {
+            "Lavoro": "lavoro subordinato licenziamento contratto",
+            "Casa": "locazione condominio sfratto proprieta",
+            "Famiglia": "separazione minori mantenimento famiglia",
+            "Privacy": "privacy dati personali trattamento",
+            "Circolazione stradale": "codice della strada verbale ricorso",
+            "Tributi": "tributi imposte contribuente dichiarazione",
+        }
+        counterpart_terms = {
+            "Privato": "obbligazioni responsabilita",
+            "Datore di lavoro": "datore di lavoro tutela lavoratore",
+            "Condominio": "condominio assemblea amministratore",
+            "Pubblica amministrazione": "procedimento amministrativo accesso atti",
+            "Altro": "",
+        }
+        urgency_terms = {
+            "Normale": "",
+            "Breve termine": "termini procedura scadenza",
+            "Molto urgente": "urgenza tutela cautelare provvedimento",
+        }
+        docs_terms = "documentazione prova allegati" if has_documents == "Sì" else "come raccogliere prove documenti"
+        query = " ".join([
+            area_terms.get(area, ""),
+            WIZARD_INTENTS.get(intent, ""),
+            counterpart_terms.get(counterpart, ""),
+            urgency_terms.get(urgency, ""),
+            docs_terms,
+            (custom_words or "").strip(),
+        ]).strip()
+        st.session_state["lesson_query"] = query
+        st.session_state["goto_page"] = "🔍 Search"
+        st.rerun()
+
+    t1, t2 = st.columns(2)
+    if t1.button("Apri modelli documento", key="hub-go-templates"):
+        st.session_state["goto_page"] = "📝 Modelli documenti"
+        st.rerun()
+    if t2.button("Confronta due scenari", key="hub-go-compare"):
+        st.session_state["goto_page"] = "⚖️ Confronta scenari"
+        st.rerun()
+
+    st.divider()
+    st.subheader("Temi frequenti")
+    q1, q2, q3 = st.columns(3)
+    if q1.button("Lavoro e licenziamento", key="hub-q-lavoro"):
+        st.session_state["lesson_query"] = "licenziamento lavoro subordinato"
+        st.session_state["goto_page"] = "🔍 Search"
+        st.rerun()
+    if q2.button("Casa, affitto, condominio", key="hub-q-casa"):
+        st.session_state["lesson_query"] = "locazione condominio sfratto"
+        st.session_state["goto_page"] = "🔍 Search"
+        st.rerun()
+    if q3.button("Privacy e dati personali", key="hub-q-privacy"):
+        st.session_state["lesson_query"] = "protezione dati personali privacy"
+        st.session_state["goto_page"] = "🔍 Search"
+        st.rerun()
+
     if db:
         st.subheader("Legal Domain Distribution")
         try:
@@ -720,36 +1245,246 @@ def page_dashboard():
             pass
 
 
+def page_start_here():
+    if IS_SEARCH:
+        st.header("🧭 Start Here — NormattivaVigente")
+        st.caption("Percorso guidato sulle sole norme vigenti, con strumenti per esplorazione giuridica e riferimenti giurisprudenziali.")
+
+        db = load_db()
+        if db:
+            try:
+                in_f = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
+                court_mentions = db.conn.execute(
+                    "SELECT COUNT(*) FROM laws WHERE status='in_force' AND ("
+                    "LOWER(text) LIKE '%corte costituzionale%' OR "
+                    "LOWER(text) LIKE '%corte di cassazione%' OR "
+                    "LOWER(text) LIKE '%consiglio di stato%' OR "
+                    "LOWER(text) LIKE '%tribunale amministrativo regionale%')"
+                ).fetchone()[0]
+                c1, c2 = st.columns(2)
+                c1.metric("Norme vigenti", f"{in_f:,}")
+                c2.metric("Norme con riferimenti giurisprudenziali", f"{court_mentions:,}")
+            except Exception:
+                st.info("Dataset vigente caricato. Metriche temporaneamente non disponibili.")
+
+        st.subheader("Percorso consigliato")
+        s1, s2, s3, s4 = st.columns(4)
+        if s1.button("1) Framework", key="start-fw-search"):
+            st.session_state["goto_page"] = "⚖️ Framework"
+            st.rerun()
+        if s2.button("2) Ricerca", key="start-search-only"):
+            st.session_state["goto_page"] = "🔍 Search"
+            st.rerun()
+        if s3.button("3) Giurisprudenza", key="start-juris"):
+            st.session_state["goto_page"] = "⚖️ Giurisprudence"
+            st.rerun()
+        if s4.button("4) Scheda Legge", key="start-detail-search"):
+            st.session_state["goto_page"] = "📖 Law Detail"
+            st.rerun()
+
+        st.divider()
+        st.subheader("Glossario rapido")
+        for term, desc in SEARCH_GLOSSARY.items():
+            st.markdown(f"- **{term}**: {desc}")
+        return
+
+    st.header("🧭 Inizia da Qui")
+    st.caption("Percorso guidato per capire tutto il database Normattiva VOM anche se parti da zero.")
+
+    db = load_db()
+    if db:
+        try:
+            in_f = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
+            ab = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
+            mv = 0
+            mv_path = _find_multivigente_db_path()
+            if mv_path:
+                import sqlite3 as _sqlite3
+                mv_conn = _sqlite3.connect(str(mv_path))
+                mv = mv_conn.execute("SELECT COUNT(*) FROM law_versions").fetchone()[0]
+                mv_conn.close()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Vigenti (V)", f"{in_f:,}")
+            c2.metric("Abrogate (O)", f"{ab:,}")
+            c3.metric("Versioni storiche (M)", f"{mv:,}")
+        except Exception:
+            st.info("Dataset caricato. Metriche temporaneamente non disponibili.")
+
+    st.subheader("Percorso di studio")
+    s1, s2, s3, s4 = st.columns(4)
+    if s1.button("1) Guida VOM", key="start-guide"):
+        st.session_state["goto_page"] = "🧠 VOM Guide"
+        st.rerun()
+    if s2.button("2) Ricerca Guidata", key="start-search"):
+        st.session_state["goto_page"] = "🔍 Search"
+        st.rerun()
+    if s3.button("3) Scheda Legge", key="start-detail"):
+        st.session_state["goto_page"] = "📖 Law Detail"
+        st.rerun()
+    if s4.button("4) Lezioni Lab", key="start-lessons"):
+        st.session_state["goto_page"] = "🧪 Lab Lessons"
+        st.rerun()
+
+    st.divider()
+    st.subheader("Glossario rapido")
+    for term, desc in BEGINNER_GLOSSARY.items():
+        st.markdown(f"- **{term}**: {desc}")
+
+
+def page_vom_guide():
+    if IS_SEARCH:
+        st.header("⚖️ Framework — NormattivaVigente")
+        st.caption("Impostazione ufficiale: ricerca sulle sole norme vigenti con approfondimento giurisprudenziale.")
+
+        c1, c2 = st.columns(2)
+        c1.info("**Dataset ufficiale**\n\nSolo atti `in_force` per evitare ambiguità operative.")
+        c2.success("**Metodo giurisprudenziale**\n\nParti dalla norma vigente e analizza citazioni e richiami alle Corti.")
+
+        st.subheader("Workflow consigliato")
+        st.markdown("1. Cerca una materia in **Search** (es. responsabilità civile, appalti, privacy).")
+        st.markdown("2. Apri la **Law Detail** per leggere testo, metadati e citazioni.")
+        st.markdown("3. Usa **Giurisprudence** per vedere cluster normativi con riferimenti a Corti e orientamenti.")
+        st.markdown("4. Incrocia con **Citations** e **Domains** per una vista sistemica del quadro vigente.")
+        return
+
+    st.header("🧠 Guida VOM")
+    st.caption("VOM = Vigente + Originale (abrogata) + Multivigente (storia delle versioni)")
+
+    c1, c2, c3 = st.columns(3)
+    c1.info("**V (Vigente)**\n\nNorma in vigore oggi. È il riferimento operativo.")
+    c2.warning("**O (Originale/Abrogata)**\n\nTesto storico non più in vigore. Utile per contesto e confronto.")
+    c3.success("**M (Multivigente)**\n\nCronologia delle versioni della stessa legge nel tempo.")
+
+    st.subheader("Metodo consigliato")
+    st.markdown("1. Parti da V per capire la disciplina attuale.")
+    st.markdown("2. Usa O per vedere il quadro storico sostituito.")
+    st.markdown("3. Usa M per capire quando e come la norma è cambiata.")
+
+
+def page_lab_lessons():
+    st.header("🧪 Lezioni Lab")
+    st.caption("Esercizi guidati per studenti e principianti sul corpus VOM completo.")
+
+    lesson_labels = {
+        "How to read a law card": "Come leggere una scheda legge",
+        "How abrogation works": "Come funziona l'abrogazione",
+        "How amendments change laws": "Come leggere le modifiche nel tempo",
+        "How to use citations": "Come usare la rete citazioni",
+    }
+
+    for lesson, cfg in LAB_LESSONS.items():
+        with st.expander(lesson_labels.get(lesson, lesson)):
+            st.write(f"**Obiettivo**: {cfg['goal']}")
+            st.write(f"**Query suggerita**: {cfg['query']}")
+            if st.button(f"Avvia lezione", key=f"lesson-{lesson}"):
+                st.session_state["lesson_query"] = cfg["query"]
+                st.session_state["goto_page"] = "🔍 Search"
+                st.rerun()
+
+
+def _did_you_mean(query: str, laws: List[Dict], max_candidates: int = 5000) -> List[str]:
+    if not query or not laws:
+        return []
+    from difflib import get_close_matches
+
+    q = query.strip().lower()
+    titles = []
+    title_map = {}
+    for l in laws[:max_candidates]:
+        t = (l.get("title") or "").strip()
+        if not t:
+            continue
+        lt = t.lower()
+        if lt not in title_map:
+            title_map[lt] = t
+            titles.append(lt)
+    guessed = get_close_matches(q, titles, n=5, cutoff=0.72)
+    return [title_map[g] for g in guessed]
+
+
 def page_search():
-    st.header("\U0001f50d Advanced Search")
+    if IS_SEARCH:
+        st.header("🔍 Cerca Norme Vigenti")
+        st.caption("Scrivi parole semplici (materia, diritto, istituto). La ricerca mostra prima le norme in vigore più rilevanti.")
+        st.write("**Scenari rapidi**")
+        p1, p2, p3 = st.columns(3)
+        preset_items = list(SCENARIO_PRESETS.items())
+        for idx, (label, qtxt) in enumerate(preset_items):
+            target_col = [p1, p2, p3][idx % 3]
+            with target_col:
+                if st.button(label, key=f"preset-{idx}"):
+                    st.session_state["lesson_query"] = qtxt
+                    st.rerun()
+    else:
+        st.header("🔍 Cerca Leggi — Ricerca Avanzata" if IS_ITALIAN_LAB else "🔍 Advanced Search")
     db = load_db()
 
-    query = st.text_input(
-        "Search Italian law (full-text with BM25 ranking):",
-        placeholder="costituzione diritti fondamentali"
+    mode = st.radio(
+        "Modalità ricerca",
+        ["Guidata", "Esperta"],
+        horizontal=True,
+        help="La modalità guidata aiuta a trovare subito contenuti pertinenti.",
     )
 
-    with st.expander("Advanced Filters"):
+    if mode == "Guidata":
+        if IS_SEARCH:
+            preset = st.selectbox(
+                "Cosa vuoi fare?",
+                [
+                    "Trovare una norma vigente",
+                    "Analizzare un tema giurisprudenziale",
+                ],
+            )
+            default_scope = "in_force"
+            if "giurisprudenziale" in preset.lower():
+                st.caption("Suggerimento: prova query come 'corte costituzionale', 'cassazione', 'sezioni unite'.")
+        else:
+            preset = st.selectbox(
+                "Cosa vuoi fare?",
+                [
+                    "Trovare la norma vigente (V)",
+                    "Studiare una norma abrogata (O)",
+                    "Capire come cambia una norma nel tempo (M)",
+                ],
+            )
+            default_scope = "in_force"
+            if "abrogata" in preset.lower():
+                default_scope = "abrogated"
+            elif "cambia" in preset.lower() or "tempo" in preset.lower():
+                default_scope = "all"
+    else:
+        default_scope = "in_force"
+
+    query = st.text_input(
+        "Cerca nel diritto italiano (testo completo + ranking):",
+        value=st.session_state.pop("lesson_query", ""),
+        placeholder="es. responsabilità civile, decreto legislativo 231"
+    )
+    st.session_state["last_search_query"] = query
+
+    with st.expander("Filtri avanzati", expanded=IS_SEARCH):
         fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1:
-            filter_type = st.text_input("Law type (e.g. legge, decreto)")
+            filter_type = st.text_input("Tipo atto (es. legge, decreto)")
         with fc2:
-            filter_year_from = st.number_input("Year from", min_value=1800,
+            filter_year_from = st.number_input("Anno da", min_value=1800,
                                                 max_value=2100, value=1800)
         with fc3:
-            filter_year_to = st.number_input("Year to", min_value=1800,
+            filter_year_to = st.number_input("Anno a", min_value=1800,
                                               max_value=2100, value=2100)
         with fc4:
+            status_options = ["in_force", "all"] if IS_SEARCH else ["in_force", "abrogated", "all"]
             status_scope = st.selectbox(
-                "Status scope",
-                ["in_force", "abrogated", "all"],
-                help="Default is in_force to keep vigente laws separated from abrogated ones."
+                "Stato",
+                status_options,
+                index=status_options.index(default_scope if default_scope in status_options else "in_force"),
+                help="Per principianti è consigliato iniziare da in_force (vigenti)."
             )
 
-    result_limit = st.slider("Max results", 25, 500, 100, 25)
+    result_limit = st.slider("Numero massimo risultati", 25, 500, 100, 25)
 
     if not query or len(query) < 2:
-        st.info("Enter at least 2 characters to search.")
+        st.info("Inserisci almeno 2 caratteri per avviare la ricerca.")
         return
 
     if db:
@@ -757,7 +1492,8 @@ def page_search():
             results = db.search_fts(query, limit=result_limit)
             if status_scope != "all":
                 results = [r for r in results if _normalize_status(r.get("status")) == status_scope]
-            st.write(f"**Found {len(results)} results** (ranked by relevance)")
+
+            filtered_results = []
             for r in results:
                 year = r.get("year", "?")
                 law_type = str(r.get("type") or "")
@@ -770,7 +1506,46 @@ def page_search():
                             continue
                     except Exception:
                         pass
+                filtered_results.append(r)
+
+            st.write(f"**Trovati {len(filtered_results)} risultati** (ordinati per rilevanza)")
+
+            if IS_SEARCH and filtered_results:
+                quick_df = pd.DataFrame([
+                    {
+                        "Anno": r.get("year"),
+                        "Tipo": r.get("type"),
+                        "Titolo": (r.get("title") or "")[:100],
+                        "Status": _status_label(r.get("status")),
+                    }
+                    for r in filtered_results[:50]
+                ])
+                st.dataframe(quick_df, width='stretch', hide_index=True)
+
+                quick_map = {
+                    f"{(r.get('title') or '')[:100]} ({r.get('year', '?')})": r.get("urn")
+                    for r in filtered_results[:50]
+                    if r.get("urn")
+                }
+                if quick_map:
+                    pick = st.selectbox("Apri rapidamente una norma", list(quick_map.keys()), key="search-quick-open")
+                    if st.button("Apri scheda norma", key="search-quick-open-btn"):
+                        st.session_state["detail_urn"] = quick_map[pick]
+                        st.session_state["goto_page"] = "📖 Law Detail"
+                        st.rerun()
+
+            if not results:
+                guesses = _did_you_mean(query, _get_laws())
+                if guesses:
+                    st.warning("Nessun risultato esatto. Forse cercavi:")
+                    for g in guesses:
+                        if st.button(g, key=f"guess-{g}"):
+                            st.session_state["lesson_query"] = g
+                            st.rerun()
+            for r in filtered_results:
+                year = r.get("year", "?")
                 status = _normalize_status(r.get("status", "in_force"))
+                track = _dataset_track(r)
                 status_badge = " 🚫 *ABROGATO*" if status == "abrogated" else ""
                 score_str = ""
                 if r.get("relevance_score") is not None:
@@ -781,10 +1556,19 @@ def page_search():
                         st.write(f"**URN**: `{r.get('urn', 'N/A')}`")
                         st.write(f"**Type**: {r.get('type', 'N/A')}")
                         st.write(f"**Date**: {r.get('date', 'N/A')}")
-                        st.write(f"**Status**: {_status_label(status)}")
+                        st.write(f"**Status**: {_status_chip(status)} {_status_label(status)}")
+                        st.write(f"**Track**: {track.upper()}")
+                        if mode == "Guidata":
+                            st.caption(_status_explainer(status))
                         if r.get("importance_score"):
                             st.write(f"**Importance**: {r['importance_score']:.4f}")
+                        if IS_SEARCH and st.button("Apri scheda", key=f"open-from-search-{r.get('urn')}"):
+                            st.session_state["detail_urn"] = r.get("urn")
+                            st.session_state["goto_page"] = "📖 Law Detail"
+                            st.rerun()
                     with c2:
+                        if IS_SEARCH:
+                            st.info(_plain_language_summary(r))
                         snippet = r.get("snippet", "")
                         if snippet:
                             st.markdown(f"**Matched text**: ...{snippet}...")
@@ -792,6 +1576,8 @@ def page_search():
                             st.text_area("Preview", r.get("text", "")[:800],
                                          height=150, disabled=True,
                                          key=f"search_{r.get('urn','')}")
+                        if IS_SEARCH:
+                            _render_source_transparency_box(db, r, query_terms=query)
         except Exception as e:
             st.error(f"Search error: {e}")
     else:
@@ -803,7 +1589,7 @@ def page_search():
         if status_scope != "all":
             results = [l for l in results if _normalize_status(l.get("status")) == status_scope]
         results = results[:result_limit]
-        st.write(f"**Found {len(results)} results** (simple text match)")
+        st.write(f"**Trovati {len(results)} risultati** (ricerca testuale semplice)")
         for law in results:
             with st.expander(
                 f"{law.get('title', 'Untitled')} ({law.get('year', '?')})"
@@ -814,6 +1600,96 @@ def page_search():
                 st.text_area("Text", law.get("text", "")[:800], height=150,
                              disabled=True, key=f"srch_jl_{law.get('urn','')}")
 
+
+def page_document_templates():
+    st.header("📝 Modelli documenti")
+    st.caption("Modelli base in linguaggio semplice, da adattare al tuo caso concreto.")
+
+    template_name = st.selectbox("Scegli modello", list(DOCUMENT_TEMPLATES.keys()))
+    tpl = DOCUMENT_TEMPLATES[template_name]
+
+    c1, c2 = st.columns(2)
+    with c1:
+        citizen_name = st.text_input("Nome e cognome", value="Nome Cognome")
+        city = st.text_input("Città", value="Città")
+        recipient = st.text_input("Destinatario", value="Ente/Ufficio/Controparte")
+    with c2:
+        topic = st.text_input("Oggetto del problema", value="Descrizione sintetica")
+        reason = st.text_area("Fatti principali", value="Descrivi i fatti essenziali in modo cronologico.", height=110)
+        deadline_days = st.number_input("Giorni proposti per risposta/adempimento", min_value=3, max_value=180, value=15)
+
+    text = (
+        f"Oggetto: {tpl['subject']}\n\n"
+        + tpl["body"].format(
+            citizen_name=citizen_name,
+            city=city,
+            recipient=recipient,
+            topic=topic,
+            reason=reason,
+            deadline_days=deadline_days,
+        )
+        + "\n\nData: __________\nFirma: __________"
+    )
+
+    st.text_area("Bozza documento", text, height=320)
+    st.download_button(
+        "Scarica bozza (.txt)",
+        data=text.encode("utf-8"),
+        file_name="bozza_documento_normattivavigente.txt",
+        mime="text/plain",
+    )
+    st.warning("Queste bozze sono strumenti informativi e non sostituiscono consulenza legale professionale.")
+
+
+def page_scenario_compare():
+    st.header("⚖️ Confronta scenari")
+    st.caption("Confronta due situazioni giuridiche per vedere differenze nei risultati normativi vigenti.")
+
+    db = load_db()
+    if not db:
+        st.info("Database richiesto per il confronto scenari.")
+        return
+
+    scenario_names = list(SCENARIO_PRESETS.keys())
+    c1, c2 = st.columns(2)
+    with c1:
+        left_s = st.selectbox("Scenario A", scenario_names, key="cmp-left")
+        left_custom = st.text_input("Query personalizzata A (opzionale)", key="cmp-left-custom")
+    with c2:
+        right_s = st.selectbox("Scenario B", scenario_names, index=min(1, len(scenario_names)-1), key="cmp-right")
+        right_custom = st.text_input("Query personalizzata B (opzionale)", key="cmp-right-custom")
+
+    if not st.button("Confronta", type="primary"):
+        return
+
+    q_left = left_custom.strip() or SCENARIO_PRESETS[left_s]
+    q_right = right_custom.strip() or SCENARIO_PRESETS[right_s]
+
+    left_rows = [r for r in db.search_fts(q_left, limit=200) if _normalize_status(r.get("status")) == "in_force"]
+    right_rows = [r for r in db.search_fts(q_right, limit=200) if _normalize_status(r.get("status")) == "in_force"]
+
+    left_urns = {r.get("urn") for r in left_rows if r.get("urn")}
+    right_urns = {r.get("urn") for r in right_rows if r.get("urn")}
+    overlap = left_urns.intersection(right_urns)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Norme scenario A", f"{len(left_rows):,}")
+    m2.metric("Norme scenario B", f"{len(right_rows):,}")
+    m3.metric("Norme comuni", f"{len(overlap):,}")
+
+    lcol, rcol = st.columns(2)
+    with lcol:
+        st.subheader(f"A: {left_s}")
+        for r in left_rows[:10]:
+            with st.expander(f"{r.get('title','N/A')[:90]} ({r.get('year','?')})"):
+                st.write(_plain_language_summary(r))
+                _render_source_transparency_box(db, r, query_terms=q_left)
+    with rcol:
+        st.subheader(f"B: {right_s}")
+        for r in right_rows[:10]:
+            with st.expander(f"{r.get('title','N/A')[:90]} ({r.get('year','?')})"):
+                st.write(_plain_language_summary(r))
+                _render_source_transparency_box(db, r, query_terms=q_right)
 
 def page_rights_explorer():
     st.header("🧭 Citizen Rights Explorer")
@@ -879,6 +1755,83 @@ def page_rights_explorer():
                 snippet = r.get("snippet", "")
                 if snippet:
                     st.markdown(f"**Snippet**: ...{snippet}...")
+
+
+def page_jurisprudence_explorer():
+    st.header("⚖️ Giurisprudence Explorer")
+    st.caption(
+        "Esplora il dataset vigente attraverso richiami a Corte costituzionale, Cassazione e giudici amministrativi. "
+        "Questa pagina analizza i riferimenti giurisprudenziali presenti nelle norme vigenti."
+    )
+
+    db = load_db()
+    if not db:
+        st.info("Database richiesto per l'esplorazione giurisprudenziale.")
+        return
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        topic = st.selectbox("Tema giurisprudenziale", list(JURISPRUDENCE_TOPICS.keys()))
+    with c2:
+        year_from = st.number_input("Anno da", min_value=1800, max_value=2100, value=1948)
+    with c3:
+        year_to = st.number_input("Anno a", min_value=1800, max_value=2100, value=2100)
+
+    limit = st.slider("Numero risultati", 20, 300, 80, 20)
+    if not st.button("Analizza giurisprudenza"):
+        st.info("Seleziona un tema e avvia l'analisi.")
+        return
+
+    query = JURISPRUDENCE_TOPICS[topic]
+    try:
+        rows = db.search_fts(query, limit=500)
+    except Exception as e:
+        st.error(f"Errore ricerca: {e}")
+        return
+
+    rows = [r for r in rows if _normalize_status(r.get("status")) == "in_force"]
+    rows = [r for r in rows if year_from <= int(r.get("year") or 0) <= year_to]
+    rows = rows[:limit]
+
+    if not rows:
+        st.warning("Nessun risultato per i filtri selezionati.")
+        return
+
+    st.success(f"Trovate {len(rows)} norme vigenti con segnali giurisprudenziali per: {topic}")
+
+    t_counter = Counter((r.get("type") or "unknown") for r in rows)
+    y_counter = Counter(str(r.get("year") or "?") for r in rows)
+    v1, v2 = st.columns(2)
+    with v1:
+        fig = px.bar(
+            x=list(t_counter.keys()),
+            y=list(t_counter.values()),
+            title="Distribuzione per tipo atto",
+            labels={"x": "Tipo", "y": "Conteggio"},
+        )
+        st.plotly_chart(fig, width='stretch')
+    with v2:
+        yd = dict(sorted(y_counter.items()))
+        fig = px.line(
+            x=list(yd.keys()),
+            y=list(yd.values()),
+            title="Trend temporale",
+            labels={"x": "Anno", "y": "Norme"},
+        )
+        st.plotly_chart(fig, width='stretch')
+
+    st.subheader("Norme rilevanti")
+    for r in rows:
+        with st.expander(f"{r.get('title', 'N/A')} ({r.get('year', 'N/A')})"):
+            st.write(f"**Status**: {_status_label(r.get('status'))}")
+            st.write(f"**Tipo**: {r.get('type', 'N/A')}")
+            st.write(f"**URN**: `{r.get('urn', 'N/A')}`")
+            if r.get("snippet"):
+                st.markdown(f"**Snippet**: ...{r.get('snippet')}...")
+            if st.button("Apri scheda legge", key=f"jur-open-{r.get('urn')}"):
+                st.session_state["detail_urn"] = r.get("urn")
+                st.session_state["goto_page"] = "📖 Law Detail"
+                st.rerun()
 
 
 def _render_browse_table(laws: List[Dict], title: str, locked_status: str | None = None):
@@ -969,7 +1922,7 @@ def _render_browse_table(laws: List[Dict], title: str, locked_status: str | None
 
 def page_browse():
     laws = _get_laws()
-    _render_browse_table(laws, "📋 Browse Laws (All)", locked_status=None)
+    _render_browse_table(laws, "📋 Sfoglia Archivio" if IS_ITALIAN_LAB else "📋 Browse Laws (All)", locked_status=None)
 
 
 def page_vigenti():
@@ -978,8 +1931,211 @@ def page_vigenti():
 
 
 def page_abrogated():
-    laws = [l for l in _get_laws() if _normalize_status(l.get("status")) == "abrogated"]
-    _render_browse_table(laws, "🚫 Abrogated Laws", locked_status="abrogated")
+    st.header("\U0001f6ab Leggi Abrogate")
+
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    # Count abrogated in DB
+    try:
+        n_abr = db.conn.execute(
+            "SELECT COUNT(*) FROM laws WHERE status='abrogated'"
+        ).fetchone()[0]
+        n_total = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+        n_force = n_total - n_abr
+    except Exception:
+        n_abr = n_force = n_total = 0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Leggi in vigore", f"{n_force:,}")
+    c2.metric("Leggi abrogate", f"{n_abr:,}", help="Atti normativi abrogati — fonte: track O Normattiva API")
+    c3.metric("Totale corpus", f"{n_total:,}")
+
+    if n_abr == 0:
+        st.warning(
+            "Nessuna legge abrogata nel database. "
+            "Il database contiene solo leggi vigenti (track V). "
+            "Per includere le ~124.000 leggi abrogate, eseguire: `py build_voom.py --steps abrogati`"
+        )
+        return
+
+    st.info(
+        f"Il corpus VOOM contiene **{n_abr:,}** leggi abrogate dalla raccolta "
+        "'Atti normativi abrogati (in originale)' dell'API Normattiva (track O). "
+        "La data di abrogazione non \u00e8 fornita dall'API; sono presenti titolo, tipo, "
+        "data di emanazione e testo originale."
+    )
+
+    # Search within abrogated
+    q = st.text_input("Cerca tra le leggi abrogate", placeholder="Es.: legge n. 183 previdenza")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        type_filter = st.selectbox("Tipo atto", ["(tutti)", "legge", "decreto.legislativo",
+                                                   "decreto.legge", "regio.decreto", "dpcm", "dpr"])
+    with col_f2:
+        year_from, year_to = st.slider("Anno emanazione", 1861, 2025, (1950, 2020))
+
+    try:
+        if q:
+            rows = db.search_fts(q, limit=500)
+            rows = [r for r in rows if _normalize_status(r.get("status")) == "abrogated"]
+        else:
+            rows = db.conn.execute(
+                "SELECT urn, title, type, date, year, article_count "
+                "FROM laws WHERE status='abrogated' ORDER BY year DESC LIMIT 5000"
+            ).fetchall()
+            rows = [dict(r) for r in rows]
+
+        # Apply filters
+        if type_filter != "(tutti)":
+            rows = [r for r in rows if r.get("type") == type_filter]
+        rows = [r for r in rows if year_from <= (r.get("year") or 0) <= year_to]
+
+        st.caption(f"{len(rows):,} leggi trovate")
+        if rows:
+            df = pd.DataFrame([{
+                "Anno": r.get("year"),
+                "Tipo": r.get("type"),
+                "Titolo": (r.get("title") or "")[:80],
+                "Data": r.get("date"),
+                "Articoli": r.get("article_count"),
+                "URN": r.get("urn"),
+            } for r in rows[:200]])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            if len(rows) > 200:
+                st.caption("Mostrati i primi 200 risultati. Usa la ricerca per affinare.")
+    except Exception as e:
+        st.error(f"Errore query: {e}")
+
+
+def page_multivigente():
+    """Amendment history page — downloads multivigente.db on demand."""
+    st.header("\U0001f4dc Storia Normativa — Versioni Multivigente")
+    st.caption(
+        "Consulta come una legge \u00e8 cambiata nel tempo. "
+        "Ogni versione corrisponde a un intervallo di vigenza (track M dell'API Normattiva)."
+    )
+
+    # Check if multivigente.db is available
+    mv_paths = [
+        Path("/app/data/multivigente.db"),
+        Path(__file__).parent.parent / "data" / "multivigente.db",
+        Path(__file__).parent / "data" / "multivigente.db",
+    ]
+    mv_db_path = next((p for p in mv_paths if p.exists() and p.stat().st_size > 10_000_000), None)
+
+    if mv_db_path is None:
+        st.warning(
+            "Il database delle versioni storiche (multivigente.db, ~2 GB) "
+            "non \u00e8 ancora disponibile in questa istanza."
+        )
+        with st.expander("Come abilitare la storia normativa"):
+            st.markdown(
+                "Il database multivigente viene scaricato separatamente per non appesantire "
+                "l'avvio dell'app. Clicca il pulsante qui sotto per avviare il download (~2 GB). "
+                "Il download richiede 5-15 minuti e l'app rimane usabile durante l'operazione."
+            )
+            if st.button("Scarica database multivigente (~2 GB)", type="primary"):
+                output_path = mv_paths[1] if not mv_paths[0].parent.exists() else mv_paths[0]
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                placeholder = st.empty()
+                with st.spinner("Download in corso... (~2 GB, pazienta)"):
+                    try:
+                        sys.path.insert(0, str(Path(__file__).parent))
+                        from download_db import download_database
+                        ok = download_database(str(output_path), "multivigente")
+                        if ok:
+                            placeholder.success(f"Download completato: {output_path}")
+                            st.rerun()
+                        else:
+                            placeholder.error(
+                                "Download fallito. Controlla che il dataset HF contenga "
+                                "data/multivigente.db (eseguire build_voom.py --steps multivigente)."
+                            )
+                    except Exception as ex:
+                        placeholder.error(f"Errore: {ex}")
+        return
+
+    # Multivigente DB is available — query it
+    import sqlite3 as _sqlite3
+
+    st.success(f"Database storico caricato: {mv_db_path.stat().st_size/1e6:.0f} MB")
+
+    urn_input = st.text_input(
+        "Inserisci URN della legge",
+        placeholder="urn:nir:stato:legge:1991;104",
+        help="Puoi copiare l'URN dalla pagina dettaglio della legge.",
+    )
+
+    # Also allow free-text search to find a law's URN
+    law_search = st.text_input(
+        "...oppure cerca per titolo nella legge principale",
+        placeholder="legge 104 handicap",
+    )
+
+    urn = urn_input.strip()
+    if not urn and law_search:
+        db = load_db()
+        if db:
+            try:
+                res = db.search_fts(law_search, limit=10)
+                if res:
+                    opts = {f"{r.get('title','')[:70]} ({r.get('year')})": r.get("urn") for r in res}
+                    chosen = st.selectbox("Seleziona legge", ["-- scegli --"] + list(opts))
+                    if chosen != "-- scegli --":
+                        urn = opts[chosen]
+            except Exception:
+                pass
+
+    if not urn:
+        st.info("Inserisci un URN o cerca per titolo per visualizzare la storia normativa.")
+        return
+
+    try:
+        mv_conn = _sqlite3.connect(str(mv_db_path))
+        mv_conn.row_factory = _sqlite3.Row
+        versions = mv_conn.execute(
+            "SELECT version_date, title, article_count, text_length, text "
+            "FROM law_versions WHERE law_urn = ? ORDER BY version_date",
+            (urn,)
+        ).fetchall()
+        mv_conn.close()
+    except Exception as e:
+        st.error(f"Errore lettura database storico: {e}")
+        return
+
+    if not versions:
+        st.warning(f"Nessuna versione storica trovata per: `{urn}`")
+        st.caption(
+            "L'atto potrebbe non essere presente nel track M dell'API Normattiva, "
+            "oppure il database non include ancora questa legge."
+        )
+        return
+
+    st.subheader(f"{len(versions)} versioni trovate")
+    df = pd.DataFrame([{
+        "Data versione": v["version_date"],
+        "Titolo": (v["title"] or "")[:80],
+        "Articoli": v["article_count"],
+        "Lunghezza testo": v["text_length"],
+    } for v in versions])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Show a specific version's text
+    if len(versions) > 1:
+        v_dates = [v["version_date"] for v in versions]
+        selected = st.selectbox("Leggi il testo di una versione:", v_dates)
+        v_text = next((v["text"] for v in versions if v["version_date"] == selected), "")
+        if v_text:
+            st.text_area("Testo della versione", v_text[:5000], height=400)
+            if len(v_text) > 5000:
+                st.caption(f"Testo troncato a 5.000 caratteri (totale: {len(v_text):,})")
+    elif versions:
+        st.text_area("Testo", (versions[0]["text"] or "")[:5000], height=400)
+
+
 
 
 def page_llm_lab():
@@ -1044,6 +2200,60 @@ def page_llm_lab():
                 st.dataframe(df, width='stretch', hide_index=True)
 
 
+def page_chatbot():
+    st.header("🤖 Chatbot — Normattiva Vigente")
+    st.caption("Conversational explorer over the vigente dataset. Uses a local backend for retrieval and optional Groq generation.")
+
+    backend = os.environ.get("LLM_BACKEND_URL", "http://127.0.0.1:8000")
+
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    q = st.text_input("Ask the assistant (plain language)", value="", key="chatbot-question")
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("Ask", key="chatbot-ask") and q.strip():
+            try:
+                resp = requests.post(f"{backend}/chat", json={"question": q, "top_k": 6}, timeout=30)
+                if resp.status_code != 200:
+                    st.error(f"Backend error: {resp.status_code} {resp.text}")
+                else:
+                    data = resp.json()
+                    st.session_state["chat_history"].append({"q": q, "a": data.get("answer"), "e": data.get("evidence", [])})
+            except Exception as e:
+                st.error(f"Could not reach backend: {e}")
+
+    if st.session_state["chat_history"]:
+        for item in reversed(st.session_state["chat_history"]):
+            with st.expander(f"Q: {item['q']}"):
+                st.markdown(item.get("a") or "(no answer)")
+                if item.get("e"):
+                    st.subheader("Evidence")
+                    for ev in item.get("e"):
+                        cols = st.columns([5, 1])
+                        cols[0].markdown(f"**{ev.get('title','N/A')}** ({ev.get('year','N/A')})\n\n{ev.get('snippet','')}")
+                        with cols[1]:
+                            if st.button("Open law", key=f"open-{ev.get('urn')}"):
+                                st.session_state["detail_urn"] = ev.get('urn')
+                                st.session_state["goto_page"] = "📖 Law Detail"
+                                st.rerun()
+
+    st.divider()
+    if st.button("Check sync with Normattiva API", key="chatbot-sync"):
+        try:
+            resp = requests.get(f"{backend}/sync_status", timeout=40)
+            if resp.status_code != 200:
+                st.error(f"Sync check failed: {resp.status_code} {resp.text}")
+            else:
+                report = resp.json()
+                st.subheader("Sync report")
+                st.write(f"Collections checked: {report.get('summary_counted_collections')}")
+                df = pd.DataFrame(report.get('details', []))
+                st.dataframe(df, width='stretch', hide_index=True)
+        except Exception as e:
+            st.error(f"Sync check error: {e}")
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def _http_get_json(url: str, params: dict | None = None):
     import requests
@@ -1068,42 +2278,6 @@ def _dataset_track(rec: dict) -> str:
     if "multivigente" in src:
         return "multivigente"
     return "vigente"
-
-
-@st.cache_data(ttl=1200, show_spinner=False)
-def _get_live_api_track_snapshot() -> Dict:
-    from normattiva_api_client import NormattivaAPI
-
-    api = NormattivaAPI(timeout_s=20, retries=1)
-    catalogue = api.get_collection_catalogue()
-
-    by_track = {"vigente": 0, "multivigente": 0, "abrogato": 0}
-    latest_update = {"vigente": None, "multivigente": None, "abrogato": None}
-
-    for c in catalogue:
-        name = str(c.get("nomeCollezione", "")).lower()
-        variant = str(c.get("formatoCollezione", "")).upper()
-        acts = int(c.get("numeroAtti") or 0)
-        created = c.get("dataCreazione")
-
-        if "abrogat" in name and variant == "O":
-            key = "abrogato"
-        elif variant == "M":
-            key = "multivigente"
-        elif variant == "V":
-            key = "vigente"
-        else:
-            continue
-
-        by_track[key] += acts
-        if created and (not latest_update[key] or created > latest_update[key]):
-            latest_update[key] = created
-
-    return {
-        "catalogue_size": len(catalogue),
-        "by_track": by_track,
-        "latest_update": latest_update,
-    }
 
 
 def _ensure_status_timeline_schema(db):
@@ -1250,10 +2424,10 @@ def _load_status_transitions(db, limit: int = 1000):
 
 
 def page_italian_legal_lab():
-    st.header("🧪 Italian Legal Lab")
+    st.header("🇮🇹 Italian Legal Lab")
     st.caption(
-        "Unified exploration hub across Normattiva status tracks, daily Gazzetta flow, "
-        "institutional statistics (Banca d'Italia/ISTAT SDMX), and parliamentary datasets."
+        "Intelligence giuridica integrata: dataset Normattiva, dati finanziari SIOPE+, "
+        "statistiche istituzionali e fonti parlamentari."
     )
 
     db = load_db()
@@ -1261,17 +2435,81 @@ def page_italian_legal_lab():
         st.info("Database required for Legal Lab.")
         return
 
-    tabs = st.tabs([
-        "⚖️ Normattiva Status Hub",
-        "🔄 Status Timeline",
-        "🗞️ Gazzetta Ufficiale Daily",
-        "🏦 Banca d'Italia SDMX",
-        "📊 ISTAT SDMX",
-        "🏛️ Senato AKN Bulk",
-        "🧩 Institutional APIs",
-    ])
+    section = st.radio(
+        "Italian Legal Lab sections",
+        [
+            "Overview",
+            "Normattiva Tracks",
+            "Status Timeline",
+            "SIOPE+",
+            "Public Data Feeds",
+        ],
+        horizontal=True,
+        key="italian-lab-section",
+        label_visibility="collapsed",
+    )
 
-    with tabs[0]:
+    if section == "Overview":
+        st.subheader("Italian Legal Lab control center")
+        st.markdown(
+            "This Space is now designed as the full legal analysis hub: "
+            "Normattiva core (vigente/multivigente/abrogato), fiscal impact, institutional data, and exports."
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Active Profile", APP_PROFILE)
+        c2.metric("Dataset Repo", ACTIVE_DATASET_REPO)
+        c3.metric("Target Space", os.environ.get("HF_SPACE_ID") or os.environ.get("SPACE_NAME") or "N/A")
+
+        st.caption("Quick actions")
+        qa1, qa2, qa3, qa4 = st.columns(4)
+        if qa1.button("Cerca Leggi", key="lab-go-search"):
+            st.session_state["goto_page"] = "🔍 Cerca Leggi"
+            st.rerun()
+        if qa2.button("Vigenti", key="lab-go-vigenti"):
+            st.session_state["italian-lab-section"] = "Normattiva Tracks"
+            st.session_state["italian-lab-track-select"] = "vigente"
+            st.rerun()
+        if qa3.button("Abrogati", key="lab-go-abrogati"):
+            st.session_state["italian-lab-section"] = "Normattiva Tracks"
+            st.session_state["italian-lab-track-select"] = "abrogato"
+            st.rerun()
+        if qa4.button("Rete Citazioni", key="lab-go-citations"):
+            st.session_state["goto_page"] = "🔗 Rete Citazioni"
+            st.rerun()
+
+        st.info(
+            "Recommended deployment mapping: \n"
+            "- normattivavigente -> diatribe00/normattivavigente-data\n"
+            "- opennormattiva-lab -> diatribe00/normattiva-lab-data\n"
+            "- italian-legal-lab -> diatribe00/italian-legal-lab-data"
+        )
+
+        st.divider()
+        st.subheader("Full Normattiva experience")
+        st.caption("Direct access to the full analysis stack available in this Space.")
+        r1, r2, r3 = st.columns(3)
+        if r1.button("🔍 Cerca Leggi", key="lab-open-search"):
+            st.session_state["goto_page"] = "🔍 Cerca Leggi"
+            st.rerun()
+        if r2.button("📋 Sfoglia Archivio", key="lab-open-browse"):
+            st.session_state["goto_page"] = "📋 Sfoglia Archivio"
+            st.rerun()
+        if r3.button("📖 Scheda Legge", key="lab-open-detail"):
+            st.session_state["goto_page"] = "📖 Scheda Legge"
+            st.rerun()
+
+        r4, r5, r6 = st.columns(3)
+        if r4.button("🔗 Rete Citazioni", key="lab-open-cit-net"):
+            st.session_state["goto_page"] = "🔗 Rete Citazioni"
+            st.rerun()
+        if r5.button("🏛️ Aree Giuridiche", key="lab-open-domains"):
+            st.session_state["goto_page"] = "🏛️ Aree Giuridiche"
+            st.rerun()
+        if r6.button("📥 Esporta Dati", key="lab-open-export"):
+            st.session_state["goto_page"] = "📥 Esporta"
+            st.rerun()
+
+    elif section == "Normattiva Tracks":
         st.subheader("Normattiva: vigente / multivigente / abrogato")
         laws = _get_laws()
         if not laws:
@@ -1295,7 +2533,11 @@ def page_italian_legal_lab():
             fig = px.pie(df, names="track", title="Dataset status tracks")
             st.plotly_chart(fig, width='stretch')
 
-            sel_track = st.selectbox("Explore track", ["vigente", "multivigente", "abrogato"])
+            sel_track = st.selectbox(
+                "Explore track",
+                ["vigente", "multivigente", "abrogato"],
+                key="italian-lab-track-select",
+            )
             view = df[df["track"] == sel_track].copy().sort_values("year", ascending=False)
             st.write(f"Showing {len(view):,} laws in track: {sel_track}")
             st.dataframe(
@@ -1329,7 +2571,7 @@ def page_italian_legal_lab():
                 except Exception as e:
                     st.error(f"API scan failed: {e}")
 
-    with tabs[1]:
+    elif section == "Status Timeline":
         st.subheader("Status transition timeline (vigente ↔ abrogato / track changes)")
         st.caption(
             "Capture periodic status snapshots and detect transitions per URN. "
@@ -1372,7 +2614,55 @@ def page_italian_legal_lab():
         else:
             st.info("No transitions detected yet. Capture at least two snapshots to compute diffs.")
 
-    with tabs[2]:
+    elif section == "SIOPE+":
+        st.subheader("SIOPE+ API integration (Bank of Italy)")
+        st.caption(
+            "SIOPE+ exposes treasury and payment-exchange operations and generally requires TLS client certificates. "
+            "Use this panel to inspect docs/specs and test public metadata endpoints."
+        )
+
+        st.markdown(
+            "**Operational note**\n"
+            "Production SIOPE+ calls are authenticated (mTLS). In this Space, only public or user-provided reachable endpoints can be probed."
+        )
+
+        siope_spec_url = st.text_input(
+            "SIOPE+ spec/document URL",
+            value="https://developers.italia.it/it/api/siope",
+            key="siope-spec-url"
+        )
+        if st.button("Fetch SIOPE+ documentation page", key="fetch-siope-doc"):
+            try:
+                doc_txt = _http_get_text(siope_spec_url)
+                st.code(doc_txt[:12000], language="html")
+            except Exception as e:
+                st.error(f"SIOPE+ documentation fetch failed: {e}")
+
+        st.subheader("SIOPE+ endpoint constructor")
+        c1, c2, c3 = st.columns(3)
+        id_a2a = c1.text_input("idA2A", value="DEMO", key="siope-id-a2a")
+        cod_ente = c2.text_input("codEnte", value="000000", key="siope-cod-ente")
+        cod_banca = c3.text_input("codBanca", value="00000", key="siope-cod-banca")
+        op = st.selectbox(
+            "Operation template",
+            [
+                "PA giornale list: /{idA2A}/PA/{codEnte}/giornale/",
+                "PA flusso list: /{idA2A}/PA/{codEnte}/flusso",
+                "PA disponibilita list: /{idA2A}/PA/{codEnte}/disponibilita",
+                "BT flusso list: /{idA2A}/BT/{codBanca}/flusso/",
+            ],
+            key="siope-op-template"
+        )
+
+        built = (
+            op.replace("{idA2A}", id_a2a)
+            .replace("{codEnte}", cod_ente)
+            .replace("{codBanca}", cod_banca)
+        )
+        st.code(built, language="text")
+        st.caption("Use this generated path against your certified SIOPE+ base server in secure environments.")
+
+    elif section == "Public Data Feeds":
         st.subheader("Daily Gazzetta Ufficiale feed")
         rss_url = st.text_input(
             "RSS URL",
@@ -1400,23 +2690,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Gazzetta fetch failed: {e}")
 
-    with tabs[3]:
-        st.subheader("Banca d'Italia SDMX preview")
-        st.caption("Endpoint can vary by dataset family; this tab provides on-demand endpoint probing.")
-        bdi_url = st.text_input(
-            "Banca d'Italia endpoint",
-            value="https://api.bancaditalia.it/sdmx/v1/dataflow",
-            key="bdi-url"
-        )
-        if st.button("Fetch Banca d'Italia"):
-            try:
-                data = _http_get_json(bdi_url)
-                st.json(data if isinstance(data, dict) else {"type": str(type(data)), "preview": str(data)[:2000]})
-            except Exception as e:
-                st.error(f"Banca d'Italia fetch failed: {e}")
-                st.info("Try an alternate official SDMX endpoint URL if this one is unavailable.")
-
-    with tabs[4]:
+        st.divider()
         st.subheader("ISTAT SDMX preview")
         istat_url = st.text_input(
             "ISTAT endpoint",
@@ -1430,7 +2704,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"ISTAT fetch failed: {e}")
 
-    with tabs[5]:
+        st.divider()
         st.subheader("Senato Akoma Ntoso bulk explorer")
         st.caption("Browsable view over SenatoDellaRepubblica/AkomaNtosoBulkData repository contents.")
         path = st.text_input("Repository path", value="", key="senato-path")
@@ -1445,7 +2719,7 @@ def page_italian_legal_lab():
             except Exception as e:
                 st.error(f"Senato AKN listing failed: {e}")
 
-    with tabs[6]:
+        st.divider()
         st.subheader("Institutional APIs catalog")
         catalog = [
             {"source": "OpenGazzetta (openGA)", "url": "https://api.gazzettaufficiale.it/"},
@@ -1487,36 +2761,80 @@ def page_italian_legal_lab():
 
 
 def page_law_detail():
-    st.header("📖 Law Detail - Full Context & Relationships")
+    st.header("📖 Scheda Legge" if IS_ITALIAN_LAB else "📖 Law Detail")
     db = load_db()
     if not db:
         st.info("Database required for detailed law view.")
         return
 
-    laws = _get_laws()
-    urn_options = [
-        f"{l.get('title', '')[:60]} ({l.get('urn', '')})"
-        for l in laws[:500]
-    ]
-    selected = st.selectbox(
-        "Select a law:", urn_options if urn_options else ["No laws available"],
-        key="law-detail-select"
-    )
-    if not selected or selected == "No laws available":
-        return
+    pref_urn = st.session_state.get("detail_urn")
+    if IS_SEARCH:
+        st.caption("Modalità cittadino: cerca prima per titolo/parola chiave, poi apri la scheda completa della norma vigente.")
+        detail_query = st.text_input(
+            "Trova norma per titolo, materia o numero",
+            placeholder="es. codice del consumo, privacy, responsabilità civile",
+            key="law-detail-query",
+        )
+        if detail_query and len(detail_query.strip()) >= 2:
+            try:
+                cand = db.search_fts(detail_query.strip(), limit=80)
+                cand = [r for r in cand if _normalize_status(r.get("status")) == "in_force"]
+            except Exception:
+                cand = []
+        else:
+            cand = []
 
-    urn = selected.split("(")[-1].rstrip(")")
-    law_row = db.conn.execute(
-        "SELECT * FROM laws WHERE urn = ?", (urn,)
-    ).fetchone()
+        if pref_urn and not any((c.get("urn") == pref_urn) for c in cand):
+            row = db.conn.execute(
+                "SELECT urn, title, year, status FROM laws WHERE urn = ? LIMIT 1",
+                (pref_urn,),
+            ).fetchone()
+            if row:
+                cand = [dict(row)] + cand
+
+        if not cand:
+            st.info("Inserisci almeno 2 caratteri per selezionare una norma.")
+            return
+
+        options = {
+            f"{c.get('title','')[:90]} ({c.get('year','?')})": c.get("urn")
+            for c in cand
+            if c.get("urn")
+        }
+        selected_label = st.selectbox("Seleziona norma", list(options.keys()), key="law-detail-select-search")
+        urn = options[selected_label]
+    else:
+        laws = _get_laws()
+        urn_options = [f"{l.get('title', '')[:60]} ({l.get('urn', '')})" for l in laws[:500]]
+        selected = st.selectbox(
+            "Select a law:",
+            urn_options if urn_options else ["No laws available"],
+            key="law-detail-select",
+        )
+        if not selected or selected == "No laws available":
+            return
+        urn = selected.split("(")[-1].rstrip(")")
+    law_row = db.conn.execute("SELECT * FROM laws WHERE urn = ?", (urn,)).fetchone()
     if not law_row:
         st.warning("Law not found.")
         return
 
     law = dict(law_row)
     st.subheader(law.get("title", "Untitled"))
+    st.caption(f"{_status_chip(law.get('status'))} · {_status_explainer(law.get('status'))}")
+    with st.expander("Why am I seeing this law?"):
+        if IS_SEARCH:
+            st.write("Questa scheda mostra una norma vigente con metadati, testo, citazioni e collegamenti utili per orientarti rapidamente.")
+        else:
+            st.write(
+                "This page shows one act in VOM context: current status (V/O) and historical versions (M)."
+            )
+    _render_source_transparency_box(
+        db,
+        law,
+        query_terms=st.session_state.get("last_search_query", ""),
+    )
 
-    # Quick metadata in columns
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Type", law.get("type", "N/A"))
     col2.metric("Year", law.get("year", "N/A"))
@@ -1524,204 +2842,196 @@ def page_law_detail():
     if law.get("importance_score"):
         col4.metric("Importance (PageRank)", f"{law['importance_score']:.4f}")
 
-    # Main tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📄 Full Text", 
-        "🔗 Citation Links", 
-        "📚 Related Laws",
-        "⚖️ Amendments",
-        "🎯 Context Graph"
-    ])
+    if IS_SEARCH:
+        top_simple, top_text, top_links = st.tabs(["🪄 Vista Semplice", "📄 Testo Integrale", "🔗 Citazioni e Rete"])
+    else:
+        top_simple, top_timeline, top_expert = st.tabs(["🪄 Simple View", "🕰️ Timeline View", "🧠 Expert View"])
 
-    with tab1:
-        """Full text with metadata"""
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.subheader("Metadata")
-            st.write(f"**URN**: `{law.get('urn')}`")
-            st.write(f"**Date**: {law.get('date', 'N/A')}")
-            st.write(f"**Status**: {_status_label(law.get('status'))}")
-            st.write(f"**Characters**: {law.get('text_length', 0):,}")
-            
-            meta = db.conn.execute(
-                "SELECT * FROM law_metadata WHERE urn = ?", (urn,)
-            ).fetchone()
-            if meta:
-                meta = dict(meta)
-                if meta.get("domain_cluster"):
-                    st.write(f"**Legal Domain**: {meta['domain_cluster']}")
-        
-        with col2:
-            st.subheader("Full Text")
-            text = law.get("text", "")
-            if text:
-                st.text_area(
-                    "Content:", text, height=400, 
-                    disabled=True, key="law-text"
-                )
-                # Show URN reference table below text
-                ref_table = _urn_inline_links(text, db)
-                if ref_table:
-                    with st.expander("📎 Leggi citate nel testo (URN references)"):
-                        st.markdown(ref_table)
-            else:
-                st.info("No text content available.")
+    with top_simple:
+        s1, s2 = st.columns([1, 2])
+        with s1:
+            st.write(f"**Status**: {_status_chip(law.get('status'))} {_status_label(law.get('status'))}")
+            if IS_SEARCH:
+                with top_text:
+                    text = law.get("text", "")
+                    st.text_area("Testo della norma", text, height=420, disabled=True, key="law-text-citizen")
 
-    with tab2:
-        """Citations: who cites this law, and what it cites"""
-        st.subheader("🔗 Citation Network")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Laws that CITE this law** (incoming citations)")
-            cited_by = db.get_citations_incoming(urn, limit=50)
-            if cited_by:
-                st.write(f"✓ Cited by **{len(cited_by)}** laws")
-                for cit in cited_by[:20]:
-                    cited_urn = cit.get("citing_urn") or cit.get("urn")
-                    context = cit.get("context", "")
-                    context_preview = f" _{context[:80]}..._" if context else ""
-                    with st.expander(f"📌 {cited_urn[:50]}{context_preview}"):
+                with top_links:
+                    tab2, tab3 = st.tabs(["🔗 Citazioni", "🎯 Grafo + correlate"])
+                    with tab2:
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.write("**Norme che citano questa**")
+                            cited_by = db.get_citations_incoming(urn, limit=30)
+                            st.write(f"Trovate: **{len(cited_by):,}**")
+                            for cit in cited_by[:15]:
+                                cited_urn = cit.get("citing_urn") or cit.get("urn")
+                                st.write(f"- {cited_urn}")
+                        with c2:
+                            st.write("**Norme citate da questa**")
+                            cites = db.get_citations_outgoing(urn, limit=30)
+                            st.write(f"Trovate: **{len(cites):,}**")
+                            for cit in cites[:15]:
+                                cited_urn = cit.get("cited_urn") or cit.get("urn")
+                                st.write(f"- {cited_urn}")
+                    with tab3:
                         try:
-                            cited_law = db.get_law(cited_urn)
-                            st.write(f"**{cited_law.get('title', 'N/A')}**")
-                            st.write(f"Type: {cited_law.get('type')}")
-                            st.write(f"Year: {cited_law.get('year')}")
-                            st.button(
-                                f"View full law →", 
-                                key=f"btn-view-{cited_urn}",
-                                on_click=lambda u=cited_urn: st.query_params.update({"urn": u})
-                            )
-                        except:
-                            st.write(f"Details not available")
-                if len(cited_by) > 20:
-                    st.caption(f"... and {len(cited_by) - 20} more")
-            else:
-                st.info("No incoming citations found.")
-        
-        with col2:
-            st.write("**Laws that THIS LAW CITES** (outgoing citations)")
-            cites = db.get_citations_outgoing(urn, limit=50)
-            if cites:
-                st.write(f"✓ Cites **{len(cites)}** laws")
-                for cit in cites[:20]:
-                    cited_urn = cit.get("cited_urn") or cit.get("urn")
-                    context = cit.get("context", "")
-                    context_preview = f" _{context[:80]}..._" if context else ""
-                    with st.expander(f"📌 {cited_urn[:50]}{context_preview}"):
+                            neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
+                            if neighborhood and neighborhood.get("nodes"):
+                                _render_graph_plotly(
+                                    neighborhood["nodes"],
+                                    neighborhood["edges"],
+                                    title=(f"Rete citazioni di {law.get('title', urn)[:50]}"),
+                                )
+                        except Exception:
+                            st.info("Grafo non disponibile per questa norma.")
                         try:
-                            ref_law = db.get_law(cited_urn)
-                            st.write(f"**{ref_law.get('title', 'N/A')}**")
-                            st.write(f"Type: {ref_law.get('type')}")
-                            st.write(f"Year: {ref_law.get('year')}")
-                            st.button(
-                                f"View dependency →", 
-                                key=f"btn-dep-{cited_urn}",
-                                on_click=lambda u=cited_urn: st.query_params.update({"urn": u})
-                            )
-                        except:
-                            st.write(f"Details not available")
-                if len(cites) > 20:
-                    st.caption(f"... and {len(cites) - 20} more")
-            else:
-                st.info("No outgoing citations found.")
-
-    with tab3:
-        """Related laws via co-citation and domain"""
-        st.subheader("📚 Related Laws (Contextually Relevant)")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Laws in the Same Legal Domain**")
-            try:
-                meta = db.conn.execute(
-                    "SELECT domain_cluster FROM law_metadata WHERE urn = ?", (urn,)
-                ).fetchone()
-                if meta and meta[0]:
-                    domain = meta[0]
-                    same_domain = db.conn.execute(
-                        "SELECT l.urn, l.title, l.year, m.domain_cluster FROM laws l "
-                        "LEFT JOIN law_metadata m ON l.urn = m.urn "
-                        "WHERE m.domain_cluster = ? AND l.urn != ? "
-                        "ORDER BY l.importance_score DESC LIMIT 15",
-                        (domain, urn)
-                    ).fetchall()
-                    if same_domain:
-                        for law_ref in same_domain:
-                            col1.button(
-                                f"📖 {law_ref[1][:50]} ({law_ref[2]})",
-                                key=f"domain-{law_ref[0]}",
-                                on_click=lambda u=law_ref[0]: st.query_params.update({"urn": u})
-                            )
-                    else:
-                        st.info("No other laws in this domain.")
+                            related = db.find_related_laws(urn, limit=15)
+                            if related:
+                                st.subheader("Norme correlate")
+                                for r in related[:10]:
+                                    _render_law_card(r, db, key_prefix="detail-related-search")
+                        except Exception:
+                            pass
+            with top_timeline if not IS_SEARCH else st.container():
+                if IS_SEARCH:
+                    pass
                 else:
-                    st.info("Domain classification not available.")
-            except Exception as e:
-                st.info(f"Domain analysis unavailable: {e}")
-        
-        with col2:
-            st.write("**Co-Citation Network (Laws Frequently Cited Together)**")
+                    mv_db_path = _find_multivigente_db_path()
+                    if not mv_db_path:
+                        st.info("Historical timeline DB is not available in this session.")
+                    else:
+                        try:
+                            import sqlite3 as _sqlite3
+
+                            mv_conn = _sqlite3.connect(str(mv_db_path))
+                            mv_conn.row_factory = _sqlite3.Row
+                            versions = mv_conn.execute(
+                                "SELECT version_date, title, article_count, text_length, text "
+                                "FROM law_versions WHERE law_urn = ? ORDER BY version_date",
+                                (urn,),
+                            ).fetchall()
+                            original = mv_conn.execute(
+                                "SELECT title, date, text_length, text FROM original_acts WHERE law_urn = ? LIMIT 1",
+                                (urn,),
+                            ).fetchone()
+                            mv_conn.close()
+
+                            st.write(f"M versions: **{len(versions):,}**")
+                            st.write(f"O originale available: **{'yes' if original else 'no'}**")
+
+                            if versions:
+                                df = pd.DataFrame(
+                                    [
+                                        {
+                                            "Version date": v["version_date"],
+                                            "Title": (v["title"] or "")[:90],
+                                            "Articles": v["article_count"],
+                                            "Text length": v["text_length"],
+                                        }
+                                        for v in versions
+                                    ]
+                                )
+                                st.dataframe(df, width='stretch', hide_index=True)
+                                dates = [v["version_date"] for v in versions]
+                                selected_date = st.selectbox("Read specific M version", dates, key="detail-m-version")
+                                selected_row = next((v for v in versions if v["version_date"] == selected_date), None)
+                                if selected_row:
+                                    st.text_area(
+                                        "Selected version text",
+                                        (selected_row["text"] or "")[:5000],
+                                        height=300,
+                                        disabled=True,
+                                        key="detail-m-text",
+                                    )
+                            elif not original:
+                                st.warning("No historical records found for this URN in M/O tables.")
+
+                            if original:
+                                with st.expander("Original O-track text"):
+                                    st.write(f"**Date**: {original['date']}")
+                                    st.text_area(
+                                        "Original text",
+                                        (original["text"] or "")[:5000],
+                                        height=300,
+                                        disabled=True,
+                                        key="detail-o-text",
+                                    )
+                        except Exception as e:
+                            st.error(f"Timeline load failed: {e}")
+            with top_expert if not IS_SEARCH else st.container():
+                if IS_SEARCH:
+                    pass
+                else:
+                    tab1, tab2, tab3 = st.tabs(["📄 Full Text", "🔗 Citations", "🎯 Graph + Related"])
+
+                    with tab1:
+                        e1, e2 = st.columns([1, 2])
+                        with e1:
+                            st.subheader("Metadata")
+                            st.write(f"**URN**: `{law.get('urn')}`")
+                            st.write(f"**Date**: {law.get('date', 'N/A')}")
+                            st.write(f"**Status**: {_status_label(law.get('status'))}")
+                            st.write(f"**Characters**: {law.get('text_length', 0):,}")
+                        with e2:
+                            text = law.get("text", "")
+                            st.text_area("Content", text, height=420, disabled=True, key="law-text")
+                            ref_table = _urn_inline_links(text, db)
+                            if ref_table:
+                                with st.expander("📎 Leggi citate nel testo"):
+                                    st.markdown(ref_table)
+
+                    with tab2:
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.write("**Incoming citations**")
+                            cited_by = db.get_citations_incoming(urn, limit=30)
+                            st.write(f"Found: **{len(cited_by):,}**")
+                            for cit in cited_by[:15]:
+                                cited_urn = cit.get("citing_urn") or cit.get("urn")
+                                st.write(f"- {cited_urn}")
+                        with c2:
+                            st.write("**Outgoing citations**")
+                            cites = db.get_citations_outgoing(urn, limit=30)
+                            st.write(f"Found: **{len(cites):,}**")
+                            for cit in cites[:15]:
+                                cited_urn = cit.get("cited_urn") or cit.get("urn")
+                                st.write(f"- {cited_urn}")
+
+                    with tab3:
+                        try:
+                            neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
+                            if neighborhood and neighborhood.get("nodes"):
+                                _render_graph_plotly(
+                                    neighborhood["nodes"],
+                                    neighborhood["edges"],
+                                    title=(f"Citation network of {law.get('title', urn)[:50]}"),
+                                )
+                        except Exception:
+                            st.info("Graph not available for this law.")
+                        try:
+                            related = db.find_related_laws(urn, limit=15)
+                            if related:
+                                st.subheader("Related laws")
+                                for r in related[:10]:
+                                    _render_law_card(r, db, key_prefix="detail-related")
+                        except Exception:
+                            pass
+                st.info("Graph not available for this law.")
             try:
                 related = db.find_related_laws(urn, limit=15)
                 if related:
-                    for r in related[:10]:
-                        col2.button(
-                            f"📖 {r.get('title', 'N/A')[:50]}",
-                            key=f"related-{r['urn']}",
-                            on_click=lambda u=r['urn']: st.query_params.update({"urn": u})
-                        )
-                    if len(related) > 10:
-                        st.caption(f"... and {len(related) - 10} more co-cited laws")
-                else:
-                    st.info("No related laws found via co-citation.")
-            except:
-                st.info("Co-citation analysis not available yet.")
-
-    with tab4:
-        """Amendment history and evolution"""
-        st.subheader("⚖️ Amendment & Modification History")
-        try:
-            amendments = db.get_amendment_timeline(urn)
-            if amendments:
-                st.write(f"**{len(amendments)}** modifications recorded:")
-                for amend in amendments:
-                    with st.expander(f"📝 {amend.get('amendment_date', 'Unknown')} - {amend.get('amendment_type', 'modified')}"):
-                        st.write(f"**Modifying law**: {amend.get('amending_urn')}")
-                        st.write(f"**Type**: {amend.get('amendment_type')}")
-                        if amend.get('description'):
-                            st.write(f"**Details**: {amend['description']}")
-            else:
-                st.info("No amendment history recorded for this law.")
-        except Exception as e:
-            st.info(f"Amendment history not available: {e}")
-
-    with tab5:
-        """Citation graph visualization"""
-        st.subheader("🎯 Citation Context Graph (Connected Laws)")
-        try:
-            neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
-            if neighborhood and neighborhood.get("nodes") and len(neighborhood["nodes"]) > 0:
-                _render_graph_plotly(
-                    neighborhood["nodes"], 
-                    neighborhood["edges"],
-                    title=(f"Citation network of {law.get('title', urn)[:50]}")
-                )
-                st.caption(
-                    f"Graph shows {len(neighborhood['nodes'])} laws connected via citations "
-                    f"(depth 2, up to 50 nodes)"
-                )
-            else:
-                st.info("No citation graph data available for this law.")
-        except Exception as e:
-            st.info(f"Graph visualization not available: {e}")
+                    rdf = pd.DataFrame([
+                        {"URN": r.get("urn"), "Title": (r.get("title") or "")[:100], "Year": r.get("year")}
+                        for r in related
+                    ])
+                    st.dataframe(rdf, width='stretch', hide_index=True)
+            except Exception:
+                st.info("Related law analysis not available.")
 
 
 def page_citations():
-    st.header("\U0001f517 Citation Network")
+    st.header("🔗 Rete Citazioni")
     db = load_db()
 
     if db:
@@ -1810,7 +3120,7 @@ def page_citations():
 
 
 def page_domains():
-    st.header("\U0001f3db Legal Domains")
+    st.header("🏛️ Aree Giuridiche")
     db = load_db()
     if not db:
         st.info("Database required for domain analysis.")
@@ -1958,72 +3268,6 @@ When new laws are detected:
 
 This keeps you in full control of what enters the dataset.
     """)
-
-
-def page_dataset_coverage():
-    st.header("📡 Dataset Coverage")
-    st.caption(
-        "Compare local dataset tracks (vigente/abrogato/multivigente) with the live Normattiva API catalogue "
-        "to quickly identify potential missing laws."
-    )
-
-    laws = _get_laws()
-    if not laws:
-        st.info("No data loaded.")
-        return
-
-    df = pd.DataFrame(laws)
-    df["track"] = df.apply(_dataset_track, axis=1)
-    local_counts = {
-        "vigente": int((df["track"] == "vigente").sum()),
-        "multivigente": int((df["track"] == "multivigente").sum()),
-        "abrogato": int((df["track"] == "abrogato").sum()),
-    }
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Local vigente", f"{local_counts['vigente']:,}")
-    c2.metric("Local multivigente", f"{local_counts['multivigente']:,}")
-    c3.metric("Local abrogato", f"{local_counts['abrogato']:,}")
-
-    if st.button("Check live API coverage", key="dataset-coverage-refresh"):
-        st.cache_data.clear()
-
-    try:
-        live = _get_live_api_track_snapshot()
-    except Exception as e:
-        st.error(f"Live API check failed: {e}")
-        return
-
-    rows = []
-    for key in ["vigente", "multivigente", "abrogato"]:
-        live_count = int(live["by_track"].get(key, 0))
-        local_count = int(local_counts.get(key, 0))
-        rows.append(
-            {
-                "track": key,
-                "local_dataset": local_count,
-                "live_api_catalogue": live_count,
-                "delta_live_minus_local": live_count - local_count,
-                "latest_api_update": live["latest_update"].get(key),
-            }
-        )
-
-    rep = pd.DataFrame(rows)
-    st.dataframe(rep, width='stretch', hide_index=True)
-
-    total_positive_gap = int(rep["delta_live_minus_local"].clip(lower=0).sum())
-    if total_positive_gap > 0:
-        st.warning(f"Potential missing laws from live API: ~{total_positive_gap:,}")
-    else:
-        st.success("No positive gap detected at catalogue level.")
-
-    with _monitor_lock:
-        pending = list(_monitor_state["pending_changes"])
-        last_check = _monitor_state["last_check"]
-    st.caption(
-        f"Catalogue collections observed: {live['catalogue_size']} | "
-        f"Pending API collection changes: {len(pending)} | Last notification check: {last_check or 'N/A'}"
-    )
 
 
 def page_fiscal_citizen_tax_lab():
@@ -2439,7 +3683,7 @@ def _render_law_card(law: dict, db, key_prefix: str = ""):
         with c2:
             if st.button("Apri →", key=f"{key_prefix}-open-{urn}"):
                 st.session_state["detail_urn"] = urn
-                st.session_state["goto_page"] = "📖 Law Detail"
+                st.session_state["goto_page"] = "📖 Scheda Legge"
                 st.rerun()
 
 
@@ -2673,7 +3917,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
 
                         if st.button(f"Apri {name} →", key=f"codice-{urn}"):
                             st.session_state["detail_urn"] = law_d["urn"]
-                            st.session_state["goto_page"] = "📖 Law Detail"
+                            st.session_state["goto_page"] = "📖 Scheda Legge"
                             st.rerun()
                     else:
                         st.warning(f"Non trovato nel database: `{urn}`")
@@ -2723,6 +3967,402 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
                     st.info(f"Query non disponibile: {e}")
 
 
+
+# ─────────────────────────────────────────────────────────────────
+# NEW PAGES: GROQ CITIZEN ASSISTANT + LATEST LAWS TRACKER
+# ─────────────────────────────────────────────────────────────────
+
+def page_groq_assistant():
+    """Citizen AI assistant powered by Groq + dataset RAG."""
+    st.header("🤖 Assistente AI — Normattiva")
+    st.caption(
+        "Fai una domanda in linguaggio comune. L'assistente cerca le norme pertinenti nel dataset "
+        "e risponde citando solo fonti reali estratte dal database Normattiva. "
+        "Le risposte sono **ancorate al dataset**: nessuna invenzione."
+    )
+
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile. L'assistente richiede il database Normattiva.")
+        return
+
+    has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+    if not has_groq:
+        st.warning(
+            "⚠️ **GROQ_API_KEY non configurata.** "
+            "Imposta il secret `GROQ_API_KEY` nelle impostazioni dello Space per abilitare l'AI. "
+            "L'assistente funziona anche in modalità solo-ricerca (senza AI) mostrando le norme rilevanti."
+        )
+
+    # ── Settings ────────────────────────────────────────────────
+    with st.expander("⚙️ Impostazioni assistente", expanded=False):
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            model = st.selectbox(
+                "Modello AI",
+                list(GROQ_MODELS.keys()),
+                format_func=lambda k: GROQ_MODELS[k],
+                key="groq-model",
+                disabled=not has_groq,
+            )
+        with col_b:
+            top_k = st.slider("Norme da consultare (RAG top-k)", 3, 15, 7, key="groq-topk")
+        with col_c:
+            only_vigenti = st.checkbox("Solo norme vigenti", value=True, key="groq-vigenti")
+        temperature = st.slider("Creatività risposta (0=preciso, 0.5=bilanciato)", 0.0, 0.5, 0.1, step=0.05, key="groq-temp")
+
+    # ── Presets ──────────────────────────────────────────────────
+    st.subheader("💬 Fai la tua domanda")
+    st.caption("Oppure scegli un esempio:")
+    preset_cols = st.columns(3)
+    PRESETS = [
+        "Quali sono i miei diritti in caso di licenziamento?",
+        "Come funziona la tutela della privacy online?",
+        "Quando scatta l'obbligo di pagare l'IMU?",
+        "Quali norme regolano i contratti di locazione?",
+        "Cosa prevede la legge sul codice della strada per le multe?",
+        "Quali sono le tutele previste per i lavoratori subordinati?",
+    ]
+    if "groq_prefill" not in st.session_state:
+        st.session_state["groq_prefill"] = ""
+    for i, p in enumerate(PRESETS[:3]):
+        if preset_cols[i % 3].button(p, key=f"groq-preset-{i}"):
+            st.session_state["groq_prefill"] = p
+            st.rerun()
+
+    question = st.text_area(
+        "Domanda",
+        value=st.session_state.get("groq_prefill", ""),
+        placeholder="Es.: Quali diritti ho se il mio datore di lavoro mi licenzia senza preavviso?",
+        height=90,
+        key="groq-question",
+        label_visibility="collapsed",
+    )
+
+    ask_col, clear_col = st.columns([5, 1])
+    with ask_col:
+        ask_btn = st.button("🔍 Analizza e rispondi", key="groq-ask", type="primary", disabled=not question.strip())
+    with clear_col:
+        if st.button("🗑️ Cancella", key="groq-clear"):
+            st.session_state["groq_chat"] = []
+            st.session_state["groq_prefill"] = ""
+            st.rerun()
+
+    if "groq_chat" not in st.session_state:
+        st.session_state["groq_chat"] = []
+
+    if ask_btn and question.strip():
+        st.session_state["groq_prefill"] = ""
+        with st.spinner("🔍 Cercando norme rilevanti nel dataset…"):
+            try:
+                results = db.search_fts(question.strip(), limit=100)
+                if only_vigenti:
+                    results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                evidence = results[:top_k]
+            except Exception as e:
+                st.error(f"Errore nella ricerca: {e}")
+                evidence = []
+
+        if not evidence:
+            st.warning("Nessuna norma rilevante trovata nel dataset con i filtri attuali. Prova a rimuovere il filtro 'Solo vigenti'.")
+        else:
+            answer_text = None
+            error_msg = None
+            if has_groq:
+                with st.spinner("🤖 Analizzando le norme con Groq AI…"):
+                    answer_text, error_msg = _call_groq(
+                        question=question.strip(),
+                        context_laws=evidence,
+                        model=model,
+                        temperature=temperature,
+                    )
+            st.session_state["groq_chat"].insert(0, {
+                "q": question.strip(),
+                "a": answer_text,
+                "err": error_msg,
+                "evidence": evidence,
+            })
+
+    # ── Chat history ─────────────────────────────────────────────
+    if st.session_state["groq_chat"]:
+        for idx, item in enumerate(st.session_state["groq_chat"]):
+            is_latest = idx == 0
+            with st.expander(f"{'🔵' if is_latest else '⚫'} Q: {item['q'][:100]}", expanded=is_latest):
+                # AI answer
+                if item.get("a"):
+                    st.markdown("### 🤖 Risposta AI")
+                    st.markdown(item["a"])
+                    st.caption("⚠️ Le risposte si basano sul dataset Normattiva. Per decisioni legali consulta un professionista.")
+                elif item.get("err"):
+                    st.error(f"AI non disponibile: {item['err']}")
+                    st.info("Di seguito le norme trovate nel dataset che puoi consultare direttamente.")
+
+                # Evidence cards
+                st.markdown("---")
+                st.markdown(f"### 📚 Norme consultate ({len(item['evidence'])} trovate nel dataset)")
+                for ev_idx, ev in enumerate(item["evidence"]):
+                    status_chip = _status_chip(ev.get("status"))
+                    with st.container(border=True):
+                        c1, c2, c3 = st.columns([5, 1, 1])
+                        with c1:
+                            st.markdown(f"**{ev.get('title', 'N/A')}**")
+                            st.caption(f"`{ev.get('urn', 'N/A')}` | {ev.get('type', '')} | {ev.get('year', 'N/A')} | {status_chip}")
+                            snippet = (ev.get("snippet") or ev.get("text") or "")[:300].strip()
+                            if snippet:
+                                st.caption(f"…{snippet}…")
+                        with c2:
+                            st.markdown(status_chip)
+                        with c3:
+                            if st.button("Apri →", key=f"groq-open-{idx}-{ev_idx}-{ev.get('urn','')[:30]}"):
+                                st.session_state["detail_urn"] = ev.get("urn")
+                                st.session_state["goto_page"] = "📖 Scheda Norma"
+                                st.rerun()
+
+
+def page_latest_laws():
+    """Track recently added/updated laws in the dataset."""
+    st.header("🆕 Ultime Norme — Storico Vigente")
+    st.caption(
+        "Monitoraggio cronologico delle norme nel dataset: le più recenti per data di pubblicazione, "
+        "con distinzione vigente/abrogata e tracking delle transizioni di stato."
+    )
+
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    tab_recent, tab_timeline, tab_transitions = st.tabs([
+        "📅 Recenti per data",
+        "📈 Timeline pubblicazioni",
+        "🔄 Transizioni di stato",
+    ])
+
+    # ── Tab 1: Recent laws by date ─────────────────────────────
+    with tab_recent:
+        col_f1, col_f2, col_f3 = st.columns(3)
+        with col_f1:
+            status_filter = st.selectbox(
+                "Stato",
+                ["Tutte", "Solo vigenti", "Solo abrogate"],
+                key="latest-status-filter",
+            )
+        with col_f2:
+            type_options = ["Tutti i tipi"]
+            try:
+                type_rows = db.conn.execute(
+                    "SELECT DISTINCT type FROM laws WHERE type IS NOT NULL ORDER BY type"
+                ).fetchall()
+                type_options += [r[0] for r in type_rows]
+            except Exception:
+                pass
+            type_filter = st.selectbox("Tipo atto", type_options, key="latest-type-filter")
+        with col_f3:
+            limit = st.selectbox("Quante norme", [50, 100, 200, 500], key="latest-limit")
+
+        where_parts = ["1=1"]
+        params: list = []
+        if status_filter == "Solo vigenti":
+            where_parts.append("status = 'in_force'")
+        elif status_filter == "Solo abrogate":
+            where_parts.append("status = 'abrogated'")
+        if type_filter != "Tutti i tipi":
+            where_parts.append("type = ?")
+            params.append(type_filter)
+
+        where_clause = " AND ".join(where_parts)
+        try:
+            rows = db.conn.execute(
+                f"SELECT urn, title, type, date, year, status, article_count, importance_score "
+                f"FROM laws WHERE {where_clause} "
+                f"ORDER BY date DESC, year DESC LIMIT ?",
+                params + [limit],
+            ).fetchall()
+        except Exception as e:
+            st.error(f"Query fallita: {e}")
+            rows = []
+
+        if not rows:
+            st.info("Nessuna norma trovata con i filtri selezionati.")
+        else:
+            st.success(f"Trovate **{len(rows):,}** norme ordinate per data più recente.")
+            df = pd.DataFrame([dict(r) for r in rows])
+            df["stato"] = df["status"].apply(_status_chip)
+            df["importanza"] = df["importance_score"].apply(
+                lambda x: f"{x:.4f}" if x else "—"
+            )
+            disp = df[["date", "year", "type", "title", "stato", "article_count", "importanza", "urn"]].rename(
+                columns={
+                    "date": "Data",
+                    "year": "Anno",
+                    "type": "Tipo",
+                    "title": "Titolo",
+                    "stato": "Stato",
+                    "article_count": "Articoli",
+                    "importanza": "PageRank",
+                    "urn": "URN",
+                }
+            )
+            disp["Titolo"] = disp["Titolo"].str[:80]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+
+            # Quick law card for selected URN
+            st.divider()
+            st.subheader("🔍 Apri scheda norma")
+            urn_choices = {f"{r['title'][:70]} ({r['date'] or r['year']})": r['urn'] for r in [dict(x) for x in rows] if r.get('urn')}
+            sel = st.selectbox("Seleziona norma dalla lista", list(urn_choices.keys()), key="latest-urn-sel")
+            if sel and st.button("Apri scheda →", key="latest-open-btn"):
+                st.session_state["detail_urn"] = urn_choices[sel]
+                st.session_state["goto_page"] = "📖 Scheda Norma"
+                st.rerun()
+
+    # ── Tab 2: Timeline chart ───────────────────────────────────
+    with tab_timeline:
+        st.subheader("📈 Distribuzione temporale pubblicazioni")
+        try:
+            year_rows = db.conn.execute(
+                "SELECT year, status, COUNT(*) cnt FROM laws "
+                "WHERE year IS NOT NULL AND year > 1800 "
+                "GROUP BY year, status ORDER BY year"
+            ).fetchall()
+        except Exception:
+            year_rows = []
+
+        if year_rows:
+            ydf = pd.DataFrame([dict(r) for r in year_rows])
+            ydf["status_label"] = ydf["status"].apply(
+                lambda s: "Vigente" if _normalize_status(s) == "in_force" else "Abrogata"
+            )
+            fig = px.bar(
+                ydf,
+                x="year",
+                y="cnt",
+                color="status_label",
+                color_discrete_map={"Vigente": "#0a7a5a", "Abrogata": "#c0392b"},
+                title="Norme nel dataset per anno di pubblicazione",
+                labels={"year": "Anno", "cnt": "Numero norme", "status_label": "Stato"},
+                barmode="stack",
+            )
+            fig.update_layout(height=450)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Decade summary
+            st.subheader("Riepilogo per decennio")
+            ydf["decade"] = (ydf["year"] // 10 * 10).astype(str) + "s"
+            dec = ydf.groupby(["decade", "status_label"])["cnt"].sum().reset_index()
+            fig2 = px.bar(
+                dec,
+                x="decade",
+                y="cnt",
+                color="status_label",
+                color_discrete_map={"Vigente": "#0a7a5a", "Abrogata": "#c0392b"},
+                title="Norme per decennio",
+                labels={"decade": "Decennio", "cnt": "Norme", "status_label": "Stato"},
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("Dati temporali non disponibili.")
+
+        # Most recent per type
+        st.subheader("📋 Ultima norma vigente per tipo di atto")
+        try:
+            last_by_type = db.conn.execute(
+                "SELECT type, MAX(date) max_date, COUNT(*) cnt "
+                "FROM laws WHERE status = 'in_force' AND type IS NOT NULL "
+                "GROUP BY type ORDER BY max_date DESC LIMIT 20"
+            ).fetchall()
+            if last_by_type:
+                st.dataframe(
+                    pd.DataFrame([dict(r) for r in last_by_type]).rename(
+                        columns={"type": "Tipo", "max_date": "Data più recente", "cnt": "Totale vigenti"}
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        except Exception:
+            pass
+
+    # ── Tab 3: Status transitions ───────────────────────────────
+    with tab_transitions:
+        st.subheader("🔄 Storico transizioni di stato")
+        st.caption(
+            "Ogni volta che viene effettuato uno snapshot manuale del dataset, "
+            "vengono registrate le norme che hanno cambiato stato (vigente → abrogata o viceversa)."
+        )
+
+        _ensure_status_timeline_schema(db)
+
+        snapshots = _load_status_snapshots(db)
+        if not snapshots:
+            st.info(
+                "Nessuno snapshot di stato registrato. "
+                "Vai su **🇮🇹 Lab Overview → Status Timeline** per catturare il primo snapshot."
+            )
+            if st.button("Cattura snapshot ora", key="latest-snap-btn"):
+                try:
+                    result = _capture_status_snapshot(db, note="snapshot-automatico")
+                    st.success(
+                        f"Snapshot #{result['snapshot_id']} acquisito: "
+                        f"{result['laws_captured']:,} norme, {result['transitions']} transizioni."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Snapshot fallito: {e}")
+        else:
+            st.success(f"**{len(snapshots)}** snapshot registrati.")
+            snap_df = pd.DataFrame(snapshots)
+            st.dataframe(
+                snap_df.rename(columns={"id": "ID", "captured_at": "Acquisito il", "note": "Nota"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            transitions = _load_status_transitions(db, limit=500)
+            if transitions:
+                tr_df = pd.DataFrame(transitions)
+                st.subheader(f"Ultime {len(transitions)} transizioni rilevate")
+                tr_df["direzione"] = tr_df.apply(
+                    lambda r: "➡️ Abrogata" if _normalize_status(r.get("to_status")) == "abrogated"
+                    else ("✅ Vigente" if _normalize_status(r.get("to_status")) == "in_force" else "🔄 Cambio"),
+                    axis=1,
+                )
+                st.dataframe(
+                    tr_df[["detected_at", "direzione", "year", "title", "from_status", "to_status", "urn"]].rename(
+                        columns={
+                            "detected_at": "Rilevata il",
+                            "direzione": "Direzione",
+                            "year": "Anno",
+                            "title": "Titolo",
+                            "from_status": "Da",
+                            "to_status": "A",
+                            "urn": "URN",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                # Summary chart
+                dir_counts = tr_df["direzione"].value_counts().reset_index()
+                dir_counts.columns = ["Tipo transizione", "Conteggio"]
+                fig = px.pie(dir_counts, names="Tipo transizione", values="Conteggio",
+                             title="Distribuzione transizioni di stato", hole=0.4)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Nessuna transizione rilevata tra snapshot successivi.")
+
+            if st.button("Cattura nuovo snapshot ora", key="latest-new-snap"):
+                try:
+                    note = f"snapshot-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}"
+                    result = _capture_status_snapshot(db, note=note)
+                    st.success(
+                        f"Snapshot #{result['snapshot_id']}: {result['laws_captured']:,} norme, "
+                        f"{result['transitions']} transizioni rilevate."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Snapshot fallito: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────
 # NAVIGATION
 # ─────────────────────────────────────────────────────────────────
@@ -2731,16 +4371,27 @@ def main():
     # Build a complete registry of pages and then expose only the subset
     # appropriate for the active `APP_PROFILE` (search / lab / italianlab).
     all_pages = {
+        "🏠 Hub Cittadini": page_citizen_hub,
+        "📝 Modelli documenti": page_document_templates,
+        "⚖️ Confronta scenari": page_scenario_compare,
+        "🧭 Start Here": page_start_here,
+        "🧠 VOM Guide": page_vom_guide,
+        "⚖️ Framework": page_vom_guide,
+        "🧪 Lab Lessons": page_lab_lessons,
         "📊 Dashboard": page_dashboard,
         "🧪 Italian Legal Lab": page_italian_legal_lab,
-        "📡 Dataset Coverage": page_dataset_coverage,
         "🧭 Rights Explorer": page_rights_explorer,
+        "⚖️ Giurisprudence": page_jurisprudence_explorer,
         "🇮🇹 Costituzione & Codici": page_costituzione,
         "🔍 Search": page_search,
         "⚡ Vigenti": page_vigenti,
         "🚫 Abrogati": page_abrogated,
+        "📜 Storia Normativa": page_multivigente,
         "📋 Browse (All)": page_browse,
         "🤖 LLM Lab": page_llm_lab,
+        "🤖 Chatbot": page_chatbot,
+        "🤖 Assistente AI": page_groq_assistant,
+        "🆕 Ultime Norme": page_latest_laws,
         "📖 Law Detail": page_law_detail,
         "🔗 Citations": page_citations,
         "🏛️ Domains": page_domains,
@@ -2753,55 +4404,102 @@ def main():
     # Select visible pages per profile
     if IS_ITALIAN_LAB:
         pages = {
-            "📊 Dashboard": all_pages["📊 Dashboard"],
-            "🧪 Italian Legal Lab": all_pages["🧪 Italian Legal Lab"],
-            "📖 Law Detail": all_pages["📖 Law Detail"],
-            "🔔 Notifications": all_pages["🔔 Notifications"],
-            "📝 Update Log": all_pages["📝 Update Log"],
-            "📥 Export": all_pages["📥 Export"],
+            "🧭 Start Here": all_pages["🧭 Start Here"],
+            "🧠 VOM Guide": all_pages["🧠 VOM Guide"],
+            "🧪 Lab Lessons": all_pages["🧪 Lab Lessons"],
+            "🇮🇹 Lab Overview": all_pages["🧪 Italian Legal Lab"],
+            "🔍 Cerca Leggi": all_pages["🔍 Search"],
+            "⚡ Vigenti": all_pages["⚡ Vigenti"],
+            "🚫 Abrogati": all_pages["🚫 Abrogati"],
+            "📜 Storia Normativa": all_pages["📜 Storia Normativa"],
+            "📋 Sfoglia Archivio": all_pages["📋 Browse (All)"],
+            "🇮🇹 Costituzione & Codici": all_pages["🇮🇹 Costituzione & Codici"],
+            "🔗 Rete Citazioni": all_pages["🔗 Citations"],
+            "🏛️ Aree Giuridiche": all_pages["🏛️ Domains"],
+            "📖 Scheda Legge": all_pages["📖 Law Detail"],
+            "🔔 Aggiornamenti": all_pages["🔔 Notifications"],
+            "📝 Cronologia": all_pages["📝 Update Log"],
+            "🆕 Ultime Norme": all_pages["🆕 Ultime Norme"],
+            "🤖 Assistente AI": all_pages["🤖 Assistente AI"],
+            "📥 Esporta": all_pages["📥 Export"],
         }
-        st.sidebar.success("Italian Legal Lab profile active — unified research hub.")
+        st.sidebar.success("Italian Legal Lab — VOOM: Vigente + Abrogati + Multivigente")
     elif IS_LAB:
         pages = {
+            "🧭 Start Here": all_pages["🧭 Start Here"],
+            "🧠 VOM Guide": all_pages["🧠 VOM Guide"],
+            "🧪 Lab Lessons": all_pages["🧪 Lab Lessons"],
             "📊 Dashboard": all_pages["📊 Dashboard"],
-            "📡 Dataset Coverage": all_pages["📡 Dataset Coverage"],
             "🔍 Search": all_pages["🔍 Search"],
             "⚡ Vigenti": all_pages["⚡ Vigenti"],
             "🚫 Abrogati": all_pages["🚫 Abrogati"],
+            "📜 Storia Normativa": all_pages["📜 Storia Normativa"],
             "📋 Browse (All)": all_pages["📋 Browse (All)"],
             "🤖 LLM Lab": all_pages["🤖 LLM Lab"],
+            "🤖 Assistente AI": all_pages["🤖 Assistente AI"],
+            "🆕 Ultime Norme": all_pages["🆕 Ultime Norme"],
             "💶 Fiscal Burden Lab": all_pages["💶 Fiscal Burden Lab"],
             "📖 Law Detail": all_pages["📖 Law Detail"],
             "🔔 Notifications": all_pages["🔔 Notifications"],
             "📝 Update Log": all_pages["📝 Update Log"],
             "📥 Export": all_pages["📥 Export"],
         }
-        st.sidebar.success("Normattiva Lab profile active — multivigente dataset and developer tools.")
+        st.sidebar.success("Normattiva Lab — VOOM: Vigente + Abrogati + Multivigente.")
     else:
+        mobile_simple = st.sidebar.checkbox("Modalità mobile semplificata", value=False, key="mobile-simple")
         pages = {
-            "📊 Dashboard": all_pages["📊 Dashboard"],
-            "📡 Dataset Coverage": all_pages["📡 Dataset Coverage"],
-            "🔍 Search": all_pages["🔍 Search"],
-            "⚡ Vigenti": all_pages["⚡ Vigenti"],
-            "🚫 Abrogati": all_pages["🚫 Abrogati"],
-            "📋 Browse (All)": all_pages["📋 Browse (All)"],
-            "🧭 Rights Explorer": all_pages["🧭 Rights Explorer"],
-            "📖 Law Detail": all_pages["📖 Law Detail"],
-            "🔗 Citations": all_pages["🔗 Citations"],
-            "🏛️ Domains": all_pages["🏛️ Domains"],
-            "🔔 Notifications": all_pages["🔔 Notifications"],
-            "📝 Update Log": all_pages["📝 Update Log"],
-            "📥 Export": all_pages["📥 Export"],
+            "🏠 Hub Cittadini": all_pages["🏠 Hub Cittadini"],
+            "🤖 Assistente AI": all_pages["🤖 Assistente AI"],
+            "⚖️ Framework": all_pages["⚖️ Framework"],
+            "🔍 Cerca Norme": all_pages["🔍 Search"],
+            "📝 Modelli documenti": all_pages["📝 Modelli documenti"],
+            "⚖️ Confronta scenari": all_pages["⚖️ Confronta scenari"],
+            "⚖️ Percorsi Giurisprudenziali": all_pages["⚖️ Giurisprudence"],
+            "📖 Scheda Norma": all_pages["📖 Law Detail"],
+            "🧩 Rete Normativa": all_pages["🔗 Citations"],
+            "🏛️ Aree del Diritto": all_pages["🏛️ Domains"],
+            "🇮🇹 Costituzione & Codici": all_pages["🇮🇹 Costituzione & Codici"],
+            "📋 Archivio Vigente": all_pages["📋 Browse (All)"],
+            "🆕 Ultime Norme": all_pages["🆕 Ultime Norme"],
+            "📊 Panoramica Dataset": all_pages["📊 Dashboard"],
+            "📥 Dati & Download": all_pages["📥 Export"],
+            "🔔 Aggiornamenti": all_pages["🔔 Notifications"],
+            "📝 Registro Update": all_pages["📝 Update Log"],
         }
-        st.sidebar.success("OpenNormattiva Search profile active — vigente/abrogato focused.")
+        if mobile_simple:
+            pages = {
+                "🏠 Hub Cittadini": all_pages["🏠 Hub Cittadini"],
+                "🤖 Assistente AI": all_pages["🤖 Assistente AI"],
+                "🔍 Cerca Norme": all_pages["🔍 Search"],
+                "📖 Scheda Norma": all_pages["📖 Law Detail"],
+                "📝 Modelli documenti": all_pages["📝 Modelli documenti"],
+                "⚖️ Confronta scenari": all_pages["⚖️ Confronta scenari"],
+                "🆕 Ultime Norme": all_pages["🆕 Ultime Norme"],
+                "🔔 Aggiornamenti": all_pages["🔔 Notifications"],
+            }
+        st.sidebar.success("NormattivaVigente — focus on in-force laws.")
 
-    # Allow in-page navigation to Law Detail (from cards)
-    if "goto_page" in st.session_state and st.session_state["goto_page"] in pages:
-        default_page = st.session_state.pop("goto_page")
-    else:
-        default_page = None
+    # Allow in-page navigation with cross-profile aliases.
+    goto_page = st.session_state.pop("goto_page", None)
+    page_aliases = {
+        "🔍 Search": "🔍 Cerca Leggi" if IS_ITALIAN_LAB else ("🔍 Search" if IS_LAB else "🔍 Cerca Norme"),
+        "📖 Law Detail": "📖 Scheda Legge" if IS_ITALIAN_LAB else ("📖 Law Detail" if IS_LAB else "📖 Scheda Norma"),
+        "📋 Browse (All)": "📋 Sfoglia Archivio" if IS_ITALIAN_LAB else ("📋 Browse (All)" if IS_LAB else "📋 Archivio Vigente"),
+        "🔗 Citations": "🔗 Rete Citazioni" if IS_ITALIAN_LAB else ("🔗 Citations" if IS_LAB else "🧩 Rete Normativa"),
+        "🧭 Rights Explorer": "🧭 Rights Explorer" if (IS_ITALIAN_LAB or IS_LAB) else "🏠 Hub Cittadini",
+        "⚖️ Giurisprudence": "⚖️ Giurisprudence" if (IS_ITALIAN_LAB or IS_LAB) else "⚖️ Percorsi Giurisprudenziali",
+        "📝 Modelli documenti": "📝 Modelli documenti",
+        "⚖️ Confronta scenari": "⚖️ Confronta scenari",
+        "🤖 Assistente AI": "🤖 Assistente AI",
+        "🆕 Ultime Norme": "🆕 Ultime Norme",
+    }
+    if goto_page in page_aliases:
+        goto_page = page_aliases[goto_page]
+    default_page = goto_page if goto_page in pages else None
 
     st.sidebar.write("### Navigazione")
+    if IS_SEARCH:
+        st.sidebar.caption("Percorso consigliato: Hub → Cerca Norme → Scheda Norma → Rete Normativa")
     page_keys = list(pages.keys())
     default_idx = page_keys.index(default_page) if default_page else 0
 
@@ -2809,6 +4507,22 @@ def main():
         "Go to", page_keys, index=default_idx,
         label_visibility="collapsed", key="page-nav"
     )
+
+    guided_steps = (
+        ["🧭 Start Here", "🧠 VOM Guide", "🔍 Cerca Leggi", "📖 Scheda Legge", "🧪 Lab Lessons"]
+        if IS_ITALIAN_LAB
+        else ["🧭 Start Here", "🧠 VOM Guide", "🔍 Search", "📖 Law Detail", "🧪 Lab Lessons"]
+        if IS_LAB
+        else ["🏠 Hub Cittadini", "⚖️ Framework", "🔍 Cerca Norme", "⚖️ Percorsi Giurisprudenziali", "📖 Scheda Norma"]
+    )
+    visited = st.session_state.setdefault("guided_visited", [])
+    if page in guided_steps and page not in visited:
+        visited.append(page)
+    completed = len([p for p in guided_steps if p in visited])
+    progress = completed / len(guided_steps) if guided_steps else 0
+    st.sidebar.caption("Percorso vigente + giurisprudenza" if IS_SEARCH else "Percorso principiante VOM")
+    st.sidebar.progress(progress)
+    st.sidebar.caption(f"Completati: {completed}/{len(guided_steps)}")
 
     # Notification badge in sidebar
     with _monitor_lock:
@@ -2822,29 +4536,56 @@ def main():
     db = load_db()
     if db:
         try:
-            count = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
-            st.sidebar.metric("Leggi nel database", f"{count:,}")
+            in_f = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
+            ab = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
+            total = in_f + ab
+            if IS_ITALIAN_LAB:
+                st.sidebar.metric("Leggi nel database", f"{total:,}")
+                st.sidebar.caption(f"Vigenti: {in_f:,} | Abrogati: {ab:,}")
+            elif IS_LAB:
+                st.sidebar.metric("Laws in database", f"{total:,}")
+                st.sidebar.caption(f"In force: {in_f:,} | Abrogated: {ab:,}")
+            else:
+                st.sidebar.metric("In-force laws", f"{in_f:,}")
+                st.sidebar.caption("Vigente profile")
         except Exception:
-            pass
-        st.sidebar.success("Database: ✓ Caricato")
+            try:
+                count = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+                st.sidebar.metric("Laws in database", f"{count:,}")
+            except Exception:
+                pass
+        st.sidebar.success("Database: ✓ Loaded" if not IS_ITALIAN_LAB else "Database: ✓ Caricato")
     else:
-        st.sidebar.error("Database: ✗ Non trovato")
+        st.sidebar.error("Database: ✗ Not found" if not IS_ITALIAN_LAB else "Database: ✗ Non trovato")
         laws = load_laws_from_jsonl()
         if laws:
-            st.sidebar.metric("Leggi (JSONL)", f"{len(laws):,}")
+            st.sidebar.metric("Laws (JSONL)", f"{len(laws):,}")
 
     # Last update
     if db:
         log_entries = _get_update_log(db)
         if log_entries:
             last = log_entries[0].get("timestamp", "")[:10]
-            st.sidebar.caption(f"Ultimo aggiornamento: {last}")
+            label = "Ultimo aggiornamento" if IS_ITALIAN_LAB else "Last updated"
+            st.sidebar.caption(f"{label}: {last}")
 
     st.sidebar.divider()
-    st.sidebar.markdown(
-        "⚖️ **OpenNormattiva** — Piattaforma di ricerca giuridica italiana\n\n"
-        "190.000+ leggi | Ricerca FTS5 | Grafi citazioni | Cronologia modifiche"
-    )
+    if IS_ITALIAN_LAB:
+        st.sidebar.markdown(
+            "\U0001f1ee\U0001f1f9 **Italian Legal Lab** — Ricerca giuridica italiana\n\n"
+            "190.000+ leggi | FTS5 | Citazioni | Storia normativa"
+        )
+    elif IS_LAB:
+        st.sidebar.markdown(
+            "\u2696\ufe0f **OpenNormattiva Lab** — Italian Legal Research\n\n"
+            "VOOM: 67,052 in force + 123,859 abrogated = 190,911 laws\n\n"
+            "Full-text search | Citation graphs | Legislative history"
+        )
+    else:
+        st.sidebar.markdown(
+            "\u2696\ufe0f **NormattivaVigente** — Ricerca norme vigenti\n\n"
+            "Solo vigente | Linguaggio semplice | Percorsi guidati | Giurisprudenza"
+        )
 
     pages[page]()
 
