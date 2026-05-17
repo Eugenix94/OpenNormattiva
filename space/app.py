@@ -2843,7 +2843,7 @@ def page_law_detail():
         col4.metric("Importance (PageRank)", f"{law['importance_score']:.4f}")
 
     if IS_SEARCH:
-        top_simple, top_text, top_links = st.tabs(["🪄 Vista Semplice", "📄 Testo Integrale", "🔗 Citazioni e Rete"])
+        top_simple, top_text, top_ai, top_links = st.tabs(["🪄 Vista Semplice", "📄 Testo Integrale", "🤖 Analisi AI", "🔗 Citazioni e Rete"])
     else:
         top_simple, top_timeline, top_expert = st.tabs(["🪄 Simple View", "🕰️ Timeline View", "🧠 Expert View"])
 
@@ -2893,6 +2893,8 @@ def page_law_detail():
                                     _render_law_card(r, db, key_prefix="detail-related-search")
                         except Exception:
                             pass
+                with top_ai:
+                    _render_law_ai_tab(law, db, urn)
             with top_timeline if not IS_SEARCH else st.container():
                 if IS_SEARCH:
                     pass
@@ -4364,6 +4366,218 @@ def page_latest_laws():
 
 
 # ─────────────────────────────────────────────────────────────────
+# AI HELPER WIDGETS (sidebar chat + law detail AI tab)
+# ─────────────────────────────────────────────────────────────────
+
+def _render_law_ai_tab(law: dict, db, urn: str):
+    """Split-view AI analysis panel embedded inside the law detail page."""
+    has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+
+    st.caption(
+        "L'assistente analizza il testo di **questa specifica norma**. "
+        "Fai domande su articoli, sanzioni, requisiti, destinatari, ecc."
+    )
+
+    col_text, col_ai = st.columns([1, 1])
+
+    text = (law.get("text") or "").strip()
+
+    with col_text:
+        st.markdown("#### 📄 Testo della Norma")
+        st.caption(
+            f"**{law.get('title', '')}** | "
+            f"{_status_chip(law.get('status'))} | "
+            f"Anno {law.get('year', 'N/A')}"
+        )
+        st.text_area(
+            "Testo",
+            text or "(Testo non disponibile nel dataset)",
+            height=520,
+            disabled=True,
+            key=f"law-ai-text-viewer-{urn[:30]}",
+            label_visibility="collapsed",
+        )
+
+    with col_ai:
+        st.markdown("#### 💬 Chiedi all'AI su questa norma")
+
+        if not has_groq:
+            st.warning(
+                "⚠️ **GROQ_API_KEY non configurata.** "
+                "Imposta il secret nelle impostazioni dello Space per abilitare l'AI."
+            )
+
+        PRESETS_LAW = [
+            "Di cosa parla questa norma in sintesi?",
+            "Quali sono le sanzioni o conseguenze previste?",
+            "Chi è soggetto a questa norma (destinatari)?",
+            "Quali obblighi impone ai cittadini?",
+            "Ci sono eccezioni o casi particolari?",
+            "Quando è entrata in vigore ed è ancora attuale?",
+        ]
+
+        st.caption("Domande rapide:")
+        p_cols = st.columns(2)
+        if "law_ai_prefill" not in st.session_state:
+            st.session_state["law_ai_prefill"] = ""
+        for i, p in enumerate(PRESETS_LAW[:4]):
+            if p_cols[i % 2].button(p[:38] + "…", key=f"law-ai-preset-{urn[:20]}-{i}"):
+                st.session_state["law_ai_prefill"] = p
+                st.rerun()
+
+        question = st.text_area(
+            "Domanda sulla norma",
+            value=st.session_state.get("law_ai_prefill", ""),
+            placeholder="Es.: Cosa dice l'articolo 1? Quali sanzioni sono previste?",
+            height=85,
+            key=f"law-ai-q-{urn[:30]}",
+            label_visibility="collapsed",
+        )
+
+        ask_col, clear_col = st.columns([5, 1])
+        with ask_col:
+            ask_btn = st.button(
+                "🔍 Analizza",
+                key=f"law-ai-ask-{urn[:30]}",
+                type="primary",
+                disabled=not (question or "").strip(),
+            )
+        with clear_col:
+            if st.button("🗑️", key=f"law-ai-clear-{urn[:30]}"):
+                st.session_state[f"law_ai_chat_{urn[:40]}"] = []
+                st.session_state["law_ai_prefill"] = ""
+                st.rerun()
+
+        chat_key = f"law_ai_chat_{urn[:40]}"
+        if chat_key not in st.session_state:
+            st.session_state[chat_key] = []
+
+        if ask_btn and (question or "").strip():
+            st.session_state["law_ai_prefill"] = ""
+            context_laws = [law]
+            try:
+                related = db.find_related_laws(urn, limit=3)
+                if related:
+                    context_laws.extend(related[:3])
+            except Exception:
+                pass
+
+            answer, err = None, None
+            if has_groq:
+                with st.spinner("🤖 Analizzando la norma…"):
+                    answer, err = _call_groq(
+                        question=question.strip(),
+                        context_laws=context_laws,
+                        model=GROQ_DEFAULT_MODEL,
+                        max_tokens=900,
+                        temperature=0.1,
+                    )
+            else:
+                err = "Configura GROQ_API_KEY per ottenere risposte AI."
+
+            st.session_state[chat_key].insert(0, {
+                "q": question.strip(),
+                "a": answer,
+                "err": err,
+            })
+            st.rerun()
+
+        for idx, item in enumerate(st.session_state.get(chat_key, [])):
+            with st.expander(f"Q: {item['q'][:70]}", expanded=(idx == 0)):
+                if item.get("a"):
+                    st.markdown(item["a"])
+                    st.caption(
+                        "⚠️ Risposta basata sul dataset Normattiva. "
+                        "Per decisioni legali consulta un professionista."
+                    )
+                elif item.get("err"):
+                    st.error(item["err"])
+
+
+def _render_groq_sidebar_chat(db):
+    """Persistent compact AI chat widget shown in the sidebar on every page."""
+    has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+
+    with st.sidebar.expander("🤖 Chiedi all'AI", expanded=False):
+        if not db:
+            st.caption("Database non disponibile.")
+            return
+
+        current_urn = st.session_state.get("detail_urn")
+        if current_urn:
+            try:
+                row = db.conn.execute(
+                    "SELECT title FROM laws WHERE urn=? LIMIT 1", (current_urn,)
+                ).fetchone()
+                if row:
+                    st.caption(f"📌 *{row['title'][:55]}*")
+            except Exception:
+                pass
+        else:
+            st.caption("Nessuna norma aperta — farò una ricerca nel dataset.")
+
+        if not has_groq:
+            st.caption("⚠️ AI non disponibile — mostro le norme trovate.")
+
+        sb_q = st.text_input(
+            "Domanda",
+            key="sidebar-groq-q",
+            placeholder="Es.: Cosa prevede questa norma?",
+            label_visibility="collapsed",
+        )
+
+        if st.button("Chiedi →", key="sidebar-groq-btn", disabled=not (sb_q or "").strip()):
+            context_laws = []
+            if current_urn:
+                try:
+                    r = db.conn.execute(
+                        "SELECT * FROM laws WHERE urn=? LIMIT 1", (current_urn,)
+                    ).fetchone()
+                    if r:
+                        context_laws = [dict(r)]
+                except Exception:
+                    pass
+
+            if not context_laws:
+                try:
+                    results = db.search_fts(sb_q.strip(), limit=30)
+                    context_laws = [
+                        r for r in results
+                        if _normalize_status(r.get("status")) == "in_force"
+                    ][:5]
+                    if not context_laws:
+                        context_laws = results[:5]
+                except Exception:
+                    pass
+
+            if context_laws and has_groq:
+                answer, err = _call_groq(
+                    question=sb_q.strip(),
+                    context_laws=context_laws,
+                    model=GROQ_DEFAULT_MODEL,
+                    max_tokens=600,
+                    temperature=0.1,
+                )
+                reply = answer if answer else f"⚠️ {err}"
+            elif context_laws:
+                titles = "\n- ".join(l.get("title", "")[:60] for l in context_laws[:3])
+                reply = f"Norme trovate nel dataset:\n- {titles}"
+            else:
+                reply = "Nessuna norma trovata per questa domanda."
+
+            st.session_state["sidebar_groq_last"] = {"q": sb_q.strip(), "a": reply}
+
+        last = st.session_state.get("sidebar_groq_last")
+        if last:
+            st.caption(f"**Q:** {last['q'][:60]}")
+            st.info(last["a"][:450])
+            if st.button("Approfondisci →", key="sidebar-groq-full"):
+                st.session_state["groq_prefill"] = last["q"]
+                st.session_state["goto_page"] = "🤖 Assistente AI"
+                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────
 # NAVIGATION
 # ─────────────────────────────────────────────────────────────────
 
@@ -4586,6 +4800,9 @@ def main():
             "\u2696\ufe0f **NormattivaVigente** — Ricerca norme vigenti\n\n"
             "Solo vigente | Linguaggio semplice | Percorsi guidati | Giurisprudenza"
         )
+
+    # Persistent AI sidebar chat (available on every page)
+    _render_groq_sidebar_chat(db)
 
     pages[page]()
 
