@@ -4579,6 +4579,613 @@ def _render_groq_sidebar_chat(db):
 
 
 # ─────────────────────────────────────────────────────────────────
+# MOBILE CSS + MVP SHARED HELPERS
+# ─────────────────────────────────────────────────────────────────
+
+_MOBILE_CSS = """<style>
+@media (max-width: 768px) {
+    .block-container { padding: 0.4rem 0.4rem 5rem !important; }
+    [data-testid="stSidebar"] { display: none !important; }
+}
+.nv-card {
+    border: 1px solid #dde3f0; border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 8px;
+    background: #f7f9ff; font-size: 0.9em;
+}
+.nv-vigente { color: #16a34a; font-weight: 600; }
+.nv-abrogata { color: #dc2626; font-weight: 600; }
+[data-testid="stChatMessageContent"] { font-size: 0.91em; }
+</style>"""
+
+
+def _mvp_law_card(law, key_prefix, col, open_key):
+    """Compact law card with Open button, rendered into a column."""
+    status = _normalize_status(law.get("status"))
+    badge = "🟢 Vigente" if status == "in_force" else "🔴 Abrogata"
+    title = (law.get("title") or "N/A")[:68]
+    col.markdown(
+        f"<div class='nv-card'><b>{title}</b><br>"
+        f"<span class='{'nv-vigente' if status == 'in_force' else 'nv-abrogata'}'>{badge}</span>"
+        f" · {law.get('type','?')} {law.get('year','')}</div>",
+        unsafe_allow_html=True,
+    )
+    safe_key = (law.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+    if col.button("📖 Apri", key=f"{key_prefix}-{safe_key}", use_container_width=True):
+        st.session_state[open_key] = law.get("urn")
+        st.rerun()
+
+
+def _mvp_search_and_reply(question, db, prefix="mvp"):
+    """FTS search + Groq RAG. Returns (reply_text, laws)."""
+    if not db:
+        return "Database non disponibile.", []
+    try:
+        results = db.search_fts(question, limit=30)
+    except Exception:
+        results = []
+    vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+    context_laws = vigenti[:7] if vigenti else results[:7]
+    if not context_laws:
+        return "Non ho trovato norme correlate nel dataset. Prova a riformulare la domanda.", []
+    answer, err = _call_groq(question, context_laws, model=GROQ_DEFAULT_MODEL, max_tokens=700, temperature=0.1)
+    return (answer or f"⚠️ {err}"), context_laws
+
+
+def _mvp_inline_law(law, db, key_suffix):
+    """Inline law viewer: title strip + text area + citations expander."""
+    text = law.get("text") or ""
+    urn = law.get("urn", "")
+    status = _normalize_status(law.get("status"))
+    st.markdown(
+        f"**URN:** `{urn}` &nbsp;·&nbsp; {law.get('type','?')} {law.get('year','')} &nbsp;·&nbsp; "
+        f"{'🟢 **Vigente**' if status == 'in_force' else '🔴 **Abrogata**'}",
+        unsafe_allow_html=True,
+    )
+    if text:
+        st.text_area(
+            "Testo integrale",
+            text[:6000] + ("…" if len(text) > 6000 else ""),
+            height=280,
+            disabled=True,
+            key=f"nv-law-text-{key_suffix}",
+        )
+    else:
+        st.info("Testo non disponibile nel dataset per questa norma.")
+    if db:
+        cited_by, cites_out = [], []
+        try:
+            cited_by = db.get_citations_incoming(urn, limit=10)
+            cites_out = db.get_citations_outgoing(urn, limit=10)
+        except Exception:
+            pass
+        if cited_by or cites_out:
+            with st.expander(f"🔗 Citazioni ({len(cited_by)} in entrata · {len(cites_out)} in uscita)"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption("Citate da questa norma:")
+                    for c in cites_out[:8]:
+                        st.caption(f"→ {(c.get('cited_urn',''))[:55]}")
+                with c2:
+                    st.caption("Norme che citano questa:")
+                    for c in cited_by[:8]:
+                        st.caption(f"← {(c.get('citing_urn',''))[:55]}")
+
+
+def _mvp_get_law(db, urn):
+    """Fetch a single law dict by URN. Returns None if not found."""
+    try:
+        row = db.conn.execute("SELECT * FROM laws WHERE urn=? LIMIT 1", (urn,)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# MVP A — CHAT-FIRST
+# ─────────────────────────────────────────────────────────────────
+
+def _mvp_a_chat_first(db):
+    """MVP A: Chat is the landing. Quick chips + search results inline."""
+    st.caption(
+        "💬 **Interfaccia A — Chat-First** &nbsp;·&nbsp; "
+        "L'AI è il punto d'ingresso: fai una domanda in linguaggio naturale.",
+        unsafe_allow_html=True,
+    )
+    qa_cols = st.columns(4)
+    quick_actions = [
+        ("🔍 Cerca", "Trova norme su lavoro e licenziamento"),
+        ("🏫 Scuola", "Qual è il programma scolastico previsto dalla legge?"),
+        ("🆕 Ultime", "Mostrami le ultime leggi pubblicate"),
+        ("⚖️ Diritti", "Quali sono i miei diritti fondamentali come lavoratore?"),
+    ]
+    for i, (label, action) in enumerate(quick_actions):
+        if qa_cols[i].button(label, key=f"mvp-a-qa-{i}", use_container_width=True):
+            st.session_state.setdefault("mvp_a_messages", [])
+            st.session_state["mvp_a_messages"].append({"role": "user", "content": action})
+            st.session_state["mvp_a_pending"] = action
+            st.rerun()
+
+    st.divider()
+
+    if "mvp_a_messages" not in st.session_state:
+        st.session_state["mvp_a_messages"] = [
+            {
+                "role": "assistant",
+                "content": (
+                    "👋 **Ciao! Sono il tuo assistente giuridico** basato sul dataset Normattiva.\n\n"
+                    "Dimmi cosa vuoi sapere — cerco le norme, le spiego in modo semplice e ti mostro "
+                    "i testi originali. Prova a chiedermi:\n"
+                    "- *Cosa prevede la legge sul lavoro da casa?*\n"
+                    "- *Quando scatta il pagamento dell'IMU?*"
+                ),
+                "type": "welcome",
+                "laws": [],
+            }
+        ]
+
+    pending = st.session_state.pop("mvp_a_pending", None)
+    if pending and db:
+        with st.spinner("🔍 Cercando nel dataset Normattiva…"):
+            reply_text, laws = _mvp_search_and_reply(pending, db, "mvp-a")
+        st.session_state["mvp_a_messages"].append(
+            {"role": "assistant", "content": reply_text, "type": "search_results", "laws": laws}
+        )
+
+    for idx, msg in enumerate(st.session_state["mvp_a_messages"]):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            laws = msg.get("laws") or []
+            if laws:
+                st.caption(f"📚 {len(laws)} norme consultate dal dataset — clicca per aprire:")
+                g1, g2 = st.columns(2)
+                for j, law in enumerate(laws[:6]):
+                    _mvp_law_card(law, f"mvp-a-card-{idx}", g1 if j % 2 == 0 else g2, "mvp_a_open_urn")
+
+    open_urn = st.session_state.get("mvp_a_open_urn")
+    if open_urn and db:
+        law = _mvp_get_law(db, open_urn)
+        if law:
+            with st.expander(f"📖 {(law.get('title') or '')[:80]}", expanded=True):
+                _mvp_inline_law(law, db, f"a-{open_urn[:12]}")
+                col_ask, col_close = st.columns([3, 1])
+                ask_q = col_ask.text_input(
+                    "Chiedi su questa norma", key="mvp-a-law-q",
+                    placeholder="Es.: Cosa significa l'Art. 4?",
+                )
+                if col_ask.button("Chiedi →", key="mvp-a-law-ask", disabled=not ask_q.strip()):
+                    full_q = f"[Norma aperta: {law.get('title','')}] {ask_q}"
+                    st.session_state["mvp_a_messages"].append({"role": "user", "content": ask_q})
+                    st.session_state["mvp_a_pending"] = full_q
+                    st.session_state.pop("mvp_a_open_urn", None)
+                    st.rerun()
+                if col_close.button("✕ Chiudi", key="mvp-a-law-close"):
+                    st.session_state.pop("mvp_a_open_urn", None)
+                    st.rerun()
+
+    user_input = st.chat_input("Scrivi la tua domanda giuridica…", key="mvp-a-input")
+    if user_input:
+        st.session_state["mvp_a_messages"].append({"role": "user", "content": user_input})
+        st.session_state["mvp_a_pending"] = user_input
+        st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────
+# MVP B — SPLIT-SCREEN
+# ─────────────────────────────────────────────────────────────────
+
+def _mvp_b_split_screen(db):
+    """MVP B: Persistent split — search list left, content + AI right."""
+    st.caption(
+        "⚡ **Interfaccia B — Split-Screen** &nbsp;·&nbsp; "
+        "Cerca a sinistra, leggi e chiedi all'AI a destra. Entrambi sempre visibili.",
+        unsafe_allow_html=True,
+    )
+    col_left, col_right = st.columns([1, 2])
+
+    with col_left:
+        st.subheader("🔍 Cerca")
+        search_q = st.text_input(
+            "Cerca nel dataset", key="mvp-b-search",
+            placeholder="Es.: lavoro, scuola, IMU…",
+            label_visibility="collapsed",
+        )
+        if st.button("Cerca →", key="mvp-b-search-btn", use_container_width=True) and search_q.strip() and db:
+            with st.spinner("Ricerca…"):
+                results = db.search_fts(search_q.strip(), limit=20)
+            vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+            st.session_state["mvp_b_results"] = vigenti[:10] if vigenti else results[:10]
+            st.session_state["mvp_b_query"] = search_q.strip()
+            st.session_state.pop("mvp_b_open_urn", None)
+
+        st.caption("Azioni rapide:")
+        for label, q in [
+            ("🏫 Scuola", "istruzione programma scolastico"),
+            ("⚖️ Lavoro", "contratto lavoro licenziamento"),
+            ("🏠 Affitti", "locazione affitto"),
+            ("💶 IMU", "imposta municipale propria IMU"),
+        ]:
+            if st.button(label, key=f"mvp-b-quick-{label}", use_container_width=True) and db:
+                results = db.search_fts(q, limit=15)
+                vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                st.session_state["mvp_b_results"] = vigenti[:10] if vigenti else results[:10]
+                st.session_state["mvp_b_query"] = q
+                st.session_state.pop("mvp_b_open_urn", None)
+                st.rerun()
+
+        results = st.session_state.get("mvp_b_results", [])
+        if results:
+            st.caption(f"**{len(results)} norme** — clicca per aprire →")
+            for law in results:
+                status = _normalize_status(law.get("status"))
+                badge = "🟢" if status == "in_force" else "🔴"
+                title = (law.get("title") or "N/A")[:50]
+                safe_key = (law.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+                if st.button(f"{badge} {title}", key=f"mvp-b-open-{safe_key}", use_container_width=True):
+                    st.session_state["mvp_b_open_urn"] = law.get("urn")
+                    st.session_state.pop("mvp_b_ai_reply", None)
+                    st.session_state.pop("mvp_b_summary", None)
+                    st.rerun()
+
+    with col_right:
+        open_urn = st.session_state.get("mvp_b_open_urn")
+        if open_urn and db:
+            law = _mvp_get_law(db, open_urn)
+            if law:
+                st.subheader((law.get("title") or "")[:75])
+                _mvp_inline_law(law, db, f"b-{open_urn[:12]}")
+                st.divider()
+                st.subheader("🤖 Chiedi all'AI su questa norma")
+                ai_q = st.text_input(
+                    "Domanda", key="mvp-b-ai-q",
+                    placeholder="Es.: Cosa significa questo articolo?",
+                    label_visibility="collapsed",
+                )
+                if st.button("Analizza →", key="mvp-b-ai-ask", disabled=not ai_q.strip()):
+                    with st.spinner("AI in elaborazione…"):
+                        answer, err = _call_groq(
+                            f"[Norma: {law.get('title','')}] {ai_q}",
+                            [law], model=GROQ_DEFAULT_MODEL, max_tokens=600,
+                        )
+                    st.session_state["mvp_b_ai_reply"] = answer or f"⚠️ {err}"
+                if st.session_state.get("mvp_b_ai_reply"):
+                    st.info(st.session_state["mvp_b_ai_reply"])
+        elif st.session_state.get("mvp_b_query"):
+            query = st.session_state["mvp_b_query"]
+            st.subheader(f"Risultati per: *{query}*")
+            if st.button("🤖 Analizza con AI", key="mvp-b-ai-summary"):
+                context = st.session_state.get("mvp_b_results", [])[:5]
+                if context:
+                    with st.spinner("Analisi AI…"):
+                        answer, err = _call_groq(query, context, model=GROQ_DEFAULT_MODEL, max_tokens=700)
+                    st.session_state["mvp_b_summary"] = answer or f"⚠️ {err}"
+            if st.session_state.get("mvp_b_summary"):
+                st.info(st.session_state["mvp_b_summary"])
+            for law in st.session_state.get("mvp_b_results", [])[:5]:
+                st.markdown(
+                    f"**{(law.get('title') or 'N/A')[:80]}**  \n"
+                    f"{'🟢 Vigente' if _normalize_status(law.get('status'))=='in_force' else '🔴 Abrogata'}"
+                    f" · {law.get('type','?')} {law.get('year','')}"
+                )
+                st.markdown("---")
+        else:
+            st.info("👈 Cerca una norma a sinistra per visualizzarla qui.")
+            st.caption(
+                "**Come usare:**\n"
+                "1. Digita una parola chiave a sinistra\n"
+                "2. Clicca su un risultato per aprirlo qui\n"
+                "3. Chiedi all'AI sul testo aperto"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────
+# MVP C — HUB + 4 PAGES + INLINE AI
+# ─────────────────────────────────────────────────────────────────
+
+def _mvp_c_hub_sidebar(db):
+    """MVP C: 4-button top nav, single scrolling pages, AI inline."""
+    st.caption(
+        "🗂️ **Interfaccia C — Hub + AI** &nbsp;·&nbsp; "
+        "4 sezioni chiare. AI sempre in fondo alla pagina.",
+        unsafe_allow_html=True,
+    )
+    nav_cols = st.columns(4)
+    nav_pages = ["🏠 Home", "🔍 Cerca", "🆕 Ultime", "🗂️ Archivio"]
+    current = st.session_state.get("mvp_c_page", "🏠 Home")
+    for i, p in enumerate(nav_pages):
+        btn_type = "primary" if current == p else "secondary"
+        if nav_cols[i].button(p, key=f"mvp-c-nav-{i}", use_container_width=True, type=btn_type):
+            st.session_state["mvp_c_page"] = p
+            st.rerun()
+    st.divider()
+
+    if current == "🏠 Home":
+        st.subheader("🇮🇹 Benvenuto in NormattivaVigente")
+        st.caption("Esplora le norme vigenti italiane in linguaggio semplice.")
+        h1, h2, h3 = st.columns(3)
+        topics = [
+            (h1, "⚖️ Lavoro", "Contratti, licenziamento, diritti", "lavoro contratto licenziamento"),
+            (h2, "🏠 Casa", "Affitti, proprietà, condominio", "locazione affitto proprietà"),
+            (h3, "🏫 Scuola", "Programmi, iscrizioni, studenti", "istruzione programma scolastico"),
+        ]
+        for col, icon_title, desc, q in topics:
+            with col:
+                st.markdown(f"### {icon_title}")
+                st.caption(desc)
+                if st.button("Esplora →", key=f"mvp-c-topic-{icon_title}", use_container_width=True) and db:
+                    results = db.search_fts(q, limit=10)
+                    vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                    st.session_state["mvp_c_results"] = vigenti[:8] if vigenti else results[:8]
+                    st.session_state["mvp_c_query"] = q
+                    st.session_state["mvp_c_page"] = "🔍 Cerca"
+                    st.rerun()
+        if db:
+            st.subheader("📅 Ultime 5 norme")
+            try:
+                recent = db.conn.execute(
+                    "SELECT urn, title, type, year, status, date FROM laws ORDER BY date DESC LIMIT 5"
+                ).fetchall()
+                for r in recent:
+                    r = dict(r)
+                    badge = "🟢" if _normalize_status(r.get("status")) == "in_force" else "🔴"
+                    rc1, rc2 = st.columns([4, 1])
+                    rc1.markdown(
+                        f"{badge} **{(r.get('title') or 'N/A')[:72]}**  \n"
+                        f"{r.get('type','?')} {r.get('year','')} · {(r.get('date') or '')[:10]}"
+                    )
+                    safe = (r.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+                    if rc2.button("Apri", key=f"mvp-c-home-{safe}"):
+                        st.session_state["mvp_c_open_urn"] = r["urn"]
+                        st.session_state["mvp_c_page"] = "🔍 Cerca"
+                        st.rerun()
+            except Exception:
+                st.info("Norme recenti non disponibili.")
+
+    elif current == "🔍 Cerca":
+        q = st.text_input(
+            "Cerca nel dataset Normattiva", key="mvp-c-q",
+            placeholder="Es.: scuola, lavoro, IMU, affitto…",
+        )
+        if st.button("🔍 Cerca", key="mvp-c-search-btn") and q.strip() and db:
+            with st.spinner("Ricerca…"):
+                results = db.search_fts(q.strip(), limit=20)
+            vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+            st.session_state["mvp_c_results"] = vigenti[:10] if vigenti else results[:10]
+            st.session_state["mvp_c_query"] = q.strip()
+            st.session_state.pop("mvp_c_open_urn", None)
+
+        open_urn = st.session_state.get("mvp_c_open_urn")
+        if open_urn and db:
+            law = _mvp_get_law(db, open_urn)
+            if law:
+                if st.button("← Torna ai risultati", key="mvp-c-back"):
+                    st.session_state.pop("mvp_c_open_urn", None)
+                    st.rerun()
+                st.subheader(f"📖 {(law.get('title') or '')[:78]}")
+                _mvp_inline_law(law, db, f"c-{open_urn[:12]}")
+        else:
+            results = st.session_state.get("mvp_c_results", [])
+            if results:
+                st.caption(f"**{len(results)} risultati** per *{st.session_state.get('mvp_c_query','')}*")
+                g1, g2 = st.columns(2)
+                for j, law in enumerate(results):
+                    _mvp_law_card(law, "mvp-c-res", g1 if j % 2 == 0 else g2, "mvp_c_open_urn")
+            else:
+                st.info("Usa la barra di ricerca sopra oppure torna alla Home e scegli un'area tematica.")
+
+    elif current == "🆕 Ultime":
+        st.subheader("🆕 Ultime norme pubblicate")
+        if db:
+            try:
+                recent = db.conn.execute(
+                    "SELECT urn, title, type, year, status, date FROM laws ORDER BY date DESC LIMIT 25"
+                ).fetchall()
+                for r in recent:
+                    r = dict(r)
+                    badge = "🟢 Vigente" if _normalize_status(r.get("status")) == "in_force" else "🔴 Abrogata"
+                    safe = (r.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+                    rc1, rc2, rc3 = st.columns([4, 1, 1])
+                    rc1.markdown(
+                        f"**{(r.get('title') or 'N/A')[:75]}**  \n"
+                        f"{badge} · {(r.get('date') or '')[:10]}"
+                    )
+                    if rc2.button("Apri", key=f"mvp-c-late-open-{safe}"):
+                        st.session_state["mvp_c_open_urn"] = r["urn"]
+                        st.session_state["mvp_c_page"] = "🔍 Cerca"
+                        st.rerun()
+                    if rc3.button("AI", key=f"mvp-c-late-ai-{safe}"):
+                        with st.spinner("AI…"):
+                            a, err = _call_groq(
+                                f"Spiegami in modo semplice questa norma: {r.get('title','')}",
+                                [r], model=GROQ_DEFAULT_MODEL, max_tokens=400,
+                            )
+                        st.session_state[f"mvp_c_late_{safe}"] = a or f"⚠️ {err}"
+                    reply = st.session_state.get(f"mvp_c_late_{safe}")
+                    if reply:
+                        st.info(reply[:600])
+                    st.markdown("---")
+            except Exception as e:
+                st.error(f"Errore caricamento norme recenti: {e}")
+
+    elif current == "🗂️ Archivio":
+        st.subheader("🗂️ Archivio norme vigenti")
+        if db:
+            f1, f2 = st.columns(2)
+            year_f = f1.text_input("Anno (es. 2024)", key="mvp-c-arch-year")
+            type_f = f2.text_input("Tipo (decreto, legge…)", key="mvp-c-arch-type")
+            try:
+                q_sql = "SELECT urn, title, type, year, status FROM laws WHERE status='in_force'"
+                params = []
+                if year_f.strip():
+                    q_sql += " AND year=?"
+                    params.append(year_f.strip())
+                if type_f.strip():
+                    q_sql += " AND LOWER(type) LIKE ?"
+                    params.append(f"%{type_f.strip().lower()}%")
+                q_sql += " ORDER BY date DESC LIMIT 30"
+                rows = [dict(r) for r in db.conn.execute(q_sql, params).fetchall()]
+                st.caption(f"**{len(rows)} norme** (max 30)")
+                g1, g2 = st.columns(2)
+                for j, law in enumerate(rows):
+                    _mvp_law_card(law, "mvp-c-arch", g1 if j % 2 == 0 else g2, "mvp_c_open_urn")
+                if st.session_state.get("mvp_c_open_urn"):
+                    st.session_state["mvp_c_page"] = "🔍 Cerca"
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Errore archivio: {e}")
+
+    st.divider()
+    with st.expander("🤖 Assistente AI — Chiedi qualcosa", expanded=False):
+        ai_q = st.text_input(
+            "Domanda", key="mvp-c-ai-q",
+            placeholder="Es.: Cosa prevede la legge sul telelavoro?",
+            label_visibility="collapsed",
+        )
+        if st.button("Chiedi →", key="mvp-c-ai-btn", disabled=not ai_q.strip()) and db:
+            ctx_urn = st.session_state.get("mvp_c_open_urn")
+            if ctx_urn:
+                law = _mvp_get_law(db, ctx_urn)
+                context_laws = [law] if law else []
+            else:
+                results = db.search_fts(ai_q.strip(), limit=20)
+                vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                context_laws = vigenti[:5] if vigenti else results[:5]
+            with st.spinner("AI in elaborazione…"):
+                answer, err = _call_groq(ai_q.strip(), context_laws, model=GROQ_DEFAULT_MODEL, max_tokens=600)
+            st.session_state["mvp_c_ai_reply"] = answer or f"⚠️ {err}"
+        if st.session_state.get("mvp_c_ai_reply"):
+            st.info(st.session_state["mvp_c_ai_reply"])
+
+
+# ─────────────────────────────────────────────────────────────────
+# MVP D — PURE CONVERSATIONAL (INTENT DETECTION)
+# ─────────────────────────────────────────────────────────────────
+
+def _mvp_d_detect_intent(text: str) -> str:
+    lower = text.lower()
+    if any(w in lower for w in ["ultime", "recenti", "nuove norme", "ultimi"]):
+        return "latest"
+    if re.search(r"costituzione|art[\.\s]+cost", lower):
+        return "constitution"
+    if any(w in lower for w in ["cerca", "trovami", "norme su", "leggi su", "dove è scritto", "cosa dice la legge su"]):
+        return "search"
+    return "groq_rag"
+
+
+def _mvp_d_conversational(db):
+    """MVP D: Pure conversational — intent detection routes to cards/law-viewer/AI."""
+    st.caption(
+        "🔄 **Interfaccia D — Conversazionale** &nbsp;·&nbsp; "
+        "Scrivi liberamente. L'AI capisce cosa cerchi e risponde con norme e spiegazioni.",
+        unsafe_allow_html=True,
+    )
+    chip_cols = st.columns(5)
+    chips = [
+        ("🔍 Cerca", "Cerca norme sul licenziamento senza preavviso"),
+        ("🆕 Ultime", "Mostrami le ultime leggi pubblicate"),
+        ("🏫 Scuola", "Qual è il programma scolastico previsto dalla legge?"),
+        ("📜 Costituzione", "Cosa dice la Costituzione sul diritto al lavoro?"),
+        ("🏠 Affitti", "Cosa dice la legge sui contratti di locazione?"),
+    ]
+    for i, (label, action) in enumerate(chips):
+        if chip_cols[i].button(label, key=f"mvp-d-chip-{i}", use_container_width=True):
+            st.session_state.setdefault("mvp_d_messages", [])
+            st.session_state["mvp_d_messages"].append({"role": "user", "content": action})
+            st.session_state["mvp_d_pending"] = action
+            st.rerun()
+
+    st.divider()
+
+    if "mvp_d_messages" not in st.session_state:
+        st.session_state["mvp_d_messages"] = [
+            {
+                "role": "assistant",
+                "content": (
+                    "🇮🇹 **Ciao! Sono il tuo assistente giuridico.**\n\n"
+                    "Scrivi qualsiasi domanda in linguaggio naturale — capisco cosa cerchi:\n"
+                    "- 🔍 Cerco norme rilevanti nel dataset (190.000+ leggi)\n"
+                    "- 📖 Ti mostro i testi completi\n"
+                    "- 🤖 Spiego ogni norma in modo semplice\n\n"
+                    "**Prova:** *Cosa prevede la legge sul telelavoro?*"
+                ),
+                "type": "welcome",
+                "laws": [],
+            }
+        ]
+
+    pending = st.session_state.pop("mvp_d_pending", None)
+    if pending and db:
+        intent = _mvp_d_detect_intent(pending)
+        new_msg = {"role": "assistant", "content": "", "type": intent, "laws": []}
+        if intent == "latest":
+            try:
+                recent = [
+                    dict(r) for r in db.conn.execute(
+                        "SELECT urn, title, type, year, status, date FROM laws ORDER BY date DESC LIMIT 12"
+                    ).fetchall()
+                ]
+                new_msg["content"] = f"📅 Ecco le ultime **{len(recent)} norme** pubblicate nel dataset:"
+                new_msg["laws"] = recent
+            except Exception as e:
+                new_msg["content"] = f"⚠️ Errore: {e}"
+        elif intent == "constitution":
+            results = db.search_fts("costituzione diritti fondamentali", limit=10)
+            cost_rows = [
+                r for r in results
+                if "costituzione" in (r.get("urn") or "").lower()
+                or "costituzione" in (r.get("title") or "").lower()
+            ] or results[:5]
+            answer, err = _call_groq(pending, cost_rows, model=GROQ_DEFAULT_MODEL, max_tokens=600)
+            new_msg["content"] = answer or f"⚠️ {err}"
+            new_msg["laws"] = cost_rows
+        else:
+            with st.spinner("🔍 Ricerca nel dataset Normattiva…"):
+                reply_text, laws = _mvp_search_and_reply(pending, db, "mvp-d")
+            new_msg["content"] = reply_text
+            new_msg["laws"] = laws
+            new_msg["type"] = "search_results"
+        st.session_state["mvp_d_messages"].append(new_msg)
+
+    for idx, msg in enumerate(st.session_state["mvp_d_messages"]):
+        with st.chat_message(msg["role"]):
+            if msg.get("content"):
+                st.markdown(msg["content"])
+            laws = msg.get("laws") or []
+            if laws:
+                st.caption(f"📚 **{len(laws)} norme** nel dataset — clicca per aprire:")
+                g1, g2 = st.columns(2)
+                for j, law in enumerate(laws[:8]):
+                    _mvp_law_card(law, f"mvp-d-card-{idx}", g1 if j % 2 == 0 else g2, "mvp_d_open_urn")
+
+    open_urn = st.session_state.get("mvp_d_open_urn")
+    if open_urn and db:
+        law = _mvp_get_law(db, open_urn)
+        if law:
+            with st.chat_message("assistant"):
+                st.markdown(f"📖 **Ho aperto la norma:**  \n**{(law.get('title') or '')[:80]}**")
+                _mvp_inline_law(law, db, f"d-{open_urn[:12]}")
+                col_ask, col_close = st.columns([3, 1])
+                ask_q = col_ask.text_input(
+                    "Chiedi su questa norma", key="mvp-d-law-q",
+                    placeholder="Es.: Cosa significa questo articolo?",
+                )
+                if col_ask.button("Chiedi →", key="mvp-d-law-ask", disabled=not ask_q.strip()):
+                    full_q = f"[Norma: {law.get('title','')}] {ask_q}"
+                    st.session_state["mvp_d_messages"].append({"role": "user", "content": ask_q})
+                    st.session_state["mvp_d_pending"] = full_q
+                    st.session_state.pop("mvp_d_open_urn", None)
+                    st.rerun()
+                if col_close.button("✕ Chiudi norma", key="mvp-d-law-close"):
+                    st.session_state.pop("mvp_d_open_urn", None)
+                    st.rerun()
+
+    user_input = st.chat_input("Scrivi liberamente — cerca, chiedi, esplora…", key="mvp-d-input")
+    if user_input:
+        st.session_state["mvp_d_messages"].append({"role": "user", "content": user_input})
+        st.session_state["mvp_d_pending"] = user_input
+        st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────
 # NAVIGATION
 # ─────────────────────────────────────────────────────────────────
 
@@ -4661,6 +5268,35 @@ def main():
         }
         st.sidebar.success("Normattiva Lab — VOOM: Vigente + Abrogati + Multivigente.")
     else:
+        use_advanced = st.sidebar.toggle(
+            "🔧 Navigazione classica (avanzata)", value=False, key="adv-mode"
+        )
+        if not use_advanced:
+            # MVP showcase — 4 interface prototypes in tabs
+            st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
+            db = load_db()
+            _render_groq_sidebar_chat(db)
+            st.title("🇮🇹 NormattivaVigente")
+            st.caption(
+                "Scegli l'interfaccia che preferisci — tutte e 4 sono collegate allo stesso "
+                "dataset Normattiva con oltre 190.000 leggi."
+            )
+            tab_a, tab_b, tab_c, tab_d = st.tabs([
+                "💬 A — Chat-First",
+                "⚡ B — Split-Screen",
+                "🗂️ C — Hub + AI",
+                "🔄 D — Conversazionale",
+            ])
+            with tab_a:
+                _mvp_a_chat_first(db)
+            with tab_b:
+                _mvp_b_split_screen(db)
+            with tab_c:
+                _mvp_c_hub_sidebar(db)
+            with tab_d:
+                _mvp_d_conversational(db)
+            return  # skip classic navigation below
+
         mobile_simple = st.sidebar.checkbox("Modalità mobile semplificata", value=False, key="mobile-simple")
         pages = {
             "🏠 Hub Cittadini": all_pages["🏠 Hub Cittadini"],
