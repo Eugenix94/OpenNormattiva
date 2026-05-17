@@ -39,7 +39,9 @@ class LawDatabase:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self._fts_available = True
         self.init_schema()
+        self._check_fts_health()
     
     def init_schema(self):
         """Create tables and indexes."""
@@ -189,8 +191,21 @@ class LawDatabase:
         
         self.conn.commit()
         logger.info("Schema initialized")
+
+    def _check_fts_health(self):
+        """Validate FTS5 index and attempt rebuild if corrupt."""
+        try:
+            self.conn.execute("SELECT count(*) FROM laws_fts WHERE laws_fts MATCH '\"legge\"'").fetchone()
+        except Exception as e:
+            logger.warning(f"FTS index appears corrupt ({e}) — attempting rebuild…")
+            try:
+                self.conn.execute("INSERT INTO laws_fts(laws_fts) VALUES('rebuild')")
+                self.conn.commit()
+                logger.info("FTS index rebuilt successfully")
+            except Exception as e2:
+                logger.error(f"FTS rebuild failed ({e2}) — falling back to LIKE search for all queries")
+                self._fts_available = False
     
-    def insert_law(self, law: Dict) -> bool:
         """Insert or update single law."""
         try:
             # Auto-compute legislature metadata from year if not provided
@@ -301,6 +316,8 @@ class LawDatabase:
     
     def search_fts(self, query: str, limit: int = 50) -> List[Dict]:
         """Full-text search using FTS5 BM25 ranking with snippet generation."""
+        if not getattr(self, '_fts_available', True):
+            return self._search_like(query, limit)
         try:
             # Sanitize query for FTS5
             safe_query = self._sanitize_fts_query(query)
@@ -325,7 +342,7 @@ class LawDatabase:
             logger.error(f"Search error for '{query}': {e}")
             # Fallback to LIKE search
             return self._search_like(query, limit)
-    
+
     def _sanitize_fts_query(self, query: str) -> str:
         """Safely format user input for FTS5 MATCH."""
         # Remove FTS5 special characters that could cause errors
@@ -338,17 +355,21 @@ class LawDatabase:
     
     def _search_like(self, query: str, limit: int) -> List[Dict]:
         """Fallback LIKE search when FTS fails."""
-        pattern = f'%{query}%'
-        results = self.conn.execute('''
-            SELECT urn, title, type, year, date, status, article_count, 
-                   text_length, importance_score, 0.0 as relevance_score,
-                   '' as snippet
-            FROM laws
-            WHERE title LIKE ? OR text LIKE ?
-            ORDER BY importance_score DESC
-            LIMIT ?
-        ''', (pattern, pattern, limit)).fetchall()
-        return [dict(r) for r in results]
+        try:
+            pattern = f'%{query}%'
+            results = self.conn.execute('''
+                SELECT urn, title, type, year, date, status, article_count, 
+                       text_length, importance_score, 0.0 as relevance_score,
+                       '' as snippet
+                FROM laws
+                WHERE title LIKE ? OR text LIKE ?
+                ORDER BY importance_score DESC
+                LIMIT ?
+            ''', (pattern, pattern, limit)).fetchall()
+            return [dict(r) for r in results]
+        except Exception as e:
+            logger.error(f"LIKE search also failed for '{query}': {e}")
+            return []
     
     def search_with_filters(self, 
                           query: str = '',

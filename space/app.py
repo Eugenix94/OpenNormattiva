@@ -4609,7 +4609,8 @@ def _mvp_law_card(law, key_prefix, col, open_key):
         f" · {law.get('type','?')} {law.get('year','')}</div>",
         unsafe_allow_html=True,
     )
-    safe_key = (law.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+    import re as _re
+    safe_key = _re.sub(r'[^a-z0-9]', '-', (law.get("urn") or "x").lower())[:80]
     if col.button("📖 Apri", key=f"{key_prefix}-{safe_key}", use_container_width=True):
         st.session_state[open_key] = law.get("urn")
         st.rerun()
@@ -4819,7 +4820,8 @@ def _mvp_b_split_screen(db):
                 status = _normalize_status(law.get("status"))
                 badge = "🟢" if status == "in_force" else "🔴"
                 title = (law.get("title") or "N/A")[:50]
-                safe_key = (law.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+                import re as _re
+                safe_key = _re.sub(r'[^a-z0-9]', '-', (law.get("urn") or "x").lower())[:80]
                 if st.button(f"{badge} {title}", key=f"mvp-b-open-{safe_key}", use_container_width=True):
                     st.session_state["mvp_b_open_urn"] = law.get("urn")
                     st.session_state.pop("mvp_b_ai_reply", None)
@@ -4968,7 +4970,7 @@ def _mvp_c_hub_sidebar(db):
                 st.caption(f"**{len(results)} risultati** per *{st.session_state.get('mvp_c_query','')}*")
                 g1, g2 = st.columns(2)
                 for j, law in enumerate(results):
-                    _mvp_law_card(law, "mvp-c-res", g1 if j % 2 == 0 else g2, "mvp_c_open_urn")
+                    _mvp_law_card(law, f"mvp-c-res-{j}", g1 if j % 2 == 0 else g2, "mvp_c_open_urn")
             else:
                 st.info("Usa la barra di ricerca sopra oppure torna alla Home e scegli un'area tematica.")
 
@@ -4982,7 +4984,8 @@ def _mvp_c_hub_sidebar(db):
                 for r in recent:
                     r = dict(r)
                     badge = "🟢 Vigente" if _normalize_status(r.get("status")) == "in_force" else "🔴 Abrogata"
-                    safe = (r.get("urn") or "x")[:18].replace(":", "-").replace("/", "-")
+                    import re as _re
+                    safe = _re.sub(r'[^a-z0-9]', '-', (r.get("urn") or "x").lower())[:80]
                     rc1, rc2, rc3 = st.columns([4, 1, 1])
                     rc1.markdown(
                         f"**{(r.get('title') or 'N/A')[:75]}**  \n"
@@ -5026,7 +5029,7 @@ def _mvp_c_hub_sidebar(db):
                 st.caption(f"**{len(rows)} norme** (max 30)")
                 g1, g2 = st.columns(2)
                 for j, law in enumerate(rows):
-                    _mvp_law_card(law, "mvp-c-arch", g1 if j % 2 == 0 else g2, "mvp_c_open_urn")
+                    _mvp_law_card(law, f"mvp-c-arch-{j}", g1 if j % 2 == 0 else g2, "mvp_c_open_urn")
                 if st.session_state.get("mvp_c_open_urn"):
                     st.session_state["mvp_c_page"] = "🔍 Cerca"
                     st.rerun()
