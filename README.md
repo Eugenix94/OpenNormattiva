@@ -1,8 +1,20 @@
+---
+title: Normattiva Vigente
+emoji: ⚖️
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: "1.32.0"
+python_version: "3.10"
+app_file: space/app.py
+pinned: false
+---
+
 # OpenNormattiva — Italian Law Research Platform
 
 Search, browse, and analyse **157,000+** Italian laws with full-text search (FTS5/BM25), citation graphs, PageRank importance, and legal domain classification.
 
-**Live**: [HuggingFace Space](https://huggingface.co/spaces/diatribe00/normattiva-search) · **Dataset**: [HuggingFace Dataset](https://huggingface.co/datasets/diatribe00/normattiva-data)
+**Live**: [HuggingFace Space](https://huggingface.co/spaces/diatribe00/normattivavigente) · **Dataset**: [HuggingFace Dataset](https://huggingface.co/datasets/diatribe00/normattivavigente-data)
 
 ---
 
