@@ -5243,13 +5243,77 @@ _CITIZEN_CSS = """<style>
 
 
 def _citizen_mvp(db):
-    """Clean citizen-first MVP: AI Chat + Search + Latest + Constitution."""
+    """Citizen-first MVP — AI chatbot, law search, latest norms, constitution."""
     import re as _re
+
+    # ── Italian stop-words stripped before FTS (avoids AND-match failure) ──
+    _STOPWORDS = {
+        "a","ad","al","alla","alle","agli","allo","anche","ancora","anzi","appena",
+        "che","chi","ci","col","come","con","cosa","così","cui","da","dal","dalla",
+        "dalle","dagli","dallo","degli","dei","del","dell","della","delle","dello",
+        "di","dì","dove","dunque","e","ed","era","essere","è","già","gli","ho","i",
+        "il","in","invece","io","l","la","le","loro","lui","ma","mi","nel","nella",
+        "nelle","negli","nello","no","non","o","ogni","oppure","ora","però","per",
+        "poi","può","quale","quando","quanto","quasi","questo","qui","se","si","sia",
+        "solo","sono","su","sua","suoi","sul","sulla","sulle","sugli","sullo","te",
+        "ti","tra","tu","tutti","un","una","uno","vi","voi","dura","fare","avere",
+        "questo","questa","questi","queste","quale","quali","sarà","verrà","essere",
+    }
+
+    def _keywords(text: str) -> str:
+        """Extract meaningful content words from a natural-language Italian query."""
+        words = _re.sub(r"[^\w\s]", " ", text, flags=_re.UNICODE).split()
+        return " ".join(w for w in words if w.lower() not in _STOPWORDS and len(w) > 2)[:120]
+
+    def _smart_search(query: str, limit: int = 60) -> list:
+        """
+        3-pass retrieval:
+          1. FTS on extracted keywords (strips stop-words so AND-match works)
+          2. Per-keyword FTS union (catches partial matches)
+          3. LIKE fallback on title + text
+        """
+        if not db:
+            return []
+        kw = _keywords(query)
+        # Pass 1 — keywords FTS
+        if kw:
+            try:
+                res = db.search_fts(kw, limit=limit)
+                if res:
+                    return res
+            except Exception:
+                pass
+        # Pass 2 — per-word union
+        seen: set = set()
+        combined: list = []
+        for w in (kw.split() if kw else [])[:5]:
+            try:
+                for r in db.search_fts(w, limit=20):
+                    u = r.get("urn", "")
+                    if u not in seen:
+                        seen.add(u)
+                        combined.append(r)
+            except Exception:
+                pass
+        if combined:
+            return combined[:limit]
+        # Pass 3 — LIKE fallback
+        try:
+            first = (kw.split() or [query.strip()])[0]
+            pattern = f"%{first}%"
+            rows = db.conn.execute(
+                "SELECT urn, title, type, year, date, status, '' AS snippet "
+                "FROM laws WHERE title LIKE ? OR text LIKE ? LIMIT ?",
+                (pattern, pattern, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     st.markdown(_CITIZEN_CSS, unsafe_allow_html=True)
     has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
 
-    # ── Full law detail overlay (takes over page when open) ──────
+    # ── Full law detail overlay (blocks rest of page) ────────────
     open_urn = st.session_state.get("citizen_open_urn")
     if open_urn and db:
         try:
@@ -5265,38 +5329,39 @@ def _citizen_mvp(db):
             text = law.get("text") or ""
             if text:
                 st.text_area(
-                    "Testo integrale", text[:9000] + ("…" if len(text) > 9000 else ""),
-                    height=420, disabled=True, key=f"dettext-{open_urn[:24]}"
+                    "Testo integrale",
+                    text[:9000] + ("…" if len(text) > 9000 else ""),
+                    height=420, disabled=True,
+                    key=f"dettext-{open_urn[:24]}",
                 )
             else:
                 st.info("Testo non disponibile nel dataset per questa norma.")
             col_link, col_close = st.columns([3, 1])
             col_link.link_button(
                 "📄 Apri su Normattiva.it ↗",
-                f"https://www.normattiva.it/uri-res/N2Ls?{open_urn}"
+                f"https://www.normattiva.it/uri-res/N2Ls?{open_urn}",
             )
             if col_close.button("← Chiudi", key="citizen-close-detail"):
                 st.session_state.pop("citizen_open_urn", None)
                 st.rerun()
         else:
             st.warning("Norma non trovata nel database.")
-            if st.button("← Indietro"):
+            if st.button("← Indietro", key="citizen-back"):
                 st.session_state.pop("citizen_open_urn", None)
                 st.rerun()
-        return  # stop rendering the rest of the page
+        return
 
-    # ── Helper: law card ─────────────────────────────────────────
+    # ── Law card helper ──────────────────────────────────────────
     def _card(law, key_suffix, expanded=False):
         urn = law.get("urn") or ""
-        title = (law.get("title") or "N/A")
+        title = law.get("title") or "N/A"
         status = _normalize_status(law.get("status"))
         badge = "🟢 Vigente" if status == "in_force" else "🔴 Abrogata"
         typ = law.get("type") or ""
         year = law.get("year") or ""
         snippet = (law.get("snippet") or (law.get("text") or "")[:320]).strip()
         safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
-        label = f"{badge}  {title[:72]}"
-        with st.expander(label, expanded=expanded):
+        with st.expander(f"{badge}  {title[:72]}", expanded=expanded):
             st.caption(f"{typ} · {year} · `{urn}`")
             if snippet:
                 st.markdown(f"> {snippet[:380].rstrip()}{'…' if len(snippet) > 380 else ''}")
@@ -5304,55 +5369,34 @@ def _citizen_mvp(db):
                 st.session_state["citizen_open_urn"] = urn
                 st.rerun()
 
-    # ── 4 tabs ───────────────────────────────────────────────────
+    # ── Tabs ─────────────────────────────────────────────────────
     tab_ai, tab_search, tab_latest, tab_const = st.tabs([
-        "💬 Chiedi all'AI",
+        "💬 Assistente AI",
         "🔍 Cerca Norme",
         "🆕 Ultime Norme",
         "🇮🇹 Costituzione",
     ])
 
     # ═══════════════════════════════════════════════════════════════
-    # TAB 1 — AI CHAT
+    # TAB 1 — AI CHATBOT
     # ═══════════════════════════════════════════════════════════════
     with tab_ai:
         st.markdown("""
         <div class='nv-hero'>
           <h1>🇮🇹 NormattivaVigente</h1>
           <p>La legge italiana, spiegata in modo semplice — per ogni cittadino.</p>
-          <small>190.000+ norme vigenti · Powered by Normattiva & Groq AI</small>
+          <small>190.000+ norme vigenti · Powered by Normattiva &amp; Groq AI</small>
         </div>
         """, unsafe_allow_html=True)
 
         if not has_groq:
             st.warning(
-                "🔑 **GROQ_API_KEY non configurata** — le risposte AI sono disabilitate. "
-                "Configura la variabile nelle impostazioni dello Space per abilitare l'assistente.",
+                "**GROQ_API_KEY non configurata** — risposte AI disabilitate. "
+                "Configura il secret nelle impostazioni dello Space.",
                 icon="⚠️",
             )
 
-        # Quick-topic chips
-        TOPICS = [
-            ("👶 Congedo parentale", "Quanto dura e come funziona il congedo parentale in Italia?"),
-            ("🏠 Affitto e sfratto", "Quali sono i diritti dell'inquilino in caso di sfratto?"),
-            ("💼 Licenziamento", "Cosa spetta al lavoratore licenziato ingiustamente?"),
-            ("🚗 Codice della strada", "Quali sanzioni sono previste per guida senza patente?"),
-            ("💶 ISEE e agevolazioni", "Come si calcola l'ISEE e a quali bonus dà accesso?"),
-            ("🏥 Diritto alla salute", "A quali prestazioni sanitarie ha diritto ogni cittadino?"),
-            ("📜 Privacy e dati", "Cosa prevede la legge sulla protezione dei dati personali?"),
-            ("🏗️ Permesso di costruire", "Quando serve il permesso di costruire e come si ottiene?"),
-            ("👨‍👩‍👧 Separazione e divorzio", "Come funziona il mantenimento dei figli dopo la separazione?"),
-        ]
-        st.caption("💡 **Argomenti frequenti** — clicca per iniziare:")
-        cols = st.columns(3)
-        for i, (label, question) in enumerate(TOPICS):
-            if cols[i % 3].button(label, key=f"topic-{i}", use_container_width=True):
-                st.session_state["citizen_prefill"] = question
-                st.rerun()
-
-        st.markdown("---")
-
-        # Chat history
+        # Multi-turn chat history
         if "citizen_chat" not in st.session_state:
             st.session_state["citizen_chat"] = []
 
@@ -5365,28 +5409,23 @@ def _citizen_mvp(db):
                         for j, law in enumerate(laws[:8]):
                             _card(law, f"hist-{idx}-{j}")
 
-        # Input
-        prefill = st.session_state.pop("citizen_prefill", "")
-        question = st.chat_input("Scrivi la tua domanda sulla legge italiana…") or prefill
+        question = st.chat_input("Fai una domanda sulla legge italiana…")
 
         if question:
             st.session_state["citizen_chat"].append({"role": "user", "content": question})
             with st.chat_message("user"):
                 st.markdown(question)
 
-            # Retrieve: FTS with generous limit, prefer vigenti
-            context_laws = []
+            # Smart 3-pass retrieval, prefer vigenti
+            context_laws: list = []
             if db:
-                try:
-                    results = db.search_fts(question, limit=50)
-                    vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
-                    context_laws = vigenti[:12] if vigenti else results[:12]
-                except Exception:
-                    context_laws = []
+                results = _smart_search(question, limit=60)
+                vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                context_laws = vigenti[:12] if vigenti else results[:12]
 
             with st.chat_message("assistant"):
                 if has_groq and context_laws:
-                    with st.spinner("Consulto le norme e preparo la risposta…"):
+                    with st.spinner("Consulto le norme…"):
                         answer, err = _call_groq(
                             question=question,
                             context_laws=context_laws,
@@ -5397,22 +5436,21 @@ def _citizen_mvp(db):
                         reply = answer if answer else f"⚠️ Errore AI: {err}"
                 elif has_groq and not context_laws:
                     reply = (
-                        "⚠️ Non ho trovato norme correlate nel dataset per questa domanda. "
-                        "Prova a riformulare con parole chiave più specifiche "
-                        "(es.: 'licenziamento', 'affitto', 'IVA', 'congedo')."
+                        "Non ho trovato norme correlate nel dataset per questa domanda. "
+                        "Prova con parole chiave più specifiche "
+                        "(es. 'licenziamento', 'affitto', 'IVA', 'congedo parentale', 'pensione')."
+                    )
+                elif context_laws:
+                    titles = "\n".join(
+                        f"- **{l.get('title','')[:68]}** ({l.get('year','')})"
+                        for l in context_laws[:6]
+                    )
+                    reply = (
+                        f"**Norme trovate nel dataset:**\n\n{titles}\n\n"
+                        "*Configura `GROQ_API_KEY` per ricevere risposte in linguaggio semplice.*"
                     )
                 else:
-                    if context_laws:
-                        titles = "\n".join(
-                            f"- **{l.get('title', '')[:68]}** ({l.get('year', '')})"
-                            for l in context_laws[:6]
-                        )
-                        reply = (
-                            f"**Norme trovate nel dataset** (AI non attiva):\n\n{titles}\n\n"
-                            "*Configura `GROQ_API_KEY` per ricevere risposte intelligenti in linguaggio semplice.*"
-                        )
-                    else:
-                        reply = "Nessuna norma trovata. Prova con termini diversi."
+                    reply = "Nessuna norma trovata per questa ricerca."
 
                 st.markdown(reply)
                 if context_laws:
@@ -5435,42 +5473,37 @@ def _citizen_mvp(db):
     # TAB 2 — SEARCH
     # ═══════════════════════════════════════════════════════════════
     with tab_search:
-        st.subheader("🔍 Cerca tra le norme vigenti")
+        st.subheader("🔍 Cerca tra le norme")
         sq = st.text_input(
-            "Cerca",
+            "Parole chiave",
             key="citizen-search-q",
-            label_visibility="collapsed",
-            placeholder="Parole chiave, titolo, argomento… (es. privacy, IVA, sfratto, sicurezza lavoro)",
+            placeholder="Es. privacy, IVA, sfratto, sicurezza lavoro, pensione…",
         )
         f1, f2, f3 = st.columns(3)
         type_filter = f1.selectbox(
-            "Tipo norma", ["(tutti)", "LEGGE", "DECRETO LEGISLATIVO", "DECRETO LEGGE",
-                           "DECRETO DEL PRESIDENTE DELLA REPUBBLICA", "REGOLAMENTO"],
-            key="cs-type"
+            "Tipo norma",
+            ["(tutti)", "LEGGE", "DECRETO LEGISLATIVO", "DECRETO LEGGE",
+             "DECRETO DEL PRESIDENTE DELLA REPUBBLICA", "REGOLAMENTO"],
+            key="cs-type",
         )
         year_from = f2.number_input("Anno da", min_value=1800, max_value=2030, value=1948, step=1, key="cs-year-from")
         year_to = f3.number_input("Anno a", min_value=1800, max_value=2030, value=2026, step=1, key="cs-year-to")
+        show_abrogated = st.checkbox("Includi norme abrogate", key="cs-abrogated", value=False)
 
-        if sq.strip() and db:
-            try:
-                results = db.search_fts(sq.strip(), limit=80)
-                if type_filter != "(tutti)":
-                    results = [r for r in results if (r.get("type") or "").upper() == type_filter]
-                results = [r for r in results if year_from <= int(r.get("year") or 0) <= year_to]
-                vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
-                st.caption(f"**{len(vigenti)} norme vigenti** (di {len(results)} totali)")
-                for j, law in enumerate(vigenti[:30]):
-                    _card(law, f"sr-{j}")
-                if not vigenti and results:
-                    st.info("Nessuna norma vigente — mostrando norme di qualsiasi stato:")
-                    for j, law in enumerate(results[:15]):
-                        _card(law, f"sr-all-{j}")
-                elif not results:
-                    st.info("Nessun risultato. Prova con termini diversi o rimuovi i filtri.")
-            except Exception as e:
-                st.error(f"Errore ricerca: {e}")
-        elif not sq.strip():
-            st.info("💡 Inserisci un termine di ricerca per trovare le norme vigenti.")
+        if sq.strip():
+            results = _smart_search(sq.strip(), limit=80)
+            if type_filter != "(tutti)":
+                results = [r for r in results if (r.get("type") or "").upper() == type_filter]
+            results = [r for r in results if year_from <= int(r.get("year") or 0) <= year_to]
+            if not show_abrogated:
+                results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+            st.caption(f"**{len(results)} norme trovate**")
+            for j, law in enumerate(results[:30]):
+                _card(law, f"sr-{j}")
+            if not results:
+                st.info("Nessun risultato. Prova con parole chiave diverse o cambia i filtri.")
+        else:
+            st.info("Inserisci parole chiave per cercare le norme.")
 
     # ═══════════════════════════════════════════════════════════════
     # TAB 3 — LATEST
@@ -5484,12 +5517,11 @@ def _citizen_mvp(db):
                     "SELECT urn, title, type, year, date, status FROM laws "
                     "WHERE status='in_force' ORDER BY date DESC LIMIT 40"
                 ).fetchall()
-                if rows:
-                    for j, r in enumerate(rows):
-                        _card(dict(r), f"lat-{j}")
-                else:
+                for j, r in enumerate(rows):
+                    _card(dict(r), f"lat-{j}")
+                if not rows:
                     st.info("Nessuna norma trovata nel database.")
-            except Exception as e:
+            except Exception:
                 try:
                     rows = db.conn.execute(
                         "SELECT urn, title, type, year, status FROM laws ORDER BY year DESC LIMIT 40"
@@ -5508,31 +5540,27 @@ def _citizen_mvp(db):
         st.subheader("🇮🇹 Costituzione della Repubblica Italiana")
         st.caption("Cerca un principio, un diritto o un articolo della Costituzione.")
         cq = st.text_input(
-            "Cerca",
+            "Cerca nella Costituzione",
             key="citizen-const-q",
-            label_visibility="collapsed",
-            placeholder="Es.: diritto al lavoro, libertà di stampa, salute, famiglia…",
+            placeholder="Es. diritto al lavoro, libertà di stampa, salute, famiglia…",
         )
-        if cq.strip() and db:
-            try:
-                results = db.search_fts(f"costituzione {cq.strip()}", limit=25)
-                const_rows = [
-                    r for r in results
-                    if "costituzione" in (r.get("urn") or "").lower()
-                    or "costituzione" in (r.get("title") or "").lower()
-                ]
-                if not const_rows:
-                    const_rows = results[:10]
-                if const_rows:
-                    for j, law in enumerate(const_rows):
-                        _card(law, f"co-{j}")
-                else:
-                    st.info("Nessun risultato. Prova con: 'lavoro', 'libertà', 'salute', 'uguaglianza'.")
-            except Exception as e:
-                st.error(f"Errore: {e}")
+        if cq.strip():
+            results = _smart_search(f"costituzione {cq.strip()}", limit=25)
+            const_rows = [
+                r for r in results
+                if "costituzione" in (r.get("urn") or "").lower()
+                or "costituzione" in (r.get("title") or "").lower()
+            ]
+            if not const_rows:
+                const_rows = results[:10]
+            if const_rows:
+                for j, law in enumerate(const_rows):
+                    _card(law, f"co-{j}")
+            else:
+                st.info("Nessun risultato. Prova con: 'lavoro', 'libertà', 'salute', 'uguaglianza'.")
         else:
             st.markdown("""
-**I diritti fondamentali della Repubblica Italiana**
+**Principi fondamentali della Repubblica Italiana**
 
 | Articolo | Principio |
 |----------|-----------|
