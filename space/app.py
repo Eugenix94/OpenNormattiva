@@ -843,7 +843,7 @@ GROQ_MODELS = {
 GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 _GROQ_SYSTEM_PROMPT = """\
-Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino comune.
+Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino comune e dei principi della Repubblica Italiana.
 
 IL TUO OBIETTIVO: Rendere la legge comprensibile a chiunque, senza tecnicismi inutili.
 
@@ -856,10 +856,12 @@ REGOLE FONDAMENTALI:
 6. Struttura la risposta con:
    - **Risposta breve** (1-2 frasi che rispondono direttamente alla domanda)
    - **In dettaglio** (spiegazione con citazioni)
+    - **Prove normative** (almeno 2 punti, ognuno con URN e una breve citazione testuale dal contesto tra virgolette)
    - **Cosa significa per te** (impatto pratico concreto, se rilevante)
    - **⚠️ Nota legale** (questa è un'analisi basata su dati pubblici Normattiva — per decisioni importanti consulta un avvocato o un CAF)
 7. Se la risposta NON è ricavabile dal contesto, dì esplicitamente: "Le norme disponibili nel dataset non coprono direttamente questo aspetto. Ti consiglio di [azione pratica]."
 8. Per domande su importi, scadenze o agevolazioni: cita sempre l'anno della norma — la legge può essere cambiata.
+9. Quando pertinente, evidenzia il collegamento ai principi costituzionali della Repubblica (uguaglianza, tutela del lavoro, salute, famiglia, istruzione, libertà).
 
 NORME ESTRATTE DAL DATABASE NORMATTIVA (190.000+ leggi vigenti):
 {context}
@@ -5297,18 +5299,87 @@ def _citizen_mvp(db):
                 pass
         if combined:
             return combined[:limit]
-        # Pass 3 — LIKE fallback
+        # Pass 3 — LIKE fallback across multiple terms
         try:
-            first = (kw.split() or [query.strip()])[0]
-            pattern = f"%{first}%"
+            terms = (kw.split() or _re.sub(r"[^\w\s]", " ", query).split())[:4]
+            terms = [t for t in terms if len(t) > 2]
+            if not terms:
+                return []
+            like_clauses = " OR ".join(["title LIKE ? OR text LIKE ?" for _ in terms])
+            params = []
+            for t in terms:
+                p = f"%{t}%"
+                params.extend([p, p])
+            params.append(limit)
             rows = db.conn.execute(
                 "SELECT urn, title, type, year, date, status, '' AS snippet "
-                "FROM laws WHERE title LIKE ? OR text LIKE ? LIMIT ?",
-                (pattern, pattern, limit),
+                f"FROM laws WHERE {like_clauses} LIMIT ?",
+                tuple(params),
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
             return []
+
+    _QUERY_EXPANSIONS = {
+        "congedo": "congedo parentale maternita paternita decreto legislativo 151 2001",
+        "maternita": "congedo maternita paternita decreto legislativo 151 2001",
+        "paternita": "congedo paternita decreto legislativo 151 2001",
+        "licenziamento": "licenziamento giusta causa statuto lavoratori legge 300 1970",
+        "affitto": "locazione contratto locazione sfratto legge 392 1978",
+        "pensione": "pensione previdenza INPS",
+        "iva": "imposta valore aggiunto decreto del presidente della repubblica 633 1972",
+        "privacy": "protezione dati personali decreto legislativo 196 2003 gdpr",
+        "salute": "servizio sanitario nazionale tutela salute",
+        "lavoro": "diritto del lavoro statuto lavoratori",
+    }
+
+    def _retrieve_context(question: str, limit: int = 12) -> list:
+        """Retrieve context using query variants and prioritize vigente laws."""
+        if not db:
+            return []
+
+        base = (question or "").strip()
+        kw = _keywords(base)
+        variants = []
+        if base:
+            variants.append(base)
+        if kw and kw != base:
+            variants.append(kw)
+
+        for tok in kw.split()[:4]:
+            exp = _QUERY_EXPANSIONS.get(tok.lower())
+            if exp:
+                variants.append(exp)
+
+        # Include a constitutional lens for broad civic questions.
+        variants.append(f"costituzione repubblica italiana {kw or base}".strip())
+
+        seen = set()
+        combined = []
+        for qv in variants:
+            for r in _smart_search(qv, limit=40):
+                urn = r.get("urn", "")
+                if urn and urn not in seen:
+                    seen.add(urn)
+                    combined.append(r)
+                if len(combined) >= 80:
+                    break
+            if len(combined) >= 80:
+                break
+
+        if not combined:
+            return []
+
+        vigenti = [r for r in combined if _normalize_status(r.get("status")) == "in_force"]
+        ranked = vigenti if vigenti else combined
+        return ranked[:limit]
+
+    def _law_proof_excerpt(law: dict, max_chars: int = 220) -> str:
+        text = (law.get("snippet") or law.get("text") or "").strip()
+        if not text:
+            return "Estratto non disponibile nel dataset."
+        text = _re.sub(r"\s+", " ", text)
+        return text[:max_chars] + ("…" if len(text) > max_chars else "")
 
     st.markdown(_CITIZEN_CSS, unsafe_allow_html=True)
     has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
@@ -5416,12 +5487,8 @@ def _citizen_mvp(db):
             with st.chat_message("user"):
                 st.markdown(question)
 
-            # Smart 3-pass retrieval, prefer vigenti
-            context_laws: list = []
-            if db:
-                results = _smart_search(question, limit=60)
-                vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
-                context_laws = vigenti[:12] if vigenti else results[:12]
+            # Smart retrieval with query variants + constitutional lens
+            context_laws: list = _retrieve_context(question, limit=12) if db else []
 
             with st.chat_message("assistant"):
                 if has_groq and context_laws:
@@ -5436,9 +5503,9 @@ def _citizen_mvp(db):
                         reply = answer if answer else f"⚠️ Errore AI: {err}"
                 elif has_groq and not context_laws:
                     reply = (
-                        "Non ho trovato norme correlate nel dataset per questa domanda. "
-                        "Prova con parole chiave più specifiche "
-                        "(es. 'licenziamento', 'affitto', 'IVA', 'congedo parentale', 'pensione')."
+                        "Non ho trovato evidenze sufficienti nel dataset per rispondere in modo affidabile a questa domanda. "
+                        "Riformula indicando area giuridica, soggetto e periodo "
+                        "(es. 'congedo parentale dipendente privato 2024')."
                     )
                 elif context_laws:
                     titles = "\n".join(
@@ -5457,6 +5524,13 @@ def _citizen_mvp(db):
                     with st.expander(f"📚 {len(context_laws)} norme consultate dal dataset", expanded=False):
                         for j, law in enumerate(context_laws[:8]):
                             _card(law, f"ans-{len(st.session_state['citizen_chat'])}-{j}")
+                    with st.expander("📜 Prove normative (estratti testuali)", expanded=True):
+                        for law in context_laws[:6]:
+                            urn = law.get("urn", "N/A")
+                            title = law.get("title", "N/A")
+                            status = "VIGENTE ✓" if _normalize_status(law.get("status")) == "in_force" else "ABROGATA ✗"
+                            st.markdown(f"- **{title}** [{urn}] — {status}")
+                            st.caption(f"\"{_law_proof_excerpt(law)}\"")
 
             st.session_state["citizen_chat"].append({
                 "role": "assistant",
