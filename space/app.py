@@ -843,18 +843,25 @@ GROQ_MODELS = {
 GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
 _GROQ_SYSTEM_PROMPT = """\
-Sei un assistente giuridico italiano al servizio del cittadino.
+Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino comune.
 
-Le tue regole fondamentali:
-1. Rispondi ESCLUSIVAMENTE basandoti sui testi normativi forniti nel contesto.
-2. Non inventare leggi, articoli o interpretazioni non presenti nel contesto.
-3. Cita SEMPRE il titolo esatto e l'URN (identificatore univoco) di ogni norma che menzioni.
-4. Usa un linguaggio chiaro e comprensibile al cittadino comune — evita tecnicismi non spiegati.
-5. Indica esplicitamente se una norma è VIGENTE o ABROGATA.
-6. Se la risposta non è ricavabile dal contesto fornito, dichiaralo apertamente.
-7. Concludi sempre con una nota: "Questa risposta si basa sui dati del dataset Normattiva. Per decisioni legali consulta un avvocato."
+IL TUO OBIETTIVO: Rendere la legge comprensibile a chiunque, senza tecnicismi inutili.
 
-NORME ESTRATTE DAL DATABASE NORMATTIVA:
+REGOLE FONDAMENTALI:
+1. Rispondi ESCLUSIVAMENTE basandoti sui testi normativi forniti nel CONTESTO qui sotto.
+2. Non inventare leggi, articoli, importi o scadenze non presenti nel contesto.
+3. Cita SEMPRE per ogni affermazione: titolo della norma + URN tra parentesi quadre. Esempio: [urn:nir:stato:decreto.legislativo:2003-06-30;196]
+4. Indica esplicitamente se la norma citata è VIGENTE ✓ o ABROGATA ✗.
+5. Usa linguaggio semplice, frasi brevi, paragrafi chiari — scrivi come se spiegassi a un amico.
+6. Struttura la risposta con:
+   - **Risposta breve** (1-2 frasi che rispondono direttamente alla domanda)
+   - **In dettaglio** (spiegazione con citazioni)
+   - **Cosa significa per te** (impatto pratico concreto, se rilevante)
+   - **⚠️ Nota legale** (questa è un'analisi basata su dati pubblici Normattiva — per decisioni importanti consulta un avvocato o un CAF)
+7. Se la risposta NON è ricavabile dal contesto, dì esplicitamente: "Le norme disponibili nel dataset non coprono direttamente questo aspetto. Ti consiglio di [azione pratica]."
+8. Per domande su importi, scadenze o agevolazioni: cita sempre l'anno della norma — la legge può essere cambiata.
+
+NORME ESTRATTE DAL DATABASE NORMATTIVA (190.000+ leggi vigenti):
 {context}
 """
 
@@ -5181,11 +5188,366 @@ def _mvp_d_conversational(db):
                     st.session_state.pop("mvp_d_open_urn", None)
                     st.rerun()
 
+    user_input = st.chat_message("assistant") if False else None  # placeholder guard
     user_input = st.chat_input("Scrivi liberamente — cerca, chiedi, esplora…", key="mvp-d-input")
     if user_input:
         st.session_state["mvp_d_messages"].append({"role": "user", "content": user_input})
         st.session_state["mvp_d_pending"] = user_input
         st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────
+# CITIZEN MVP — clean single-experience interface
+# ─────────────────────────────────────────────────────────────────
+
+_CITIZEN_CSS = """<style>
+/* ── Global ── */
+[data-testid="stAppViewContainer"] > .main { background: #f0f4ff; }
+.block-container { padding: 1.2rem 1.8rem 4rem; max-width: 900px; }
+@media (max-width: 768px) {
+    [data-testid="stSidebar"] { display: none !important; }
+    .block-container { padding: 0.5rem 0.6rem 5rem; }
+    .nv-hero h1 { font-size: 1.5rem !important; }
+}
+/* ── Hero ── */
+.nv-hero {
+    background: linear-gradient(135deg, #0f2057 0%, #1d4ed8 60%, #2563eb 100%);
+    border-radius: 18px; padding: 2rem 2.5rem 1.6rem; margin-bottom: 1.2rem;
+    color: white; text-align: center;
+}
+.nv-hero h1 { font-size: 2.1rem; font-weight: 800; margin: 0 0 0.3rem; letter-spacing: -0.5px; }
+.nv-hero p { font-size: 1.05rem; opacity: 0.88; margin: 0 0 0.2rem; }
+.nv-hero small { opacity: 0.65; font-size: 0.82rem; }
+/* ── Law card ── */
+.nv-card {
+    background: white; border: 1px solid #dbeafe; border-radius: 12px;
+    padding: 0.9rem 1.1rem; margin-bottom: 0.6rem;
+    box-shadow: 0 1px 4px rgba(30,64,175,0.07);
+}
+.nv-card-title { font-weight: 700; font-size: 0.93rem; color: #1e293b; }
+.nv-card-meta { font-size: 0.78rem; color: #64748b; margin-top: 0.15rem; }
+.nv-vigente { color: #16a34a; font-weight: 700; }
+.nv-abrogata { color: #dc2626; font-weight: 700; }
+/* ── AI answer ── */
+.nv-answer {
+    background: white; border-left: 4px solid #2563eb;
+    border-radius: 0 14px 14px 0; padding: 1.1rem 1.4rem;
+    box-shadow: 0 2px 10px rgba(37,99,235,0.08); margin: 0.5rem 0 1rem;
+    font-size: 0.94rem; line-height: 1.75;
+}
+/* ── Topic chip ── */
+.stButton > button[data-testid] { border-radius: 20px !important; }
+/* ── Chat messages ── */
+[data-testid="stChatMessageContent"] { font-size: 0.93rem; line-height: 1.7; }
+</style>"""
+
+
+def _citizen_mvp(db):
+    """Clean citizen-first MVP: AI Chat + Search + Latest + Constitution."""
+    import re as _re
+
+    st.markdown(_CITIZEN_CSS, unsafe_allow_html=True)
+    has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+
+    # ── Full law detail overlay (takes over page when open) ──────
+    open_urn = st.session_state.get("citizen_open_urn")
+    if open_urn and db:
+        try:
+            r = db.conn.execute("SELECT * FROM laws WHERE urn=? LIMIT 1", (open_urn,)).fetchone()
+            law = dict(r) if r else None
+        except Exception:
+            law = None
+        if law:
+            status = _normalize_status(law.get("status"))
+            badge = "🟢 Vigente" if status == "in_force" else "🔴 Abrogata"
+            st.markdown(f"### {law.get('title') or 'N/A'}")
+            st.caption(f"{badge} · {law.get('type','')} · {law.get('year','')} · `{open_urn}`")
+            text = law.get("text") or ""
+            if text:
+                st.text_area(
+                    "Testo integrale", text[:9000] + ("…" if len(text) > 9000 else ""),
+                    height=420, disabled=True, key=f"dettext-{open_urn[:24]}"
+                )
+            else:
+                st.info("Testo non disponibile nel dataset per questa norma.")
+            col_link, col_close = st.columns([3, 1])
+            col_link.link_button(
+                "📄 Apri su Normattiva.it ↗",
+                f"https://www.normattiva.it/uri-res/N2Ls?{open_urn}"
+            )
+            if col_close.button("← Chiudi", key="citizen-close-detail"):
+                st.session_state.pop("citizen_open_urn", None)
+                st.rerun()
+        else:
+            st.warning("Norma non trovata nel database.")
+            if st.button("← Indietro"):
+                st.session_state.pop("citizen_open_urn", None)
+                st.rerun()
+        return  # stop rendering the rest of the page
+
+    # ── Helper: law card ─────────────────────────────────────────
+    def _card(law, key_suffix, expanded=False):
+        urn = law.get("urn") or ""
+        title = (law.get("title") or "N/A")
+        status = _normalize_status(law.get("status"))
+        badge = "🟢 Vigente" if status == "in_force" else "🔴 Abrogata"
+        typ = law.get("type") or ""
+        year = law.get("year") or ""
+        snippet = (law.get("snippet") or (law.get("text") or "")[:320]).strip()
+        safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
+        label = f"{badge}  {title[:72]}"
+        with st.expander(label, expanded=expanded):
+            st.caption(f"{typ} · {year} · `{urn}`")
+            if snippet:
+                st.markdown(f"> {snippet[:380].rstrip()}{'…' if len(snippet) > 380 else ''}")
+            if st.button("📖 Leggi testo completo", key=f"open-{safe}-{key_suffix}"):
+                st.session_state["citizen_open_urn"] = urn
+                st.rerun()
+
+    # ── 4 tabs ───────────────────────────────────────────────────
+    tab_ai, tab_search, tab_latest, tab_const = st.tabs([
+        "💬 Chiedi all'AI",
+        "🔍 Cerca Norme",
+        "🆕 Ultime Norme",
+        "🇮🇹 Costituzione",
+    ])
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 1 — AI CHAT
+    # ═══════════════════════════════════════════════════════════════
+    with tab_ai:
+        st.markdown("""
+        <div class='nv-hero'>
+          <h1>🇮🇹 NormattivaVigente</h1>
+          <p>La legge italiana, spiegata in modo semplice — per ogni cittadino.</p>
+          <small>190.000+ norme vigenti · Powered by Normattiva & Groq AI</small>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if not has_groq:
+            st.warning(
+                "🔑 **GROQ_API_KEY non configurata** — le risposte AI sono disabilitate. "
+                "Configura la variabile nelle impostazioni dello Space per abilitare l'assistente.",
+                icon="⚠️",
+            )
+
+        # Quick-topic chips
+        TOPICS = [
+            ("👶 Congedo parentale", "Quanto dura e come funziona il congedo parentale in Italia?"),
+            ("🏠 Affitto e sfratto", "Quali sono i diritti dell'inquilino in caso di sfratto?"),
+            ("💼 Licenziamento", "Cosa spetta al lavoratore licenziato ingiustamente?"),
+            ("🚗 Codice della strada", "Quali sanzioni sono previste per guida senza patente?"),
+            ("💶 ISEE e agevolazioni", "Come si calcola l'ISEE e a quali bonus dà accesso?"),
+            ("🏥 Diritto alla salute", "A quali prestazioni sanitarie ha diritto ogni cittadino?"),
+            ("📜 Privacy e dati", "Cosa prevede la legge sulla protezione dei dati personali?"),
+            ("🏗️ Permesso di costruire", "Quando serve il permesso di costruire e come si ottiene?"),
+            ("👨‍👩‍👧 Separazione e divorzio", "Come funziona il mantenimento dei figli dopo la separazione?"),
+        ]
+        st.caption("💡 **Argomenti frequenti** — clicca per iniziare:")
+        cols = st.columns(3)
+        for i, (label, question) in enumerate(TOPICS):
+            if cols[i % 3].button(label, key=f"topic-{i}", use_container_width=True):
+                st.session_state["citizen_prefill"] = question
+                st.rerun()
+
+        st.markdown("---")
+
+        # Chat history
+        if "citizen_chat" not in st.session_state:
+            st.session_state["citizen_chat"] = []
+
+        for idx, msg in enumerate(st.session_state["citizen_chat"]):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                laws = msg.get("laws") or []
+                if laws:
+                    with st.expander(f"📚 {len(laws)} norme consultate", expanded=False):
+                        for j, law in enumerate(laws[:8]):
+                            _card(law, f"hist-{idx}-{j}")
+
+        # Input
+        prefill = st.session_state.pop("citizen_prefill", "")
+        question = st.chat_input("Scrivi la tua domanda sulla legge italiana…") or prefill
+
+        if question:
+            st.session_state["citizen_chat"].append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            # Retrieve: FTS with generous limit, prefer vigenti
+            context_laws = []
+            if db:
+                try:
+                    results = db.search_fts(question, limit=50)
+                    vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                    context_laws = vigenti[:12] if vigenti else results[:12]
+                except Exception:
+                    context_laws = []
+
+            with st.chat_message("assistant"):
+                if has_groq and context_laws:
+                    with st.spinner("Consulto le norme e preparo la risposta…"):
+                        answer, err = _call_groq(
+                            question=question,
+                            context_laws=context_laws,
+                            model=GROQ_DEFAULT_MODEL,
+                            max_tokens=1200,
+                            temperature=0.15,
+                        )
+                        reply = answer if answer else f"⚠️ Errore AI: {err}"
+                elif has_groq and not context_laws:
+                    reply = (
+                        "⚠️ Non ho trovato norme correlate nel dataset per questa domanda. "
+                        "Prova a riformulare con parole chiave più specifiche "
+                        "(es.: 'licenziamento', 'affitto', 'IVA', 'congedo')."
+                    )
+                else:
+                    if context_laws:
+                        titles = "\n".join(
+                            f"- **{l.get('title', '')[:68]}** ({l.get('year', '')})"
+                            for l in context_laws[:6]
+                        )
+                        reply = (
+                            f"**Norme trovate nel dataset** (AI non attiva):\n\n{titles}\n\n"
+                            "*Configura `GROQ_API_KEY` per ricevere risposte intelligenti in linguaggio semplice.*"
+                        )
+                    else:
+                        reply = "Nessuna norma trovata. Prova con termini diversi."
+
+                st.markdown(reply)
+                if context_laws:
+                    with st.expander(f"📚 {len(context_laws)} norme consultate dal dataset", expanded=False):
+                        for j, law in enumerate(context_laws[:8]):
+                            _card(law, f"ans-{len(st.session_state['citizen_chat'])}-{j}")
+
+            st.session_state["citizen_chat"].append({
+                "role": "assistant",
+                "content": reply,
+                "laws": context_laws,
+            })
+
+        if st.session_state.get("citizen_chat"):
+            if st.button("🗑️ Nuova conversazione", key="clear-chat"):
+                st.session_state["citizen_chat"] = []
+                st.rerun()
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 2 — SEARCH
+    # ═══════════════════════════════════════════════════════════════
+    with tab_search:
+        st.subheader("🔍 Cerca tra le norme vigenti")
+        sq = st.text_input(
+            "Cerca",
+            key="citizen-search-q",
+            label_visibility="collapsed",
+            placeholder="Parole chiave, titolo, argomento… (es. privacy, IVA, sfratto, sicurezza lavoro)",
+        )
+        f1, f2, f3 = st.columns(3)
+        type_filter = f1.selectbox(
+            "Tipo norma", ["(tutti)", "LEGGE", "DECRETO LEGISLATIVO", "DECRETO LEGGE",
+                           "DECRETO DEL PRESIDENTE DELLA REPUBBLICA", "REGOLAMENTO"],
+            key="cs-type"
+        )
+        year_from = f2.number_input("Anno da", min_value=1800, max_value=2030, value=1948, step=1, key="cs-year-from")
+        year_to = f3.number_input("Anno a", min_value=1800, max_value=2030, value=2026, step=1, key="cs-year-to")
+
+        if sq.strip() and db:
+            try:
+                results = db.search_fts(sq.strip(), limit=80)
+                if type_filter != "(tutti)":
+                    results = [r for r in results if (r.get("type") or "").upper() == type_filter]
+                results = [r for r in results if year_from <= int(r.get("year") or 0) <= year_to]
+                vigenti = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
+                st.caption(f"**{len(vigenti)} norme vigenti** (di {len(results)} totali)")
+                for j, law in enumerate(vigenti[:30]):
+                    _card(law, f"sr-{j}")
+                if not vigenti and results:
+                    st.info("Nessuna norma vigente — mostrando norme di qualsiasi stato:")
+                    for j, law in enumerate(results[:15]):
+                        _card(law, f"sr-all-{j}")
+                elif not results:
+                    st.info("Nessun risultato. Prova con termini diversi o rimuovi i filtri.")
+            except Exception as e:
+                st.error(f"Errore ricerca: {e}")
+        elif not sq.strip():
+            st.info("💡 Inserisci un termine di ricerca per trovare le norme vigenti.")
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 3 — LATEST
+    # ═══════════════════════════════════════════════════════════════
+    with tab_latest:
+        st.subheader("🆕 Ultime norme pubblicate")
+        st.caption("Le norme vigenti più recenti nel dataset Normattiva.")
+        if db:
+            try:
+                rows = db.conn.execute(
+                    "SELECT urn, title, type, year, date, status FROM laws "
+                    "WHERE status='in_force' ORDER BY date DESC LIMIT 40"
+                ).fetchall()
+                if rows:
+                    for j, r in enumerate(rows):
+                        _card(dict(r), f"lat-{j}")
+                else:
+                    st.info("Nessuna norma trovata nel database.")
+            except Exception as e:
+                try:
+                    rows = db.conn.execute(
+                        "SELECT urn, title, type, year, status FROM laws ORDER BY year DESC LIMIT 40"
+                    ).fetchall()
+                    for j, r in enumerate(rows):
+                        _card(dict(r), f"lat2-{j}")
+                except Exception as e2:
+                    st.error(f"Errore: {e2}")
+        else:
+            st.warning("Database non disponibile.")
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 4 — CONSTITUTION
+    # ═══════════════════════════════════════════════════════════════
+    with tab_const:
+        st.subheader("🇮🇹 Costituzione della Repubblica Italiana")
+        st.caption("Cerca un principio, un diritto o un articolo della Costituzione.")
+        cq = st.text_input(
+            "Cerca",
+            key="citizen-const-q",
+            label_visibility="collapsed",
+            placeholder="Es.: diritto al lavoro, libertà di stampa, salute, famiglia…",
+        )
+        if cq.strip() and db:
+            try:
+                results = db.search_fts(f"costituzione {cq.strip()}", limit=25)
+                const_rows = [
+                    r for r in results
+                    if "costituzione" in (r.get("urn") or "").lower()
+                    or "costituzione" in (r.get("title") or "").lower()
+                ]
+                if not const_rows:
+                    const_rows = results[:10]
+                if const_rows:
+                    for j, law in enumerate(const_rows):
+                        _card(law, f"co-{j}")
+                else:
+                    st.info("Nessun risultato. Prova con: 'lavoro', 'libertà', 'salute', 'uguaglianza'.")
+            except Exception as e:
+                st.error(f"Errore: {e}")
+        else:
+            st.markdown("""
+**I diritti fondamentali della Repubblica Italiana**
+
+| Articolo | Principio |
+|----------|-----------|
+| Art. 1 | La Repubblica è fondata sul **lavoro** |
+| Art. 2 | Diritti inviolabili dell'**uomo** |
+| Art. 3 | **Uguaglianza** di tutti i cittadini |
+| Art. 13 | **Libertà personale** |
+| Art. 21 | **Libertà di espressione** |
+| Art. 32 | Diritto alla **salute** |
+| Art. 36 | Diritto a una **retribuzione equa** |
+| Art. 37 | **Parità uomo-donna** nel lavoro |
+| Art. 38 | Diritto alla **previdenza sociale** |
+
+*Cerca un argomento nel campo sopra per trovare le norme correlate.*
+            """)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -5275,29 +5637,8 @@ def main():
             "🔧 Navigazione classica (avanzata)", value=False, key="adv-mode"
         )
         if not use_advanced:
-            # MVP showcase — 4 interface prototypes in tabs
-            st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
             db = load_db()
-            _render_groq_sidebar_chat(db)
-            st.title("🇮🇹 NormattivaVigente")
-            st.caption(
-                "Scegli l'interfaccia che preferisci — tutte e 4 sono collegate allo stesso "
-                "dataset Normattiva con oltre 190.000 leggi."
-            )
-            tab_a, tab_b, tab_c, tab_d = st.tabs([
-                "💬 A — Chat-First",
-                "⚡ B — Split-Screen",
-                "🗂️ C — Hub + AI",
-                "🔄 D — Conversazionale",
-            ])
-            with tab_a:
-                _mvp_a_chat_first(db)
-            with tab_b:
-                _mvp_b_split_screen(db)
-            with tab_c:
-                _mvp_c_hub_sidebar(db)
-            with tab_d:
-                _mvp_d_conversational(db)
+            _citizen_mvp(db)
             return  # skip classic navigation below
 
         mobile_simple = st.sidebar.checkbox("Modalità mobile semplificata", value=False, key="mobile-simple")
