@@ -1229,7 +1229,7 @@ def page_citizen_hub():
         st.rerun()
 
     if db:
-        st.subheader("Legal Domain Distribution")
+        st.subheader("📊 Distribuzione per materia giuridica")
         try:
             domains = db.conn.execute(
                 "SELECT domain_cluster, COUNT(*) as cnt FROM law_metadata "
@@ -1238,8 +1238,8 @@ def page_citizen_hub():
             ).fetchall()
             if domains:
                 fig = px.bar(x=[d[0] for d in domains], y=[d[1] for d in domains],
-                             title="Laws by Legal Domain",
-                             labels={"x": "Domain", "y": "Count"})
+                             title="Norme vigenti per materia",
+                             labels={"x": "Materia", "y": "Numero di norme"})
                 st.plotly_chart(fig, width='stretch')
         except Exception:
             pass
@@ -2822,9 +2822,13 @@ def page_law_detail():
     law = dict(law_row)
     st.subheader(law.get("title", "Untitled"))
     st.caption(f"{_status_chip(law.get('status'))} · {_status_explainer(law.get('status'))}")
-    with st.expander("Why am I seeing this law?"):
+    with st.expander("ℹ️ Cosa vedo in questa pagina?" if IS_SEARCH else "Why am I seeing this law?"):
         if IS_SEARCH:
-            st.write("Questa scheda mostra una norma vigente con metadati, testo, citazioni e collegamenti utili per orientarti rapidamente.")
+            st.write(
+                "Questa scheda mostra tutti i dettagli di una norma vigente: testo completo, "
+                "analisi AI, citazioni ad altre norme e rete di collegamento. "
+                "Usa la tab **🤖 Analisi AI** per fare domande in linguaggio semplice."
+            )
         else:
             st.write(
                 "This page shows one act in VOM context: current status (V/O) and historical versions (M)."
@@ -2836,200 +2840,195 @@ def page_law_detail():
     )
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Type", law.get("type", "N/A"))
-    col2.metric("Year", law.get("year", "N/A"))
-    col3.metric("Articles", law.get("article_count", 0))
+    col1.metric("Tipo" if IS_SEARCH else "Type", law.get("type", "N/A"))
+    col2.metric("Anno" if IS_SEARCH else "Year", law.get("year", "N/A"))
+    col3.metric("Articoli" if IS_SEARCH else "Articles", law.get("article_count", 0))
     if law.get("importance_score"):
-        col4.metric("Importance (PageRank)", f"{law['importance_score']:.4f}")
+        col4.metric("Importanza" if IS_SEARCH else "Importance (PageRank)", f"{law['importance_score']:.4f}")
 
     if IS_SEARCH:
-        top_simple, top_text, top_ai, top_links = st.tabs(["🪄 Vista Semplice", "📄 Testo Integrale", "🤖 Analisi AI", "🔗 Citazioni e Rete"])
+        top_simple, top_ai, top_text, top_links = st.tabs(["🪄 Panoramica", "🤖 Chiedi all'AI", "📄 Testo Integrale", "🔗 Citazioni e Rete"])
     else:
         top_simple, top_timeline, top_expert = st.tabs(["🪄 Simple View", "🕰️ Timeline View", "🧠 Expert View"])
 
     with top_simple:
         s1, s2 = st.columns([1, 2])
         with s1:
-            st.write(f"**Status**: {_status_chip(law.get('status'))} {_status_label(law.get('status'))}")
-            if IS_SEARCH:
-                with top_text:
+            st.write(f"**Stato**: {_status_chip(law.get('status'))} {_status_label(law.get('status'))}" if IS_SEARCH else f"**Status**: {_status_chip(law.get('status'))} {_status_label(law.get('status'))}")
+        if IS_SEARCH:
+            pass  # remaining detail in dedicated tabs below
+
+    if IS_SEARCH:
+        with top_ai:
+            _render_law_ai_tab(law, db, urn)
+
+        with top_text:
+            text = law.get("text", "")
+            if text:
+                st.caption("Scorri il testo per leggere la norma. Usa la tab 🤖 per fare domande su passaggi specifici.")
+            st.text_area("Testo della norma", text or "(Testo non disponibile nel dataset)", height=500, disabled=True, key="law-text-citizen")
+
+        with top_links:
+            tab2, tab3 = st.tabs(["🔗 Citazioni", "🎯 Grafo + correlate"])
+            with tab2:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write("**Norme che citano questa**")
+                    cited_by = db.get_citations_incoming(urn, limit=30)
+                    st.write(f"Trovate: **{len(cited_by):,}**")
+                    for cit in cited_by[:15]:
+                        cited_urn = cit.get("citing_urn") or cit.get("urn")
+                        st.write(f"- {cited_urn}")
+                with c2:
+                    st.write("**Norme citate da questa**")
+                    cites = db.get_citations_outgoing(urn, limit=30)
+                    st.write(f"Trovate: **{len(cites):,}**")
+                    for cit in cites[:15]:
+                        cited_urn = cit.get("cited_urn") or cit.get("urn")
+                        st.write(f"- {cited_urn}")
+            with tab3:
+                try:
+                    neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
+                    if neighborhood and neighborhood.get("nodes"):
+                        _render_graph_plotly(
+                            neighborhood["nodes"],
+                            neighborhood["edges"],
+                            title=(f"Rete citazioni di {law.get('title', urn)[:50]}"),
+                        )
+                except Exception:
+                    st.info("Grafo non disponibile per questa norma.")
+                try:
+                    related = db.find_related_laws(urn, limit=15)
+                    if related:
+                        st.subheader("Norme correlate")
+                        for r in related[:10]:
+                            _render_law_card(r, db, key_prefix="detail-related-search")
+                except Exception:
+                    pass
+    with top_timeline if not IS_SEARCH else st.container():
+        if IS_SEARCH:
+            pass
+        else:
+            mv_db_path = _find_multivigente_db_path()
+            if not mv_db_path:
+                st.info("Historical timeline DB is not available in this session.")
+            else:
+                try:
+                    import sqlite3 as _sqlite3
+
+                    mv_conn = _sqlite3.connect(str(mv_db_path))
+                    mv_conn.row_factory = _sqlite3.Row
+                    versions = mv_conn.execute(
+                        "SELECT version_date, title, article_count, text_length, text "
+                        "FROM law_versions WHERE law_urn = ? ORDER BY version_date",
+                        (urn,),
+                    ).fetchall()
+                    original = mv_conn.execute(
+                        "SELECT title, date, text_length, text FROM original_acts WHERE law_urn = ? LIMIT 1",
+                        (urn,),
+                    ).fetchone()
+                    mv_conn.close()
+
+                    st.write(f"M versions: **{len(versions):,}**")
+                    st.write(f"O originale available: **{'yes' if original else 'no'}**")
+
+                    if versions:
+                        df = pd.DataFrame(
+                            [
+                                {
+                                    "Version date": v["version_date"],
+                                    "Title": (v["title"] or "")[:90],
+                                    "Articles": v["article_count"],
+                                    "Text length": v["text_length"],
+                                }
+                                for v in versions
+                            ]
+                        )
+                        st.dataframe(df, width='stretch', hide_index=True)
+                        dates = [v["version_date"] for v in versions]
+                        selected_date = st.selectbox("Read specific M version", dates, key="detail-m-version")
+                        selected_row = next((v for v in versions if v["version_date"] == selected_date), None)
+                        if selected_row:
+                            st.text_area(
+                                "Selected version text",
+                                (selected_row["text"] or "")[:5000],
+                                height=300,
+                                disabled=True,
+                                key="detail-m-text",
+                            )
+                    elif not original:
+                        st.warning("No historical records found for this URN in M/O tables.")
+
+                    if original:
+                        with st.expander("Original O-track text"):
+                            st.write(f"**Date**: {original['date']}")
+                            st.text_area(
+                                "Original text",
+                                (original["text"] or "")[:5000],
+                                height=300,
+                                disabled=True,
+                                key="detail-o-text",
+                            )
+                except Exception as e:
+                    st.error(f"Timeline load failed: {e}")
+    with top_expert if not IS_SEARCH else st.container():
+        if IS_SEARCH:
+            pass
+        else:
+            tab1, tab2, tab3 = st.tabs(["📄 Full Text", "🔗 Citations", "🎯 Graph + Related"])
+
+            with tab1:
+                e1, e2 = st.columns([1, 2])
+                with e1:
+                    st.subheader("Metadata")
+                    st.write(f"**URN**: `{law.get('urn')}`")
+                    st.write(f"**Date**: {law.get('date', 'N/A')}")
+                    st.write(f"**Status**: {_status_label(law.get('status'))}")
+                    st.write(f"**Characters**: {law.get('text_length', 0):,}")
+                with e2:
                     text = law.get("text", "")
-                    st.text_area("Testo della norma", text, height=420, disabled=True, key="law-text-citizen")
+                    st.text_area("Content", text, height=420, disabled=True, key="law-text")
+                    ref_table = _urn_inline_links(text, db)
+                    if ref_table:
+                        with st.expander("📎 Leggi citate nel testo"):
+                            st.markdown(ref_table)
 
-                with top_links:
-                    tab2, tab3 = st.tabs(["🔗 Citazioni", "🎯 Grafo + correlate"])
-                    with tab2:
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.write("**Norme che citano questa**")
-                            cited_by = db.get_citations_incoming(urn, limit=30)
-                            st.write(f"Trovate: **{len(cited_by):,}**")
-                            for cit in cited_by[:15]:
-                                cited_urn = cit.get("citing_urn") or cit.get("urn")
-                                st.write(f"- {cited_urn}")
-                        with c2:
-                            st.write("**Norme citate da questa**")
-                            cites = db.get_citations_outgoing(urn, limit=30)
-                            st.write(f"Trovate: **{len(cites):,}**")
-                            for cit in cites[:15]:
-                                cited_urn = cit.get("cited_urn") or cit.get("urn")
-                                st.write(f"- {cited_urn}")
-                    with tab3:
-                        try:
-                            neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
-                            if neighborhood and neighborhood.get("nodes"):
-                                _render_graph_plotly(
-                                    neighborhood["nodes"],
-                                    neighborhood["edges"],
-                                    title=(f"Rete citazioni di {law.get('title', urn)[:50]}"),
-                                )
-                        except Exception:
-                            st.info("Grafo non disponibile per questa norma.")
-                        try:
-                            related = db.find_related_laws(urn, limit=15)
-                            if related:
-                                st.subheader("Norme correlate")
-                                for r in related[:10]:
-                                    _render_law_card(r, db, key_prefix="detail-related-search")
-                        except Exception:
-                            pass
-                with top_ai:
-                    _render_law_ai_tab(law, db, urn)
-            with top_timeline if not IS_SEARCH else st.container():
-                if IS_SEARCH:
+            with tab2:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write("**Incoming citations**")
+                    cited_by = db.get_citations_incoming(urn, limit=30)
+                    st.write(f"Found: **{len(cited_by):,}**")
+                    for cit in cited_by[:15]:
+                        cited_urn = cit.get("citing_urn") or cit.get("urn")
+                        st.write(f"- {cited_urn}")
+                with c2:
+                    st.write("**Outgoing citations**")
+                    cites = db.get_citations_outgoing(urn, limit=30)
+                    st.write(f"Found: **{len(cites):,}**")
+                    for cit in cites[:15]:
+                        cited_urn = cit.get("cited_urn") or cit.get("urn")
+                        st.write(f"- {cited_urn}")
+
+            with tab3:
+                try:
+                    neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
+                    if neighborhood and neighborhood.get("nodes"):
+                        _render_graph_plotly(
+                            neighborhood["nodes"],
+                            neighborhood["edges"],
+                            title=(f"Citation network of {law.get('title', urn)[:50]}"),
+                        )
+                except Exception:
+                    st.info("Graph not available for this law.")
+                try:
+                    related = db.find_related_laws(urn, limit=15)
+                    if related:
+                        st.subheader("Related laws")
+                        for r in related[:10]:
+                            _render_law_card(r, db, key_prefix="detail-related")
+                except Exception:
                     pass
-                else:
-                    mv_db_path = _find_multivigente_db_path()
-                    if not mv_db_path:
-                        st.info("Historical timeline DB is not available in this session.")
-                    else:
-                        try:
-                            import sqlite3 as _sqlite3
-
-                            mv_conn = _sqlite3.connect(str(mv_db_path))
-                            mv_conn.row_factory = _sqlite3.Row
-                            versions = mv_conn.execute(
-                                "SELECT version_date, title, article_count, text_length, text "
-                                "FROM law_versions WHERE law_urn = ? ORDER BY version_date",
-                                (urn,),
-                            ).fetchall()
-                            original = mv_conn.execute(
-                                "SELECT title, date, text_length, text FROM original_acts WHERE law_urn = ? LIMIT 1",
-                                (urn,),
-                            ).fetchone()
-                            mv_conn.close()
-
-                            st.write(f"M versions: **{len(versions):,}**")
-                            st.write(f"O originale available: **{'yes' if original else 'no'}**")
-
-                            if versions:
-                                df = pd.DataFrame(
-                                    [
-                                        {
-                                            "Version date": v["version_date"],
-                                            "Title": (v["title"] or "")[:90],
-                                            "Articles": v["article_count"],
-                                            "Text length": v["text_length"],
-                                        }
-                                        for v in versions
-                                    ]
-                                )
-                                st.dataframe(df, width='stretch', hide_index=True)
-                                dates = [v["version_date"] for v in versions]
-                                selected_date = st.selectbox("Read specific M version", dates, key="detail-m-version")
-                                selected_row = next((v for v in versions if v["version_date"] == selected_date), None)
-                                if selected_row:
-                                    st.text_area(
-                                        "Selected version text",
-                                        (selected_row["text"] or "")[:5000],
-                                        height=300,
-                                        disabled=True,
-                                        key="detail-m-text",
-                                    )
-                            elif not original:
-                                st.warning("No historical records found for this URN in M/O tables.")
-
-                            if original:
-                                with st.expander("Original O-track text"):
-                                    st.write(f"**Date**: {original['date']}")
-                                    st.text_area(
-                                        "Original text",
-                                        (original["text"] or "")[:5000],
-                                        height=300,
-                                        disabled=True,
-                                        key="detail-o-text",
-                                    )
-                        except Exception as e:
-                            st.error(f"Timeline load failed: {e}")
-            with top_expert if not IS_SEARCH else st.container():
-                if IS_SEARCH:
-                    pass
-                else:
-                    tab1, tab2, tab3 = st.tabs(["📄 Full Text", "🔗 Citations", "🎯 Graph + Related"])
-
-                    with tab1:
-                        e1, e2 = st.columns([1, 2])
-                        with e1:
-                            st.subheader("Metadata")
-                            st.write(f"**URN**: `{law.get('urn')}`")
-                            st.write(f"**Date**: {law.get('date', 'N/A')}")
-                            st.write(f"**Status**: {_status_label(law.get('status'))}")
-                            st.write(f"**Characters**: {law.get('text_length', 0):,}")
-                        with e2:
-                            text = law.get("text", "")
-                            st.text_area("Content", text, height=420, disabled=True, key="law-text")
-                            ref_table = _urn_inline_links(text, db)
-                            if ref_table:
-                                with st.expander("📎 Leggi citate nel testo"):
-                                    st.markdown(ref_table)
-
-                    with tab2:
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.write("**Incoming citations**")
-                            cited_by = db.get_citations_incoming(urn, limit=30)
-                            st.write(f"Found: **{len(cited_by):,}**")
-                            for cit in cited_by[:15]:
-                                cited_urn = cit.get("citing_urn") or cit.get("urn")
-                                st.write(f"- {cited_urn}")
-                        with c2:
-                            st.write("**Outgoing citations**")
-                            cites = db.get_citations_outgoing(urn, limit=30)
-                            st.write(f"Found: **{len(cites):,}**")
-                            for cit in cites[:15]:
-                                cited_urn = cit.get("cited_urn") or cit.get("urn")
-                                st.write(f"- {cited_urn}")
-
-                    with tab3:
-                        try:
-                            neighborhood = db.get_citation_neighborhood(urn, depth=2, max_nodes=50)
-                            if neighborhood and neighborhood.get("nodes"):
-                                _render_graph_plotly(
-                                    neighborhood["nodes"],
-                                    neighborhood["edges"],
-                                    title=(f"Citation network of {law.get('title', urn)[:50]}"),
-                                )
-                        except Exception:
-                            st.info("Graph not available for this law.")
-                        try:
-                            related = db.find_related_laws(urn, limit=15)
-                            if related:
-                                st.subheader("Related laws")
-                                for r in related[:10]:
-                                    _render_law_card(r, db, key_prefix="detail-related")
-                        except Exception:
-                            pass
-                st.info("Graph not available for this law.")
-            try:
-                related = db.find_related_laws(urn, limit=15)
-                if related:
-                    rdf = pd.DataFrame([
-                        {"URN": r.get("urn"), "Title": (r.get("title") or "")[:100], "Year": r.get("year")}
-                        for r in related
-                    ])
-                    st.dataframe(rdf, width='stretch', hide_index=True)
-            except Exception:
-                st.info("Related law analysis not available.")
 
 
 def page_citations():
@@ -4015,20 +4014,22 @@ def page_groq_assistant():
 
     # ── Presets ──────────────────────────────────────────────────
     st.subheader("💬 Fai la tua domanda")
-    st.caption("Oppure scegli un esempio:")
-    preset_cols = st.columns(3)
+    st.caption("Oppure scegli un esempio per iniziare subito:")
     PRESETS = [
         "Quali sono i miei diritti in caso di licenziamento?",
+        "Qual è il programma scolastico previsto dalla legge per quest'anno?",
         "Come funziona la tutela della privacy online?",
         "Quando scatta l'obbligo di pagare l'IMU?",
         "Quali norme regolano i contratti di locazione?",
         "Cosa prevede la legge sul codice della strada per le multe?",
-        "Quali sono le tutele previste per i lavoratori subordinati?",
     ]
     if "groq_prefill" not in st.session_state:
         st.session_state["groq_prefill"] = ""
-    for i, p in enumerate(PRESETS[:3]):
-        if preset_cols[i % 3].button(p, key=f"groq-preset-{i}"):
+    preset_row1 = st.columns(3)
+    preset_row2 = st.columns(3)
+    for i, p in enumerate(PRESETS):
+        row = preset_row1 if i < 3 else preset_row2
+        if row[i % 3].button(p, key=f"groq-preset-{i}", use_container_width=True):
             st.session_state["groq_prefill"] = p
             st.rerun()
 
@@ -4498,7 +4499,7 @@ def _render_groq_sidebar_chat(db):
     """Persistent compact AI chat widget shown in the sidebar on every page."""
     has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
 
-    with st.sidebar.expander("🤖 Chiedi all'AI", expanded=False):
+    with st.sidebar.expander("🤖 Chiedi all'AI", expanded=True):
         if not db:
             st.caption("Database non disponibile.")
             return
