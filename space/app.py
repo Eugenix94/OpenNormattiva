@@ -836,11 +836,13 @@ def _render_graph_plotly(nodes, edges, title="Citation Graph"):
 # ─────────────────────────────────────────────────────────────────
 
 GROQ_MODELS = {
+    "auto-balanced": "Auto bilanciato (8B economico -> 70B per domande complesse)",
     "llama-3.3-70b-versatile": "Llama 3.3 70B (Migliore qualità)",
+    "llama-3.1-8b-instant": "Llama 3.1 8B Instant (Economico)",
     "llama3-8b-8192": "Llama 3 8B (Veloce)",
     "mixtral-8x7b-32768": "Mixtral 8x7B (Contesto lungo)",
 }
-GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+GROQ_DEFAULT_MODEL = "auto-balanced"
 
 _GROQ_SYSTEM_PROMPT = """\
 Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino comune e dei principi della Repubblica Italiana.
@@ -886,11 +888,27 @@ def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _select_balanced_groq_model(question: str, context_laws: list) -> str:
+    """Choose a cost-efficient Groq model, escalating on legal complexity."""
+    q = (question or "").lower()
+    q_len = len(q)
+    law_count = len(context_laws or [])
+    complex_markers = [
+        "articolo", "art.", "comma", "decreto", "costituzione", "giurisprudenza",
+        "abrog", "retroatt", "prescrizion", "sanzion", "responsabil",
+    ]
+    marker_hits = sum(1 for m in complex_markers if m in q)
+
+    if q_len > 240 or law_count >= 8 or marker_hits >= 2:
+        return "llama-3.3-70b-versatile"
+    return "llama-3.1-8b-instant"
+
+
 def _call_groq(
     question: str,
     context_laws: list,
     model: str = GROQ_DEFAULT_MODEL,
-    max_tokens: int = 1500,
+    max_tokens: int = 1000,
     temperature: float = 0.1,
 ) -> tuple[str | None, str | None]:
     """
@@ -910,9 +928,13 @@ def _call_groq(
     system_prompt = _GROQ_SYSTEM_PROMPT.format(context=context)
 
     try:
+        chosen_model = model
+        if model == "auto-balanced":
+            chosen_model = _select_balanced_groq_model(question, context_laws)
+
         client = Groq(api_key=api_key)
         response = client.chat.completions.create(
-            model=model,
+            model=chosen_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question},
@@ -5497,7 +5519,7 @@ def _citizen_mvp(db):
                             question=question,
                             context_laws=context_laws,
                             model=GROQ_DEFAULT_MODEL,
-                            max_tokens=1200,
+                            max_tokens=900,
                             temperature=0.15,
                         )
                         reply = answer if answer else f"⚠️ Errore AI: {err}"
