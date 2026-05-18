@@ -836,13 +836,14 @@ def _render_graph_plotly(nodes, edges, title="Citation Graph"):
 # ─────────────────────────────────────────────────────────────────
 
 GROQ_MODELS = {
+    "expert-vigente": "Expert Vigente (70B ottimizzato per precisione giuridica)",
     "auto-balanced": "Auto bilanciato (8B economico -> 70B per domande complesse)",
     "llama-3.3-70b-versatile": "Llama 3.3 70B (Migliore qualità)",
     "llama-3.1-8b-instant": "Llama 3.1 8B Instant (Economico)",
     "llama3-8b-8192": "Llama 3 8B (Veloce)",
     "mixtral-8x7b-32768": "Mixtral 8x7B (Contesto lungo)",
 }
-GROQ_DEFAULT_MODEL = "auto-balanced"
+GROQ_DEFAULT_MODEL = "expert-vigente"
 
 _GROQ_SYSTEM_PROMPT = """\
 Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino comune e dei principi della Repubblica Italiana.
@@ -864,6 +865,7 @@ REGOLE FONDAMENTALI:
 7. Se la risposta NON è ricavabile dal contesto, dì esplicitamente: "Le norme disponibili nel dataset non coprono direttamente questo aspetto. Ti consiglio di [azione pratica]."
 8. Per domande su importi, scadenze o agevolazioni: cita sempre l'anno della norma — la legge può essere cambiata.
 9. Quando pertinente, evidenzia il collegamento ai principi costituzionali della Repubblica (uguaglianza, tutela del lavoro, salute, famiglia, istruzione, libertà).
+10. Salvo richiesta esplicita di storia normativa, privilegia norme VIGENTI e segnala chiaramente eventuali riferimenti abrogati.
 
 NORME ESTRATTE DAL DATABASE NORMATTIVA (190.000+ leggi vigenti):
 {context}
@@ -899,16 +901,32 @@ def _select_balanced_groq_model(question: str, context_laws: list) -> str:
     ]
     marker_hits = sum(1 for m in complex_markers if m in q)
 
-    if q_len > 240 or law_count >= 8 or marker_hits >= 2:
+    if q_len > 180 or law_count >= 6 or marker_hits >= 1:
         return "llama-3.3-70b-versatile"
     return "llama-3.1-8b-instant"
+
+
+def _extract_urns_from_text(text: str) -> set:
+    import re
+    if not text:
+        return set()
+    return set(re.findall(r"urn:nir:[a-zA-Z0-9.:;\-]+", text, flags=re.IGNORECASE))
+
+
+def _has_strong_citations(answer: str, context_laws: list, min_count: int = 2) -> bool:
+    """Answer is valid only if it cites at least min_count URNs from retrieved context."""
+    cited = _extract_urns_from_text(answer or "")
+    if len(cited) < min_count:
+        return False
+    ctx = {str(l.get("urn", "")).lower() for l in (context_laws or []) if l.get("urn")}
+    return sum(1 for u in cited if u.lower() in ctx) >= min_count
 
 
 def _call_groq(
     question: str,
     context_laws: list,
     model: str = GROQ_DEFAULT_MODEL,
-    max_tokens: int = 1000,
+    max_tokens: int = 1200,
     temperature: float = 0.1,
 ) -> tuple[str | None, str | None]:
     """
@@ -931,6 +949,8 @@ def _call_groq(
         chosen_model = model
         if model == "auto-balanced":
             chosen_model = _select_balanced_groq_model(question, context_laws)
+        elif model == "expert-vigente":
+            chosen_model = "llama-3.3-70b-versatile"
 
         st.session_state["last_groq_model_used"] = chosen_model
         client = Groq(api_key=api_key)
@@ -944,6 +964,31 @@ def _call_groq(
             temperature=temperature,
         )
         answer = response.choices[0].message.content
+
+        # Expert safeguard: if citations are weak, force one regeneration on 70B with strict citation instruction.
+        if not _has_strong_citations(answer, context_laws, min_count=2):
+            retry_messages = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{question}\n\n"
+                        "Rispondi di nuovo includendo almeno 2 citazioni URN presenti nel contesto, "
+                        "con breve estratto testuale per ciascuna prova normativa."
+                    ),
+                },
+            ]
+            retry = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=retry_messages,
+                max_tokens=max_tokens,
+                temperature=0.05,
+            )
+            retry_answer = retry.choices[0].message.content
+            if retry_answer:
+                answer = retry_answer
+                st.session_state["last_groq_model_used"] = "llama-3.3-70b-versatile"
+
         return answer, None
     except Exception as e:
         return None, f"Errore Groq API: {e}"
@@ -5393,8 +5438,17 @@ def _citizen_mvp(db):
         if not combined:
             return []
 
-        vigenti = [r for r in combined if _normalize_status(r.get("status")) == "in_force"]
-        ranked = vigenti if vigenti else combined
+        q_tokens = set((kw or base).lower().split())
+
+        def _score(r: dict) -> tuple:
+            title = str(r.get("title") or "").lower()
+            text = str(r.get("snippet") or r.get("text") or "").lower()
+            overlap = sum(1 for t in q_tokens if t and (t in title or t in text))
+            is_vigente = 1 if _normalize_status(r.get("status")) == "in_force" else 0
+            has_year = 1 if r.get("year") else 0
+            return (is_vigente, overlap, has_year)
+
+        ranked = sorted(combined, key=_score, reverse=True)
         return ranked[:limit]
 
     def _law_proof_excerpt(law: dict, max_chars: int = 220) -> str:
@@ -5521,13 +5575,13 @@ def _citizen_mvp(db):
                             question=question,
                             context_laws=context_laws,
                             model=GROQ_DEFAULT_MODEL,
-                            max_tokens=900,
-                            temperature=0.15,
+                            max_tokens=1200,
+                            temperature=0.1,
                         )
                         used_model = st.session_state.get("last_groq_model_used")
                         reply = answer if answer else f"⚠️ Errore AI: {err}"
-                        # Guardrail: if the model omits URN citations, force an explicit evidence footer.
-                        if answer and "urn:nir:" not in answer.lower():
+                        # Guardrail: if citations are weak, force explicit evidence footer from dataset.
+                        if answer and not _has_strong_citations(answer, context_laws, min_count=2):
                             min_refs = []
                             for law in context_laws[:3]:
                                 urn = law.get("urn") or "N/A"
@@ -5535,7 +5589,7 @@ def _citizen_mvp(db):
                                 min_refs.append(f"- {title} [{urn}]")
                             reply = (
                                 f"{answer}\n\n"
-                                "⚠️ **Verifica automatica citazioni**: la risposta AI non include URN esplicite. "
+                                "⚠️ **Verifica automatica citazioni**: la risposta AI non soddisfa i requisiti minimi di prova normativa. "
                                 "Riporto riferimenti normativi minimi dal dataset:\n"
                                 f"{'\n'.join(min_refs)}"
                             )
