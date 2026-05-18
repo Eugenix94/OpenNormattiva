@@ -35,6 +35,7 @@ import logging
 import threading
 import math
 import re
+import time
 
 # Setup paths for imports
 _app_dir = Path(__file__).parent
@@ -923,6 +924,50 @@ def _has_strong_citations(answer: str, context_laws: list, min_count: int = 2) -
     return sum(1 for u in cited if u.lower() in ctx) >= min_count
 
 
+def _record_ai_telemetry(event: dict) -> None:
+    """Store compact AI runtime diagnostics in session state for auditing."""
+    try:
+        logs = st.session_state.get("ai_telemetry")
+        if not isinstance(logs, list):
+            logs = []
+        logs.append(event)
+        st.session_state["ai_telemetry"] = logs[-100:]
+    except Exception:
+        pass
+
+
+def _build_accountable_fallback(question: str, context_laws: list, reason: str) -> str:
+    """Deterministic fallback answer anchored to retrieved laws and excerpts."""
+    if not context_laws:
+        return (
+            "Le norme disponibili nel dataset non coprono direttamente questo aspetto. "
+            "Riformula indicando area giuridica, soggetto e periodo (es. 'congedo parentale dipendente privato 2024')."
+        )
+
+    lines = [
+        "**Risposta breve**",
+        "In base al dataset, non posso fornire una sintesi AI pienamente validata in questo momento.",
+        "",
+        "**Prove normative minime (dataset)**",
+    ]
+    for law in context_laws[:4]:
+        urn = law.get("urn") or "N/A"
+        title = law.get("title") or "N/A"
+        status = "VIGENTE ✓" if _normalize_status(law.get("status")) == "in_force" else "ABROGATA ✗"
+        text = (law.get("snippet") or law.get("text") or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        excerpt = text[:220] + ("…" if len(text) > 220 else "") if text else "Estratto non disponibile nel dataset."
+        lines.append(f"- **{title}** [{urn}] — {status}")
+        lines.append(f"  \"{excerpt}\"")
+
+    lines.extend([
+        "",
+        "**Nota**",
+        f"Fallback attivato per: {reason}.",
+    ])
+    return "\n".join(lines)
+
+
 def _call_groq(
     question: str,
     context_laws: list,
@@ -946,6 +991,7 @@ def _call_groq(
     context = _build_groq_context(context_laws)
     system_prompt = _GROQ_SYSTEM_PROMPT.format(context=context)
 
+    started = time.time()
     try:
         chosen_model = model
         if model == "auto-balanced":
@@ -963,6 +1009,7 @@ def _call_groq(
             ],
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=35,
         )
         answer = response.choices[0].message.content
 
@@ -984,14 +1031,33 @@ def _call_groq(
                 messages=retry_messages,
                 max_tokens=max_tokens,
                 temperature=0.05,
+                timeout=35,
             )
             retry_answer = retry.choices[0].message.content
             if retry_answer:
                 answer = retry_answer
                 st.session_state["last_groq_model_used"] = "llama-3.3-70b-versatile"
-
+        citation_ok = _has_strong_citations(answer, context_laws, min_count=2)
+        _record_ai_telemetry({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "model": st.session_state.get("last_groq_model_used", chosen_model),
+            "elapsed_s": round(time.time() - started, 3),
+            "ok": bool(answer),
+            "citations_ok": citation_ok,
+            "error": None,
+        })
+        if not citation_ok:
+            return None, "VALIDATION_FAILED: risposta senza citazioni URN sufficienti dal contesto"
         return answer, None
     except Exception as e:
+        _record_ai_telemetry({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "model": st.session_state.get("last_groq_model_used", model),
+            "elapsed_s": round(time.time() - started, 3),
+            "ok": False,
+            "citations_ok": False,
+            "error": str(e),
+        })
         return None, f"Errore Groq API: {e}"
 
 
@@ -5580,21 +5646,11 @@ def _citizen_mvp(db):
                             temperature=0.1,
                         )
                         used_model = st.session_state.get("last_groq_model_used")
-                        reply = answer if answer else f"⚠️ Errore AI: {err}"
-                        # Guardrail: if citations are weak, force explicit evidence footer from dataset.
-                        if answer and not _has_strong_citations(answer, context_laws, min_count=2):
-                            min_refs = []
-                            for law in context_laws[:3]:
-                                urn = law.get("urn") or "N/A"
-                                title = law.get("title") or "N/A"
-                                min_refs.append(f"- {title} [{urn}]")
-                            refs_text = "\n".join(min_refs)
-                            reply = (
-                                f"{answer}\n\n"
-                                "⚠️ **Verifica automatica citazioni**: la risposta AI non soddisfa i requisiti minimi di prova normativa. "
-                                "Riporto riferimenti normativi minimi dal dataset:\n"
-                                f"{refs_text}"
-                            )
+                        if answer:
+                            reply = answer
+                        else:
+                            reason = err or "Errore AI non specificato"
+                            reply = _build_accountable_fallback(question, context_laws, reason)
                 elif has_groq and not context_laws:
                     reply = (
                         "Non ho trovato evidenze sufficienti nel dataset per rispondere in modo affidabile a questa domanda. "
