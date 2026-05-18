@@ -5587,11 +5587,12 @@ def _citizen_mvp(db):
                                 urn = law.get("urn") or "N/A"
                                 title = law.get("title") or "N/A"
                                 min_refs.append(f"- {title} [{urn}]")
+                            refs_text = "\n".join(min_refs)
                             reply = (
                                 f"{answer}\n\n"
                                 "⚠️ **Verifica automatica citazioni**: la risposta AI non soddisfa i requisiti minimi di prova normativa. "
                                 "Riporto riferimenti normativi minimi dal dataset:\n"
-                                f"{'\n'.join(min_refs)}"
+                                f"{refs_text}"
                             )
                 elif has_groq and not context_laws:
                     reply = (
