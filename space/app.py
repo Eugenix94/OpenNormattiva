@@ -44,6 +44,7 @@ sys.path.insert(0, str(_app_dir))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
+# Rebuild marker: keep runtime in sync with latest pushed source.
 
 STATUS_ALIASES = {
     "in_force": "in_force",
