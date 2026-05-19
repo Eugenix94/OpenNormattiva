@@ -1007,6 +1007,20 @@ def _call_groq(
             "error": None,
         })
         if not citation_ok:
+            # If Groq answer lacks required citations, attempt HF Inference fallback (Mistral) if configured.
+            hf_key = (
+                os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+                or os.environ.get("HF_API_KEY")
+                or os.environ.get("HUGGINGFACE_TOKEN")
+            )
+            if hf_key:
+                try:
+                    ans_hf, err_hf = _call_hf_model(question, context_laws, model="mistralai/Mistral-7B-Instruct-v0.1", max_tokens=max_tokens, temperature=temperature)
+                    if ans_hf:
+                        st.session_state["last_groq_model_used"] = "mistralai/Mistral-7B-Instruct-v0.1"
+                        return ans_hf, None
+                except Exception:
+                    pass
             return None, "VALIDATION_FAILED: risposta senza citazioni URN sufficienti dal contesto"
         return answer, None
     except Exception as e:
@@ -1019,6 +1033,141 @@ def _call_groq(
             "error": str(e),
         })
         return None, f"Errore Groq API: {e}"
+
+
+def _call_hf_model(
+    question: str,
+    context_laws: list,
+    model: str = "mistralai/Mistral-7B-Instruct-v0.1",
+    max_tokens: int = 1200,
+    temperature: float = 0.1,
+) -> tuple[str | None, str | None]:
+    """
+    Call HuggingFace Inference API with retrieved law context (simple RAG wrapper).
+    Returns (answer_text, error_message).
+    """
+    token = (
+        os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+        or os.environ.get("HF_API_KEY")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+    )
+    if not token:
+        return None, "HUGGINGFACEHUB_API_TOKEN non configurato. Imposta il secret nello Space."
+
+    try:
+        import requests
+    except Exception:
+        return None, "Libreria `requests` non disponibile. Aggiungi `requests` a requirements.txt."
+
+    context = _build_groq_context(context_laws)
+    # Reuse the GROQ system prompt as a basis; it's designed to anchor answers to context.
+    system_prompt = _GROQ_SYSTEM_PROMPT.format(context=context)
+    payload = {
+        "inputs": system_prompt + "\n\n" + question,
+        "parameters": {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature,
+            "top_k": 50,
+            "top_p": 0.95,
+        },
+        "options": {"wait_for_model": True},
+    }
+    url = f"https://api-inference.huggingface.co/models/{model}"
+    started = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        try:
+            resp = r.json()
+        except Exception as e:
+            return None, f"HF response parse error: {e}"
+
+        if isinstance(resp, dict) and resp.get("error"):
+            return None, f"HF API error: {resp.get('error') }"
+
+        # Response may be a list of dicts with 'generated_text' or a dict with 'generated_text'
+        out_text = ""
+        if isinstance(resp, list) and resp:
+            out_text = resp[0].get("generated_text") or resp[0].get("text") or ""
+        elif isinstance(resp, dict):
+            out_text = resp.get("generated_text") or resp.get("text") or ""
+
+        answer = out_text.strip() if out_text else None
+        if not answer:
+            return None, "Nessuna risposta dal modello HF."
+
+        # Validate citations
+        if not _has_strong_citations(answer, context_laws, min_count=2):
+            _record_ai_telemetry({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "model": model,
+                "elapsed_s": round(time.time() - started, 3),
+                "ok": False,
+                "citations_ok": False,
+                "error": "VALIDATION_FAILED: risposta senza citazioni URN sufficienti",
+            })
+            return None, "VALIDATION_FAILED: risposta senza citazioni URN sufficienti dal contesto"
+
+        _record_ai_telemetry({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "elapsed_s": round(time.time() - started, 3),
+            "ok": True,
+            "citations_ok": True,
+            "error": None,
+        })
+        return answer, None
+    except Exception as e:
+        _record_ai_telemetry({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "elapsed_s": round(time.time() - started, 3),
+            "ok": False,
+            "citations_ok": False,
+            "error": str(e),
+        })
+        return None, f"Errore HF API: {e}"
+
+
+
+def _call_rag(
+    question: str,
+    context_laws: list,
+    model: str | None = None,
+    max_tokens: int = 1200,
+    temperature: float = 0.1,
+) -> tuple[str | None, str | None]:
+    """Unified RAG call: prefer Groq if configured, fallback to HuggingFace inference.
+    Returns (answer, error)."""
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    hf_key = (
+        os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+        or os.environ.get("HF_API_KEY")
+        or os.environ.get("HUGGINGFACE_TOKEN")
+    )
+
+    # Try Groq first (preserves existing telemetry and model selection)
+    if groq_key:
+        try:
+            chosen = model or GROQ_DEFAULT_MODEL
+            ans, err = _call_groq(question, context_laws, model=chosen, max_tokens=max_tokens, temperature=temperature)
+            if ans:
+                return ans, None
+            # if Groq explicitly failed validation, fall back if HF available
+        except Exception:
+            pass
+
+    # Fallback to HuggingFace Inference
+    if hf_key:
+        chosen = model or "mistralai/Mistral-7B-Instruct-v0.1"
+        ans, err = _call_hf_model(question, context_laws, model=chosen, max_tokens=max_tokens, temperature=temperature)
+        if ans:
+            # record chosen model for UI display parity
+            st.session_state["last_groq_model_used"] = chosen
+            return ans, None
+        return None, err
+
+    return None, "Nessun backend LLM disponibile: configura GROQ_API_KEY o HUGGINGFACEHUB_API_TOKEN."
 
 
 def linkify_law_text(text: str, db) -> dict:
