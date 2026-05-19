@@ -5887,8 +5887,8 @@ def main():
         }
         st.sidebar.success("Normattiva Lab — VOOM: Vigente + Abrogati + Multivigente.")
     else:
-        use_advanced = st.sidebar.toggle(
-            "🔧 Navigazione classica (avanzata)", value=False, key="adv-mode"
+        use_advanced = st.sidebar.checkbox(
+            "🔧 Navigazione avanzata", value=False, key="adv-mode"
         )
         if not use_advanced:
             db = load_db()
