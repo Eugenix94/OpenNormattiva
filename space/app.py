@@ -673,56 +673,23 @@ st.set_page_config(
 
 
 def _inject_accessibility_styles() -> None:
+    """Global base styles — applies to all profiles. Citizen profile overrides via _CITIZEN_CSS."""
     st.markdown(
         """
         <style>
-        :root {
-            --on-primary: #0b2545;
-            --accent: #0a7a5a;
-            --muted-bg: #f6f8fb;
-        }
-        .block-container {
-            max-width: 1200px;
-            padding-top: 1.2rem;
-            padding-bottom: 2rem;
-        }
-        h1, h2, h3 {
-            letter-spacing: 0.01em;
-        }
-        p, li, label, .stCaption {
-            line-height: 1.5;
-            font-size: 1rem;
-        }
+        h1, h2, h3 { letter-spacing: 0.01em; }
+        p, li, label, .stCaption { line-height: 1.55; }
         .stMetric {
-            background: var(--muted-bg);
+            background: #f8fafc;
             border-radius: 12px;
             padding: 0.6rem 0.8rem;
-            border: 1px solid #e6eaf0;
+            border: 1px solid #e2e8f0;
         }
-        [data-testid="stSidebar"] {
-            border-right: 1px solid #e6eaf0;
-        }
-        [data-testid="stSidebar"] .stRadio > div {
-            gap: 0.2rem;
-        }
-        .stButton > button {
-            border-radius: 10px;
-            font-weight: 600;
-        }
+        [data-testid="stSidebar"] .stRadio > div { gap: 0.2rem; }
+        .stButton > button { border-radius: 10px; font-weight: 600; }
         @media (max-width: 900px) {
-            .block-container {
-                padding-left: 0.9rem;
-                padding-right: 0.9rem;
-            }
-            .stMetric {
-                padding: 0.5rem 0.65rem;
-            }
-            .stButton > button {
-                width: 100%;
-            }
-            [data-testid="stSidebar"] {
-                min-width: 250px;
-            }
+            .block-container { padding-left: 0.9rem; padding-right: 0.9rem; }
+            .stMetric { padding: 0.5rem 0.65rem; }
         }
         </style>
         """,
@@ -738,22 +705,15 @@ if APP_PROFILE == "italianlab":
 elif APP_PROFILE == "lab":
     st.title("\u2696\ufe0f OpenNormattiva Lab")
     st.markdown("VOOM corpus — **67,052 vigenti** + **123,859 abrogati** = **190,911 laws** total. Full-text search, citations, legislative history.")
-else:
-    st.title("\u2696\ufe0f NormattivaVigente")
-    st.markdown("Ricerca sulle sole norme vigenti: full-text search sul corpus Normattiva in-force.")
+# IS_SEARCH (citizen) — hero is rendered inside _citizen_mvp, skip module-level title
 
 IS_SEARCH = APP_PROFILE == "search"
 IS_LAB = APP_PROFILE == "lab"
 IS_ITALIAN_LAB = APP_PROFILE == "italianlab"
 ACTIVE_DATASET_REPO = HF_DATASET_NAME or _default_dataset_repo(APP_PROFILE)
 
-# Show active profile in the sidebar for clarity
-if IS_SEARCH:
-    st.sidebar.info(
-        "Profilo attivo: cittadino (vigente)\n"
-        f"Dataset: {ACTIVE_DATASET_REPO}"
-    )
-else:
+# Show active profile in the sidebar (lab profiles only — citizen has its own sidebar)
+if IS_LAB or IS_ITALIAN_LAB:
     st.sidebar.info(f"Running profile: {APP_PROFILE}\nDataset: {ACTIVE_DATASET_REPO}")
 # ------------------------------------------------------------------------
 
@@ -5338,63 +5298,271 @@ def _mvp_d_conversational(db):
 # ─────────────────────────────────────────────────────────────────
 
 _CITIZEN_CSS = """<style>
-/* ── Global ── */
-[data-testid="stAppViewContainer"] > .main { background: #f8fafc; }
-.block-container { padding: 1.2rem 1.8rem 4rem; max-width: 960px; }
+/* ═══════════════════════════════════════════════════════════
+   NormattivaVigente — Design System
+   WCAG AA compliant color palette
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── CSS Variables ────────────────────────────────────────── */
+:root {
+    --nv-blue:       #1d4ed8;   /* primary action */
+    --nv-blue-dark:  #1e3a8a;   /* headings/hover */
+    --nv-blue-light: #eff6ff;   /* subtle bg tint */
+    --nv-blue-mid:   #bfdbfe;   /* border accents */
+    --nv-green:      #15803d;   /* vigente — 7.2:1 on white */
+    --nv-red:        #b91c1c;   /* abrogata — 7.0:1 on white */
+    --nv-text:       #0f172a;   /* slate-900 — 19:1 on white */
+    --nv-text-2:     #334155;   /* slate-700 — 9.4:1 on white */
+    --nv-text-3:     #64748b;   /* slate-500 — 4.9:1 on white */
+    --nv-bg:         #f8fafc;   /* page bg */
+    --nv-card:       #ffffff;   /* card bg */
+    --nv-border:     #e2e8f0;   /* card border */
+    --nv-shadow:     0 1px 4px rgba(0,0,0,0.08);
+}
+
+/* ── Global layout ─────────────────────────────────────────── */
+[data-testid="stAppViewContainer"] > .main {
+    background: var(--nv-bg) !important;
+}
+.block-container {
+    padding: 0 1.8rem 4rem !important;
+    max-width: 920px !important;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: #1e3a8a !important;
+    border-right: none !important;
+}
+[data-testid="stSidebar"] * {
+    color: #e0eaff !important;
+}
+[data-testid="stSidebar"] .stCheckbox label {
+    color: #e0eaff !important;
+    font-weight: 600;
+}
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: #ffffff !important;
+    font-size: 1rem !important;
+}
+
+/* ── Tabs ──────────────────────────────────────────────────── */
+[data-testid="stTabs"] [role="tablist"] {
+    border-bottom: 2px solid var(--nv-border);
+    gap: 0.2rem;
+}
+[data-testid="stTabs"] [role="tab"] {
+    color: var(--nv-text-2) !important;
+    font-weight: 600;
+    font-size: 0.92rem;
+    border-radius: 8px 8px 0 0;
+    padding: 0.5rem 1rem;
+    border: none;
+    transition: background 0.15s, color 0.15s;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    color: var(--nv-blue) !important;
+    border-bottom: 3px solid var(--nv-blue) !important;
+    background: var(--nv-blue-light) !important;
+}
+[data-testid="stTabs"] [role="tab"]:hover {
+    background: var(--nv-blue-light) !important;
+    color: var(--nv-blue-dark) !important;
+}
+
+/* ── Hero banner ────────────────────────────────────────────── */
+.nv-hero {
+    background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 55%, #3b82f6 100%);
+    border-radius: 16px;
+    padding: 2rem 2.5rem 1.8rem;
+    margin-bottom: 1.4rem;
+    text-align: center;
+    box-shadow: 0 6px 28px rgba(29,78,216,0.28);
+}
+.nv-hero h1 {
+    color: #ffffff !important;
+    font-size: 2rem !important;
+    font-weight: 800 !important;
+    margin: 0 0 0.5rem !important;
+    letter-spacing: -0.3px;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.35);
+}
+.nv-hero p {
+    color: #dbeafe !important;    /* blue-100 — 7.5:1 on hero bg */
+    font-size: 1.05rem !important;
+    margin: 0 0 0.4rem !important;
+}
+.nv-hero small {
+    color: #bfdbfe !important;    /* blue-200 — 5.5:1 on hero bg */
+    font-size: 0.88rem !important;
+}
+
+/* ── Law card (expander-based) ──────────────────────────────── */
+[data-testid="stExpander"] {
+    background: var(--nv-card) !important;
+    border: 1px solid var(--nv-border) !important;
+    border-radius: 10px !important;
+    margin-bottom: 0.55rem;
+    box-shadow: var(--nv-shadow);
+}
+[data-testid="stExpander"] summary {
+    color: var(--nv-text) !important;
+    font-size: 0.91rem !important;
+    font-weight: 600 !important;
+    padding: 0.6rem 0.8rem !important;
+}
+[data-testid="stExpander"] summary:hover {
+    background: var(--nv-blue-light) !important;
+    border-radius: 10px;
+}
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+    padding: 0.2rem 0.9rem 0.8rem !important;
+}
+
+/* ── Inline law (inside expanders — no nesting) ─────────────── */
+.nv-inline-law {
+    border-left: 3px solid var(--nv-blue-mid);
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.55rem;
+    background: var(--nv-blue-light);
+    border-radius: 0 8px 8px 0;
+}
+.nv-inline-law strong {
+    color: var(--nv-text) !important;
+    font-size: 0.89rem;
+    display: block;
+    margin-bottom: 0.15rem;
+}
+.nv-inline-law code {
+    font-size: 0.76rem;
+    color: var(--nv-text-2) !important;
+    background: rgba(0,0,0,0.04);
+    padding: 0 3px;
+    border-radius: 3px;
+}
+
+/* ── Buttons ────────────────────────────────────────────────── */
+.stButton > button {
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-size: 0.88rem !important;
+    border: 1.5px solid var(--nv-blue) !important;
+    color: var(--nv-blue) !important;
+    background: transparent !important;
+    padding: 0.3rem 0.9rem !important;
+    transition: all 0.15s !important;
+}
+.stButton > button:hover {
+    background: var(--nv-blue) !important;
+    color: #ffffff !important;
+}
+/* Primary call-to-action button */
+.stButton[data-testid*="go"] > button,
+.stButton > button[kind="primary"] {
+    background: var(--nv-blue) !important;
+    color: #ffffff !important;
+}
+
+/* ── Chat ───────────────────────────────────────────────────── */
+[data-testid="stChatInput"] textarea {
+    font-size: 0.96rem !important;
+    color: var(--nv-text) !important;
+    border: 2px solid var(--nv-border) !important;
+    border-radius: 12px !important;
+    background: var(--nv-card) !important;
+}
+[data-testid="stChatInput"] textarea:focus {
+    border-color: var(--nv-blue) !important;
+    box-shadow: 0 0 0 3px rgba(29,78,216,0.12) !important;
+}
+[data-testid="stChatMessage"] {
+    background: var(--nv-card) !important;
+    border-radius: 12px !important;
+    margin-bottom: 0.6rem;
+    border: 1px solid var(--nv-border) !important;
+}
+[data-testid="stChatMessageContent"] {
+    font-size: 0.95rem !important;
+    line-height: 1.75 !important;
+    color: var(--nv-text) !important;
+}
+
+/* ── Metrics ────────────────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background: var(--nv-card) !important;
+    border: 1px solid var(--nv-border) !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    box-shadow: var(--nv-shadow);
+}
+[data-testid="stMetricLabel"] { color: var(--nv-text-2) !important; font-size: 0.83rem !important; }
+[data-testid="stMetricValue"] { color: var(--nv-text) !important; font-weight: 800 !important; }
+[data-testid="stMetricDelta"] { font-size: 0.82rem !important; }
+
+/* ── Status badges ──────────────────────────────────────────── */
+.nv-vigente  { color: var(--nv-green) !important; font-weight: 700; }
+.nv-abrogata { color: var(--nv-red)   !important; font-weight: 700; }
+
+/* ── Text inputs & selects ──────────────────────────────────── */
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stSelectbox"] select {
+    border: 1.5px solid var(--nv-border) !important;
+    border-radius: 8px !important;
+    color: var(--nv-text) !important;
+    font-size: 0.94rem !important;
+    background: var(--nv-card) !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stNumberInput"] input:focus {
+    border-color: var(--nv-blue) !important;
+    box-shadow: 0 0 0 3px rgba(29,78,216,0.1) !important;
+    outline: none !important;
+}
+.stTextInput label, .stSelectbox label,
+.stNumberInput label, .stCheckbox label {
+    color: var(--nv-text-2) !important;
+    font-weight: 600 !important;
+    font-size: 0.88rem !important;
+}
+
+/* ── Captions & helper text ─────────────────────────────────── */
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: var(--nv-text-3) !important;
+    font-size: 0.83rem !important;
+}
+
+/* ── Info / Warning / Error boxes ───────────────────────────── */
+[data-testid="stInfo"] {
+    background: var(--nv-blue-light) !important;
+    border-left: 4px solid var(--nv-blue) !important;
+    color: var(--nv-text) !important;
+    border-radius: 0 8px 8px 0 !important;
+}
+[data-testid="stWarning"] {
+    border-radius: 0 8px 8px 0 !important;
+}
+
+/* ── Bar chart / plotly container ───────────────────────────── */
+[data-testid="stArrowVegaLiteChart"],
+[data-testid="stPlotlyChart"] {
+    background: var(--nv-card) !important;
+    border: 1px solid var(--nv-border) !important;
+    border-radius: 12px !important;
+    padding: 0.5rem !important;
+}
+
+/* ── Mobile ─────────────────────────────────────────────────── */
 @media (max-width: 768px) {
     [data-testid="stSidebar"] { display: none !important; }
-    .block-container { padding: 0.5rem 0.6rem 5rem; }
+    .block-container { padding: 0 0.6rem 5rem !important; }
+    .nv-hero { padding: 1.4rem 1.2rem 1.2rem !important; border-radius: 12px !important; }
     .nv-hero h1 { font-size: 1.4rem !important; }
-    .nv-hero p { font-size: 0.9rem !important; }
+    .nv-hero p  { font-size: 0.9rem !important; }
+    [data-testid="stTabs"] [role="tab"] { font-size: 0.78rem !important; padding: 0.4rem 0.6rem !important; }
+    .stButton > button { width: 100% !important; }
 }
-/* ── Hero — lighter gradient, high contrast ── */
-.nv-hero {
-    background: linear-gradient(135deg, #1e40af 0%, #2563eb 70%, #3b82f6 100%);
-    border-radius: 18px; padding: 2rem 2.5rem 1.6rem; margin-bottom: 1.2rem;
-    color: #ffffff !important; text-align: center;
-    box-shadow: 0 4px 24px rgba(37,99,235,0.22);
-}
-.nv-hero * { color: #ffffff !important; }
-.nv-hero h1 { font-size: 2.1rem; font-weight: 800; margin: 0 0 0.4rem; letter-spacing: -0.5px; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
-.nv-hero p { font-size: 1.05rem; margin: 0 0 0.3rem; text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
-.nv-hero small { font-size: 0.85rem; opacity: 0.9; }
-/* ── Law card ── */
-.nv-card {
-    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px;
-    padding: 0.9rem 1.1rem; margin-bottom: 0.6rem;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-}
-.nv-card-title { font-weight: 700; font-size: 0.95rem; color: #0f172a; }
-.nv-card-meta { font-size: 0.8rem; color: #475569; margin-top: 0.15rem; }
-.nv-vigente { color: #15803d; font-weight: 700; }
-.nv-abrogata { color: #b91c1c; font-weight: 700; }
-/* ── AI answer ── */
-.nv-answer {
-    background: #ffffff; border-left: 4px solid #2563eb;
-    border-radius: 0 14px 14px 0; padding: 1.1rem 1.4rem;
-    box-shadow: 0 2px 10px rgba(37,99,235,0.08); margin: 0.5rem 0 1rem;
-    font-size: 0.95rem; line-height: 1.75; color: #1e293b;
-}
-/* ── Inline law citation (inside expanders) ── */
-.nv-inline-law {
-    border-left: 3px solid #94a3b8; padding: 0.45rem 0.7rem;
-    margin-bottom: 0.5rem; background: #f1f5f9; border-radius: 0 8px 8px 0;
-}
-.nv-inline-law strong { color: #0f172a; font-size: 0.88rem; }
-.nv-inline-law code { font-size: 0.75rem; color: #475569; }
-/* ── Dataset stat card ── */
-.nv-stat {
-    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px;
-    padding: 1rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-}
-.nv-stat-number { font-size: 1.8rem; font-weight: 800; color: #1e40af; }
-.nv-stat-label { font-size: 0.82rem; color: #475569; margin-top: 0.1rem; }
-/* ── Topic chip ── */
-.stButton > button[data-testid] { border-radius: 20px !important; }
-/* ── Chat messages ── */
-[data-testid="stChatMessageContent"] { font-size: 0.94rem; line-height: 1.72; color: #1e293b; }
-/* ── Expander labels ── */
-[data-testid="stExpander"] summary { font-size: 0.9rem; color: #1e40af; }
 </style>"""
 
 
