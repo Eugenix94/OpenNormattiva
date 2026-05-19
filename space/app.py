@@ -5339,43 +5339,62 @@ def _mvp_d_conversational(db):
 
 _CITIZEN_CSS = """<style>
 /* ── Global ── */
-[data-testid="stAppViewContainer"] > .main { background: #f0f4ff; }
-.block-container { padding: 1.2rem 1.8rem 4rem; max-width: 900px; }
+[data-testid="stAppViewContainer"] > .main { background: #f8fafc; }
+.block-container { padding: 1.2rem 1.8rem 4rem; max-width: 960px; }
 @media (max-width: 768px) {
     [data-testid="stSidebar"] { display: none !important; }
     .block-container { padding: 0.5rem 0.6rem 5rem; }
-    .nv-hero h1 { font-size: 1.5rem !important; }
+    .nv-hero h1 { font-size: 1.4rem !important; }
+    .nv-hero p { font-size: 0.9rem !important; }
 }
-/* ── Hero ── */
+/* ── Hero — lighter gradient, high contrast ── */
 .nv-hero {
-    background: linear-gradient(135deg, #0f2057 0%, #1d4ed8 60%, #2563eb 100%);
+    background: linear-gradient(135deg, #1e40af 0%, #2563eb 70%, #3b82f6 100%);
     border-radius: 18px; padding: 2rem 2.5rem 1.6rem; margin-bottom: 1.2rem;
-    color: white; text-align: center;
+    color: #ffffff !important; text-align: center;
+    box-shadow: 0 4px 24px rgba(37,99,235,0.22);
 }
-.nv-hero h1 { font-size: 2.1rem; font-weight: 800; margin: 0 0 0.3rem; letter-spacing: -0.5px; }
-.nv-hero p { font-size: 1.05rem; opacity: 0.88; margin: 0 0 0.2rem; }
-.nv-hero small { opacity: 0.65; font-size: 0.82rem; }
+.nv-hero * { color: #ffffff !important; }
+.nv-hero h1 { font-size: 2.1rem; font-weight: 800; margin: 0 0 0.4rem; letter-spacing: -0.5px; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+.nv-hero p { font-size: 1.05rem; margin: 0 0 0.3rem; text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+.nv-hero small { font-size: 0.85rem; opacity: 0.9; }
 /* ── Law card ── */
 .nv-card {
-    background: white; border: 1px solid #dbeafe; border-radius: 12px;
+    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px;
     padding: 0.9rem 1.1rem; margin-bottom: 0.6rem;
-    box-shadow: 0 1px 4px rgba(30,64,175,0.07);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
-.nv-card-title { font-weight: 700; font-size: 0.93rem; color: #1e293b; }
-.nv-card-meta { font-size: 0.78rem; color: #64748b; margin-top: 0.15rem; }
-.nv-vigente { color: #16a34a; font-weight: 700; }
-.nv-abrogata { color: #dc2626; font-weight: 700; }
+.nv-card-title { font-weight: 700; font-size: 0.95rem; color: #0f172a; }
+.nv-card-meta { font-size: 0.8rem; color: #475569; margin-top: 0.15rem; }
+.nv-vigente { color: #15803d; font-weight: 700; }
+.nv-abrogata { color: #b91c1c; font-weight: 700; }
 /* ── AI answer ── */
 .nv-answer {
-    background: white; border-left: 4px solid #2563eb;
+    background: #ffffff; border-left: 4px solid #2563eb;
     border-radius: 0 14px 14px 0; padding: 1.1rem 1.4rem;
     box-shadow: 0 2px 10px rgba(37,99,235,0.08); margin: 0.5rem 0 1rem;
-    font-size: 0.94rem; line-height: 1.75;
+    font-size: 0.95rem; line-height: 1.75; color: #1e293b;
 }
+/* ── Inline law citation (inside expanders) ── */
+.nv-inline-law {
+    border-left: 3px solid #94a3b8; padding: 0.45rem 0.7rem;
+    margin-bottom: 0.5rem; background: #f1f5f9; border-radius: 0 8px 8px 0;
+}
+.nv-inline-law strong { color: #0f172a; font-size: 0.88rem; }
+.nv-inline-law code { font-size: 0.75rem; color: #475569; }
+/* ── Dataset stat card ── */
+.nv-stat {
+    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px;
+    padding: 1rem; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.nv-stat-number { font-size: 1.8rem; font-weight: 800; color: #1e40af; }
+.nv-stat-label { font-size: 0.82rem; color: #475569; margin-top: 0.1rem; }
 /* ── Topic chip ── */
 .stButton > button[data-testid] { border-radius: 20px !important; }
 /* ── Chat messages ── */
-[data-testid="stChatMessageContent"] { font-size: 0.93rem; line-height: 1.7; }
+[data-testid="stChatMessageContent"] { font-size: 0.94rem; line-height: 1.72; color: #1e293b; }
+/* ── Expander labels ── */
+[data-testid="stExpander"] summary { font-size: 0.9rem; color: #1e40af; }
 </style>"""
 
 
@@ -5584,12 +5603,37 @@ def _citizen_mvp(db):
                 st.session_state["citizen_open_urn"] = urn
                 st.rerun()
 
+    # ── Inline law card (no expander — safe inside st.expander) ─
+    def _card_inline(law, key_suffix):
+        """Render a law inline without expander — avoids nested-expander error."""
+        urn = law.get("urn") or ""
+        title = law.get("title") or "N/A"
+        status = _normalize_status(law.get("status"))
+        badge = "🟢" if status == "in_force" else "🔴"
+        typ = law.get("type") or ""
+        year = law.get("year") or ""
+        snippet = (law.get("snippet") or (law.get("text") or "")[:200]).strip()
+        safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
+        st.markdown(
+            f"<div class='nv-inline-law'>"
+            f"<strong>{badge} {title[:90]}</strong><br>"
+            f"<code>{urn}</code> &nbsp;·&nbsp; {typ} {year}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if snippet:
+            st.caption('"' + snippet[:200] + ('...' if len(snippet) > 200 else '') + '"')
+        if st.button("📖 Leggi testo", key=f"open-il-{safe}-{key_suffix}"):
+            st.session_state["citizen_open_urn"] = urn
+            st.rerun()
+
     # ── Tabs ─────────────────────────────────────────────────────
-    tab_ai, tab_search, tab_latest, tab_const = st.tabs([
+    tab_ai, tab_search, tab_latest, tab_const, tab_data = st.tabs([
         "💬 Assistente AI",
         "🔍 Cerca Norme",
         "🆕 Ultime Norme",
         "🇮🇹 Costituzione",
+        "📊 Dataset",
     ])
 
     # ═══════════════════════════════════════════════════════════════
@@ -5622,7 +5666,7 @@ def _citizen_mvp(db):
                 if laws:
                     with st.expander(f"📚 {len(laws)} norme consultate", expanded=False):
                         for j, law in enumerate(laws[:8]):
-                            _card(law, f"hist-{idx}-{j}")
+                            _card_inline(law, f"hist-{idx}-{j}")
 
         question = st.chat_input("Fai una domanda sulla legge italiana…")
 
@@ -5675,7 +5719,7 @@ def _citizen_mvp(db):
                 if context_laws:
                     with st.expander(f"📚 {len(context_laws)} norme consultate dal dataset", expanded=False):
                         for j, law in enumerate(context_laws[:8]):
-                            _card(law, f"ans-{len(st.session_state['citizen_chat'])}-{j}")
+                            _card_inline(law, f"ans-{len(st.session_state['citizen_chat'])}-{j}")
                     with st.expander("📜 Prove normative (estratti testuali)", expanded=True):
                         for law in context_laws[:6]:
                             urn = law.get("urn", "N/A")
@@ -5803,10 +5847,136 @@ def _citizen_mvp(db):
 *Cerca un argomento nel campo sopra per trovare le norme correlate.*
             """)
 
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 5 — DATASET EXPLORER
+    # ═══════════════════════════════════════════════════════════════
+    with tab_data:
+        st.subheader("📊 Esplora il Dataset Normattiva")
+        st.caption(
+            "Statistiche e accesso diretto ai dati del corpus legislativo italiano. "
+            "Dataset: [diatribe00/normattivavigente-data](https://huggingface.co/datasets/diatribe00/normattivavigente-data)"
+        )
 
-# ─────────────────────────────────────────────────────────────────
-# NAVIGATION
-# ─────────────────────────────────────────────────────────────────
+        if db:
+            # ── High-level counts ──────────────────────────────────
+            try:
+                totale = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+                vigenti = db.conn.execute(
+                    "SELECT COUNT(*) FROM laws WHERE status='in_force'"
+                ).fetchone()[0]
+                abrogati = totale - vigenti
+                anno_min = db.conn.execute("SELECT MIN(year) FROM laws WHERE year > 0").fetchone()[0]
+                anno_max = db.conn.execute("SELECT MAX(year) FROM laws WHERE year > 0").fetchone()[0]
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("📚 Totale norme", f"{totale:,}")
+                c2.metric("🟢 Vigenti", f"{vigenti:,}", f"{vigenti/totale*100:.1f}%" if totale else "")
+                c3.metric("🔴 Abrogate", f"{abrogati:,}", f"{abrogati/totale*100:.1f}%" if totale else "")
+                c4.metric("📅 Arco temporale", f"{anno_min}–{anno_max}")
+            except Exception as e:
+                st.warning(f"Impossibile caricare le statistiche: {e}")
+
+            st.divider()
+
+            # ── Laws by type ───────────────────────────────────────
+            st.markdown("#### Composizione per tipo di atto")
+            try:
+                rows_type = db.conn.execute(
+                    "SELECT type, COUNT(*) as n FROM laws WHERE type IS NOT NULL "
+                    "GROUP BY type ORDER BY n DESC LIMIT 15"
+                ).fetchall()
+                if rows_type:
+                    data_type = {r[0] or "N/A": r[1] for r in rows_type}
+                    st.bar_chart(data_type)
+                    with st.expander("Tabella dettagliata"):
+                        for tipo, count in data_type.items():
+                            st.markdown(f"- **{tipo}**: {count:,} norme")
+            except Exception as e:
+                st.warning(f"Errore tipo: {e}")
+
+            st.divider()
+
+            # ── Laws by decade ─────────────────────────────────────
+            st.markdown("#### Distribuzione per decennio")
+            try:
+                rows_dec = db.conn.execute(
+                    "SELECT (year/10)*10 AS decade, COUNT(*) AS n FROM laws "
+                    "WHERE year > 0 GROUP BY decade ORDER BY decade"
+                ).fetchall()
+                if rows_dec:
+                    data_dec = {f"{r[0]}s": r[1] for r in rows_dec}
+                    st.bar_chart(data_dec)
+            except Exception as e:
+                st.warning(f"Errore decennio: {e}")
+
+            st.divider()
+
+            # ── Kingdom-era laws still in force ───────────────────
+            st.markdown("#### 🏛️ Norme del Regno d'Italia ancora vigenti")
+            st.caption("Regio Decreti e leggi emanate prima del 1946 che rimangono in vigore oggi.")
+            try:
+                rows_regno = db.conn.execute(
+                    "SELECT urn, title, type, year, status FROM laws "
+                    "WHERE year < 1946 AND year > 0 AND status='in_force' "
+                    "ORDER BY year ASC LIMIT 30"
+                ).fetchall()
+                if rows_regno:
+                    st.info(f"**{len(rows_regno)} norme pre-Repubblica ancora vigenti** (mostrando le prime 30)")
+                    for j, r in enumerate(rows_regno):
+                        law = dict(r)
+                        _card(law, f"regno-{j}")
+                else:
+                    st.info("Nessuna norma pre-1946 vigente trovata nel dataset.")
+            except Exception as e:
+                st.warning(f"Errore: {e}")
+
+            st.divider()
+
+            # ── Explore & download ─────────────────────────────────
+            st.markdown("#### 🔗 Accesso ai file del dataset")
+            st.markdown("""
+| Risorsa | Link |
+|---------|------|
+| 📦 Dataset HuggingFace | [diatribe00/normattivavigente-data](https://huggingface.co/datasets/diatribe00/normattivavigente-data) |
+| 📝 Corpus vigenti (JSONL) | `/data/vigenti.jsonl` nel dataset |
+| 📝 Corpus abrogati (JSONL) | `/data/abrogati.jsonl` nel dataset |
+| 🔍 Source code Space | [diatribe00/normattivavigente](https://huggingface.co/spaces/diatribe00/normattivavigente/tree/main) |
+| ⚖️ Normattiva (fonte ufficiale) | [normattiva.it](https://www.normattiva.it) |
+            """)
+
+            # ── Ask AI about the dataset ───────────────────────────
+            st.divider()
+            st.markdown("#### 🤖 Chiedi all'AI sul dataset")
+            data_q = st.text_input(
+                "Es. quante leggi del 1942 sono ancora vigenti? Cosa c'è in vigore dal codice civile?",
+                key="data-tab-q",
+                placeholder="Domanda sul corpus legislativo…",
+            )
+            if data_q.strip() and st.button("Analizza →", key="data-tab-go"):
+                with st.spinner("Ricerca nel dataset…"):
+                    ctx = _retrieve_context(data_q.strip(), limit=10) if db else []
+                if ctx and has_groq:
+                    ans, err = _call_groq(data_q.strip(), ctx, model=GROQ_DEFAULT_MODEL,
+                                         max_tokens=800, temperature=0.05)
+                    if ans:
+                        st.markdown(ans)
+                    else:
+                        st.warning(err or "Nessuna risposta AI.")
+                    with st.expander("Norme di riferimento"):
+                        for j, law in enumerate(ctx[:6]):
+                            _card_inline(law, f"dq-{j}")
+                elif ctx:
+                    for j, law in enumerate(ctx[:6]):
+                        _card(law, f"dq2-{j}")
+                else:
+                    st.info("Nessuna norma trovata. Prova con parole chiave più specifiche.")
+        else:
+            st.warning("Database non disponibile — il dataset non è stato caricato.")
+            st.markdown("""
+Il dataset Normattiva Vigente è disponibile su HuggingFace:
+- 📦 [diatribe00/normattivavigente-data](https://huggingface.co/datasets/diatribe00/normattivavigente-data)
+- Contiene 67.000+ norme vigenti in formato JSONL con full-text, URN, tipo e anno.
+            """)
 
 def main():
     # Build a complete registry of pages and then expose only the subset
