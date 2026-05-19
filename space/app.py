@@ -1128,7 +1128,8 @@ def _call_hf_model(
         })
         return None, f"Errore HF API: {e}"
 
-
+
+
 
 def _call_rag(
     question: str,
@@ -5864,7 +5865,7 @@ def _citizen_mvp(db):
     st.markdown(_CITIZEN_CSS, unsafe_allow_html=True)
     has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
 
-    # ── Full law detail overlay (blocks rest of page) ────────────
+    # ── Law detail overlay (full-screen, blocks chat) ─────────────
     open_urn = st.session_state.get("citizen_open_urn")
     if open_urn and db:
         try:
@@ -5874,426 +5875,315 @@ def _citizen_mvp(db):
             law = None
         if law:
             status = _normalize_status(law.get("status"))
-            badge = "🟢 Vigente" if status == "in_force" else "🔴 Abrogata"
+            badge = "\U0001f7e2 Vigente" if status == "in_force" else "\U0001f534 Abrogata"
             st.markdown(f"### {law.get('title') or 'N/A'}")
-            st.caption(f"{badge} · {law.get('type','')} · {law.get('year','')} · `{open_urn}`")
+            st.caption(f"{badge} \u00b7 {law.get('type','')} \u00b7 {law.get('year','')} \u00b7 `{open_urn}`")
             text = law.get("text") or ""
             if text:
                 st.text_area(
                     "Testo integrale",
-                    text[:9000] + ("…" if len(text) > 9000 else ""),
+                    text[:9000] + ("\u2026" if len(text) > 9000 else ""),
                     height=420, disabled=True,
                     key=f"dettext-{open_urn[:24]}",
                 )
             else:
                 st.info("Testo non disponibile nel dataset per questa norma.")
+            law_q = st.text_input(
+                "Chiedi all\u2019AI su questa norma",
+                key="law-detail-q",
+                placeholder="Es.: Cosa prevede l\u2019articolo principale?",
+            )
+            if law_q.strip() and st.button("Chiedi \u2192", key="law-detail-ask"):
+                if has_groq:
+                    with st.spinner("AI in elaborazione\u2026"):
+                        ans, err = _call_groq(
+                            f"[Norma aperta: {law.get('title','')}] {law_q}",
+                            [law], model=GROQ_DEFAULT_MODEL, max_tokens=700,
+                        )
+                    st.info(ans or f"\u26a0\ufe0f {err}")
+                else:
+                    st.info(f"\U0001f4d6 Estratto: {_law_proof_excerpt(law)}")
             col_link, col_close = st.columns([3, 1])
             col_link.link_button(
-                "📄 Apri su Normattiva.it ↗",
+                "\U0001f4c4 Apri su Normattiva.it \u2197",
                 f"https://www.normattiva.it/uri-res/N2Ls?{open_urn}",
             )
-            if col_close.button("← Chiudi", key="citizen-close-detail"):
+            if col_close.button("\u2190 Chiudi", key="citizen-close-detail"):
                 st.session_state.pop("citizen_open_urn", None)
                 st.rerun()
         else:
             st.warning("Norma non trovata nel database.")
-            if st.button("← Indietro", key="citizen-back"):
+            if st.button("\u2190 Indietro", key="citizen-back"):
                 st.session_state.pop("citizen_open_urn", None)
                 st.rerun()
         return
 
-    # ── Law card helper ──────────────────────────────────────────
-    def _card(law, key_suffix, expanded=False):
-        urn = law.get("urn") or ""
-        title = law.get("title") or "N/A"
-        status = _normalize_status(law.get("status"))
-        badge = "🟢 Vigente" if status == "in_force" else "🔴 Abrogata"
-        typ = law.get("type") or ""
-        year = law.get("year") or ""
-        snippet = (law.get("snippet") or (law.get("text") or "")[:320]).strip()
-        safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
-        with st.expander(f"{badge}  {title[:72]}", expanded=expanded):
-            st.caption(f"{typ} · {year} · `{urn}`")
-            if snippet:
-                st.markdown(f"> {snippet[:380].rstrip()}{'…' if len(snippet) > 380 else ''}")
-            if st.button("📖 Leggi testo completo", key=f"open-{safe}-{key_suffix}"):
-                st.session_state["citizen_open_urn"] = urn
-                st.rerun()
+    # ── Hero ───────────────────────────────────────────────────────
+    st.markdown("""
+    <div class='nv-hero'>
+      <h1>\U0001f1ee\U0001f1f9 NormattivaVigente</h1>
+      <p>La legge italiana, spiegata in modo semplice \u2014 per ogni cittadino.</p>
+      <small>190.000+ norme \u00b7 Dataset Normattiva \u00b7 Powered by Groq AI</small>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── Inline law card (no expander — safe inside st.expander) ─
-    def _card_inline(law, key_suffix):
-        """Render a law inline without expander — avoids nested-expander error."""
+    if not has_groq:
+        st.warning(
+            "**GROQ_API_KEY non configurata** \u2014 risposte AI disabilitate. "
+            "Configura il secret nelle impostazioni dello Space.",
+            icon="\u26a0\ufe0f",
+        )
+
+    # ── Quick-action chips ────────────────────────────────────────
+    chips = [
+        ("\U0001f50d Cerca", "Cerca norme sul licenziamento senza preavviso"),
+        ("\U0001f195 Ultime", "Mostrami le ultime leggi vigenti pubblicate"),
+        ("\U0001f3eb Scuola", "Qual \u00e8 il programma scolastico previsto dalla legge italiana?"),
+        ("\U0001f4dc Costituzione", "Cosa dice la Costituzione sul diritto al lavoro?"),
+        ("\U0001f4ca Dataset", "Quante leggi ci sono nel dataset? Dammi le statistiche del corpus."),
+    ]
+    chip_cols = st.columns(len(chips))
+    for i, (label, action) in enumerate(chips):
+        if chip_cols[i].button(label, key=f"cit-chip-{i}", use_container_width=True):
+            st.session_state.setdefault("citizen_chat", [])
+            st.session_state["citizen_chat"].append({"role": "user", "content": action, "laws": []})
+            st.session_state["citizen_pending"] = action
+            st.rerun()
+
+    # ── Intent detection ──────────────────────────────────────────
+    def _detect_intent(text: str) -> str:
+        lower = text.lower()
+        if any(w in lower for w in ["ultime", "recenti", "nuove norme", "ultimi", "recente", "pubblicat", "ultime leggi"]):
+            return "latest"
+        if _re.search(r"costituzione|art[\.\s]+cost|diritto (fondamentale|inviolabile)", lower):
+            return "constitution"
+        if any(w in lower for w in ["dataset", "statistiche", "quante leggi", "corpus", "dati del", "numero di leggi", "totale leggi", "leggi nel", "quanti atti"]):
+            return "dataset_stats"
+        if any(w in lower for w in ["regno", "regio", "regia", "prerepubblican", "sabauda", "1861", "sabaud", "regi decreti", "era fascist"]):
+            return "kingdom_era"
+        return "groq_rag"
+
+    # ── Inline law card (no expander — avoids nesting) ────────────
+    def _card_chat(law, key_suffix, col=None):
         urn = law.get("urn") or ""
-        title = law.get("title") or "N/A"
+        title = (law.get("title") or "N/A")[:70]
         status = _normalize_status(law.get("status"))
-        badge = "🟢" if status == "in_force" else "🔴"
+        badge = "\U0001f7e2" if status == "in_force" else "\U0001f534"
         typ = law.get("type") or ""
         year = law.get("year") or ""
-        snippet = (law.get("snippet") or (law.get("text") or "")[:200]).strip()
         safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
-        st.markdown(
-            f"<div class='nv-inline-law'>"
-            f"<strong>{badge} {title[:90]}</strong><br>"
-            f"<code>{urn}</code> &nbsp;·&nbsp; {typ} {year}"
-            f"</div>",
+        target = col if col is not None else st
+        target.markdown(
+            f"<div class='nv-inline-law'><strong>{badge} {title}</strong><br>"
+            f"<code style='font-size:0.78rem'>{urn[:80]}</code> \u00b7 {typ} {year}</div>",
             unsafe_allow_html=True,
         )
-        if snippet:
-            st.caption('"' + snippet[:200] + ('...' if len(snippet) > 200 else '') + '"')
-        if st.button("📖 Leggi testo", key=f"open-il-{safe}-{key_suffix}"):
+        if target.button("\U0001f4d6 Apri testo", key=f"open-{safe}-{key_suffix}", use_container_width=True):
             st.session_state["citizen_open_urn"] = urn
             st.rerun()
 
-    # ── Tabs ─────────────────────────────────────────────────────
-    tab_ai, tab_search, tab_latest, tab_const, tab_data = st.tabs([
-        "💬 Assistente AI",
-        "🔍 Cerca Norme",
-        "🆕 Ultime Norme",
-        "🇮🇹 Costituzione",
-        "📊 Dataset",
-    ])
-
-    # ═══════════════════════════════════════════════════════════════
-    # TAB 1 — AI CHATBOT
-    # ═══════════════════════════════════════════════════════════════
-    with tab_ai:
-        st.markdown("""
-        <div class='nv-hero'>
-          <h1>🇮🇹 NormattivaVigente</h1>
-          <p>La legge italiana, spiegata in modo semplice — per ogni cittadino.</p>
-          <small>190.000+ norme vigenti · Powered by Normattiva &amp; Groq AI</small>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if not has_groq:
-            st.warning(
-                "**GROQ_API_KEY non configurata** — risposte AI disabilitate. "
-                "Configura il secret nelle impostazioni dello Space.",
-                icon="⚠️",
+    # ── Dataset statistics helper ─────────────────────────────────
+    def _dataset_stats_msg() -> tuple:
+        if not db:
+            return "Database non disponibile.", []
+        try:
+            total = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+            vigenti = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
+            abrogate = total - vigenti
+            anno_min = db.conn.execute("SELECT MIN(year) FROM laws WHERE year > 0").fetchone()[0]
+            anno_max = db.conn.execute("SELECT MAX(year) FROM laws WHERE year > 0").fetchone()[0]
+            regno_vigenti = db.conn.execute(
+                "SELECT COUNT(*) FROM laws WHERE year > 0 AND year < 1946 AND status='in_force'"
+            ).fetchone()[0]
+            n_2025 = db.conn.execute("SELECT COUNT(*) FROM laws WHERE year=2025").fetchone()[0]
+            msg = (
+                f"\U0001f4ca **Statistiche del dataset NormattivaVigente**\n\n"
+                f"| Indicatore | Valore |\n"
+                f"|---|---|\n"
+                f"| \U0001f4da Totale norme | **{total:,}** |\n"
+                f"| \U0001f7e2 Vigenti | **{vigenti:,}** ({vigenti/total*100:.1f}%) |\n"
+                f"| \U0001f534 Abrogate | **{abrogate:,}** ({abrogate/total*100:.1f}%) |\n"
+                f"| \U0001f4c5 Arco temporale | **{anno_min} \u2013 {anno_max}** |\n"
+                f"| \U0001f3db\ufe0f Norme pre-1946 vigenti | **{regno_vigenti:,}** |\n"
+                f"| \U0001f4c6 Norme 2025 nel dataset | **{n_2025:,}** |\n\n"
+                f"Il corpus copre {anno_max - anno_min} anni di legislazione italiana. "
+                f"Fonte: [Normattiva.it](https://www.normattiva.it) \u00b7 "
+                f"Dataset: [HuggingFace](https://huggingface.co/datasets/diatribe00/normattivavigente-data)\n\n"
+                f"*Vuoi esplorare un\u2019area specifica? Chiedi es.: \u2018quante leggi del 1942 sono vigenti?\u2019 "
+                f"oppure \u2018mostrami le norme sul lavoro del 2020\u2019.*"
             )
+            return msg, []
+        except Exception as e:
+            return f"Errore nel leggere le statistiche: {e}", []
 
-        # Multi-turn chat history
-        if "citizen_chat" not in st.session_state:
-            st.session_state["citizen_chat"] = []
-
-        for idx, msg in enumerate(st.session_state["citizen_chat"]):
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                laws = msg.get("laws") or []
-                if laws:
-                    with st.expander(f"📚 {len(laws)} norme consultate", expanded=False):
-                        for j, law in enumerate(laws[:8]):
-                            _card_inline(law, f"hist-{idx}-{j}")
-
-        question = st.chat_input("Fai una domanda sulla legge italiana…")
-
-        if question:
-            st.session_state["citizen_chat"].append({"role": "user", "content": question})
-            with st.chat_message("user"):
-                st.markdown(question)
-
-            # Smart retrieval with query variants + constitutional lens
-            context_laws: list = _retrieve_context(question, limit=12) if db else []
-
-            with st.chat_message("assistant"):
-                used_model = None
-                if has_groq and context_laws:
-                    with st.spinner("Consulto le norme…"):
-                        answer, err = _call_groq(
-                            question=question,
-                            context_laws=context_laws,
-                            model=GROQ_DEFAULT_MODEL,
-                            max_tokens=1200,
-                            temperature=0.1,
-                        )
-                        used_model = st.session_state.get("last_groq_model_used")
-                        if answer:
-                            reply = answer
-                        else:
-                            reason = err or "Errore AI non specificato"
-                            reply = _build_accountable_fallback(question, context_laws, reason)
-                elif has_groq and not context_laws:
-                    reply = (
-                        "Non ho trovato evidenze sufficienti nel dataset per rispondere in modo affidabile a questa domanda. "
-                        "Riformula indicando area giuridica, soggetto e periodo "
-                        "(es. 'congedo parentale dipendente privato 2024')."
-                    )
-                elif context_laws:
-                    titles = "\n".join(
-                        f"- **{l.get('title','')[:68]}** ({l.get('year','')})"
-                        for l in context_laws[:6]
-                    )
-                    reply = (
-                        f"**Norme trovate nel dataset:**\n\n{titles}\n\n"
-                        "*Configura `GROQ_API_KEY` per ricevere risposte in linguaggio semplice.*"
-                    )
-                else:
-                    reply = "Nessuna norma trovata per questa ricerca."
-
-                st.markdown(reply)
-                if used_model:
-                    st.caption(f"Modello usato: {GROQ_MODELS.get(used_model, used_model)} ({used_model})")
-                if context_laws:
-                    with st.expander(f"📚 {len(context_laws)} norme consultate dal dataset", expanded=False):
-                        for j, law in enumerate(context_laws[:8]):
-                            _card_inline(law, f"ans-{len(st.session_state['citizen_chat'])}-{j}")
-                    with st.expander("📜 Prove normative (estratti testuali)", expanded=True):
-                        for law in context_laws[:6]:
-                            urn = law.get("urn", "N/A")
-                            title = law.get("title", "N/A")
-                            status = "VIGENTE ✓" if _normalize_status(law.get("status")) == "in_force" else "ABROGATA ✗"
-                            st.markdown(f"- **{title}** [{urn}] — {status}")
-                            st.caption(f"\"{_law_proof_excerpt(law)}\"")
-
-            st.session_state["citizen_chat"].append({
-                "role": "assistant",
-                "content": reply,
-                "laws": context_laws,
-            })
-
-        if st.session_state.get("citizen_chat"):
-            if st.button("🗑️ Nuova conversazione", key="clear-chat"):
-                st.session_state["citizen_chat"] = []
-                st.rerun()
-
-    # ═══════════════════════════════════════════════════════════════
-    # TAB 2 — SEARCH
-    # ═══════════════════════════════════════════════════════════════
-    with tab_search:
-        st.subheader("🔍 Cerca tra le norme")
-        sq = st.text_input(
-            "Parole chiave",
-            key="citizen-search-q",
-            placeholder="Es. privacy, IVA, sfratto, sicurezza lavoro, pensione…",
-        )
-        f1, f2, f3 = st.columns(3)
-        type_filter = f1.selectbox(
-            "Tipo norma",
-            ["(tutti)", "LEGGE", "DECRETO LEGISLATIVO", "DECRETO LEGGE",
-             "DECRETO DEL PRESIDENTE DELLA REPUBBLICA", "REGOLAMENTO"],
-            key="cs-type",
-        )
-        year_from = f2.number_input("Anno da", min_value=1800, max_value=2030, value=1948, step=1, key="cs-year-from")
-        year_to = f3.number_input("Anno a", min_value=1800, max_value=2030, value=2026, step=1, key="cs-year-to")
-        show_abrogated = st.checkbox("Includi norme abrogate", key="cs-abrogated", value=False)
-
-        if sq.strip():
-            results = _smart_search(sq.strip(), limit=80)
-            if type_filter != "(tutti)":
-                results = [r for r in results if (r.get("type") or "").upper() == type_filter]
-            results = [r for r in results if year_from <= int(r.get("year") or 0) <= year_to]
-            if not show_abrogated:
-                results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
-            st.caption(f"**{len(results)} norme trovate**")
-            for j, law in enumerate(results[:30]):
-                _card(law, f"sr-{j}")
-            if not results:
-                st.info("Nessun risultato. Prova con parole chiave diverse o cambia i filtri.")
-        else:
-            st.info("Inserisci parole chiave per cercare le norme.")
-
-    # ═══════════════════════════════════════════════════════════════
-    # TAB 3 — LATEST
-    # ═══════════════════════════════════════════════════════════════
-    with tab_latest:
-        st.subheader("🆕 Ultime norme pubblicate")
-        st.caption("Le norme vigenti più recenti nel dataset Normattiva.")
-        if db:
-            try:
-                rows = db.conn.execute(
-                    "SELECT urn, title, type, year, date, status FROM laws "
-                    "WHERE status='in_force' ORDER BY date DESC LIMIT 40"
+    # ── Kingdom-era laws helper ────────────────────────────────────
+    def _kingdom_era_msg() -> tuple:
+        if not db:
+            return "Database non disponibile.", []
+        try:
+            total_regno = db.conn.execute(
+                "SELECT COUNT(*) FROM laws WHERE year > 0 AND year < 1946"
+            ).fetchone()[0]
+            vigenti_regno = db.conn.execute(
+                "SELECT COUNT(*) FROM laws WHERE year > 0 AND year < 1946 AND status='in_force'"
+            ).fetchone()[0]
+            by_type = db.conn.execute(
+                "SELECT type, COUNT(*) as n FROM laws "
+                "WHERE year > 0 AND year < 1946 AND status='in_force' "
+                "GROUP BY type ORDER BY n DESC LIMIT 5"
+            ).fetchall()
+            rows_sample = [
+                dict(r) for r in db.conn.execute(
+                    "SELECT urn, title, type, year, status FROM laws "
+                    "WHERE year > 0 AND year < 1946 AND status='in_force' "
+                    "ORDER BY year ASC LIMIT 8"
                 ).fetchall()
-                for j, r in enumerate(rows):
-                    _card(dict(r), f"lat-{j}")
-                if not rows:
-                    st.info("Nessuna norma trovata nel database.")
-            except Exception:
-                try:
-                    rows = db.conn.execute(
-                        "SELECT urn, title, type, year, status FROM laws ORDER BY year DESC LIMIT 40"
-                    ).fetchall()
-                    for j, r in enumerate(rows):
-                        _card(dict(r), f"lat2-{j}")
-                except Exception as e2:
-                    st.error(f"Errore: {e2}")
-        else:
-            st.warning("Database non disponibile.")
+            ]
+            tipo_lines = "\n".join(
+                f"| {r[0] or 'N/A'} | {r[1]:,} |" for r in by_type
+            )
+            msg = (
+                f"\U0001f3db\ufe0f **Norme del Regno d\u2019Italia ancora vigenti nel dataset**\n\n"
+                f"Il corpus contiene **{total_regno:,}** atti normativi emanati prima del 1946, "
+                f"di cui **{vigenti_regno:,} ancora classificati in vigore** "
+                f"(snapshot Normattiva pre-aprile 2025).\n\n"
+                f"> \u26a0\ufe0f **Nota aggiornamento:** La Legge 56/2025 (7 aprile 2025) ha abrogato "
+                f"oltre 30.000 atti prerepubblicani. Il dataset potrebbe non riflettere ancora queste abrogazioni. "
+                f"Il numero reale di norme del Regno ancora vigenti \u00e8 stimato in 2.000\u20133.500.\n\n"
+                f"**Composizione per tipo:**\n\n"
+                f"| Tipo | Vigenti |\n|---|---|\n"
+                f"{tipo_lines}\n\n"
+                f"**Le pi\u00f9 antiche ancora vigenti nel dataset (prime 8):**"
+            )
+            return msg, rows_sample
+        except Exception as e:
+            return f"Errore: {e}", []
 
-    # ═══════════════════════════════════════════════════════════════
-    # TAB 4 — CONSTITUTION
-    # ═══════════════════════════════════════════════════════════════
-    with tab_const:
-        st.subheader("🇮🇹 Costituzione della Repubblica Italiana")
-        st.caption("Cerca un principio, un diritto o un articolo della Costituzione.")
-        cq = st.text_input(
-            "Cerca nella Costituzione",
-            key="citizen-const-q",
-            placeholder="Es. diritto al lavoro, libertà di stampa, salute, famiglia…",
-        )
-        if cq.strip():
-            results = _smart_search(f"costituzione {cq.strip()}", limit=25)
-            const_rows = [
+    # ── Initialize chat session ────────────────────────────────────
+    if "citizen_chat" not in st.session_state:
+        st.session_state["citizen_chat"] = [
+            {
+                "role": "assistant",
+                "content": (
+                    "\U0001f1ee\U0001f1f9 **Ciao! Sono il tuo assistente giuridico.**\n\n"
+                    "Scrivi qualsiasi domanda in italiano \u2014 capisco il linguaggio naturale:\n"
+                    "- \U0001f50d Cerco norme nel dataset (190.000+ leggi italiane)\n"
+                    "- \U0001f4d6 Mostro i testi integrali direttamente\n"
+                    "- \U0001f916 Spiego in modo semplice cosa dice la legge\n"
+                    "- \U0001f4ca Analizzo le statistiche del corpus legislativo\n\n"
+                    "**Suggerimenti:** *programma scolastico*, *congedo parentale*, "
+                    "*sfratto*, *pensione*, *privacy*, *codice penale*"
+                ),
+                "laws": [],
+            }
+        ]
+
+    # ── Process pending query ─────────────────────────────────────
+    pending = st.session_state.pop("citizen_pending", None)
+    if pending and db:
+        intent = _detect_intent(pending)
+        new_msg = {"role": "assistant", "content": "", "laws": []}
+
+        if intent == "latest":
+            try:
+                recent = [
+                    dict(r) for r in db.conn.execute(
+                        "SELECT urn, title, type, year, status, date FROM laws "
+                        "WHERE status='in_force' ORDER BY date DESC LIMIT 12"
+                    ).fetchall()
+                ]
+                new_msg["content"] = f"\U0001f4c5 Ecco le ultime **{len(recent)} norme vigenti** nel dataset:"
+                new_msg["laws"] = recent
+            except Exception as e:
+                new_msg["content"] = f"\u26a0\ufe0f Errore nel caricare le norme recenti: {e}"
+
+        elif intent == "constitution":
+            results = _smart_search("costituzione diritti fondamentali", limit=25)
+            cost_rows = [
                 r for r in results
                 if "costituzione" in (r.get("urn") or "").lower()
                 or "costituzione" in (r.get("title") or "").lower()
-            ]
-            if not const_rows:
-                const_rows = results[:10]
-            if const_rows:
-                for j, law in enumerate(const_rows):
-                    _card(law, f"co-{j}")
+            ] or results[:5]
+            if has_groq and cost_rows:
+                with st.spinner("Consulto la Costituzione\u2026"):
+                    answer, err = _call_groq(pending, cost_rows, model=GROQ_DEFAULT_MODEL, max_tokens=700)
+                new_msg["content"] = answer or f"\u26a0\ufe0f {err}"
             else:
-                st.info("Nessun risultato. Prova con: 'lavoro', 'libertà', 'salute', 'uguaglianza'.")
-        else:
-            st.markdown("""
-**Principi fondamentali della Repubblica Italiana**
+                new_msg["content"] = "**Principi fondamentali della Costituzione**\n\nEcco le norme correlate:"
+            new_msg["laws"] = cost_rows
 
-| Articolo | Principio |
-|----------|-----------|
-| Art. 1 | La Repubblica è fondata sul **lavoro** |
-| Art. 2 | Diritti inviolabili dell'**uomo** |
-| Art. 3 | **Uguaglianza** di tutti i cittadini |
-| Art. 13 | **Libertà personale** |
-| Art. 21 | **Libertà di espressione** |
-| Art. 32 | Diritto alla **salute** |
-| Art. 36 | Diritto a una **retribuzione equa** |
-| Art. 37 | **Parità uomo-donna** nel lavoro |
-| Art. 38 | Diritto alla **previdenza sociale** |
+        elif intent == "dataset_stats":
+            content_text, laws = _dataset_stats_msg()
+            new_msg["content"] = content_text
+            new_msg["laws"] = laws
 
-*Cerca un argomento nel campo sopra per trovare le norme correlate.*
-            """)
+        elif intent == "kingdom_era":
+            content_text, laws = _kingdom_era_msg()
+            new_msg["content"] = content_text
+            new_msg["laws"] = laws
 
-    # ═══════════════════════════════════════════════════════════════
-    # TAB 5 — DATASET EXPLORER
-    # ═══════════════════════════════════════════════════════════════
-    with tab_data:
-        st.subheader("📊 Esplora il Dataset Normattiva")
-        st.caption(
-            "Statistiche e accesso diretto ai dati del corpus legislativo italiano. "
-            "Dataset: [diatribe00/normattivavigente-data](https://huggingface.co/datasets/diatribe00/normattivavigente-data)"
-        )
-
-        if db:
-            # ── High-level counts ──────────────────────────────────
-            try:
-                totale = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
-                vigenti = db.conn.execute(
-                    "SELECT COUNT(*) FROM laws WHERE status='in_force'"
-                ).fetchone()[0]
-                abrogati = totale - vigenti
-                anno_min = db.conn.execute("SELECT MIN(year) FROM laws WHERE year > 0").fetchone()[0]
-                anno_max = db.conn.execute("SELECT MAX(year) FROM laws WHERE year > 0").fetchone()[0]
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("📚 Totale norme", f"{totale:,}")
-                c2.metric("🟢 Vigenti", f"{vigenti:,}", f"{vigenti/totale*100:.1f}%" if totale else "")
-                c3.metric("🔴 Abrogate", f"{abrogati:,}", f"{abrogati/totale*100:.1f}%" if totale else "")
-                c4.metric("📅 Arco temporale", f"{anno_min}–{anno_max}")
-            except Exception as e:
-                st.warning(f"Impossibile caricare le statistiche: {e}")
-
-            st.divider()
-
-            # ── Laws by type ───────────────────────────────────────
-            st.markdown("#### Composizione per tipo di atto")
-            try:
-                rows_type = db.conn.execute(
-                    "SELECT type, COUNT(*) as n FROM laws WHERE type IS NOT NULL "
-                    "GROUP BY type ORDER BY n DESC LIMIT 15"
-                ).fetchall()
-                if rows_type:
-                    data_type = {r[0] or "N/A": r[1] for r in rows_type}
-                    st.bar_chart(data_type)
-                    with st.expander("Tabella dettagliata"):
-                        for tipo, count in data_type.items():
-                            st.markdown(f"- **{tipo}**: {count:,} norme")
-            except Exception as e:
-                st.warning(f"Errore tipo: {e}")
-
-            st.divider()
-
-            # ── Laws by decade ─────────────────────────────────────
-            st.markdown("#### Distribuzione per decennio")
-            try:
-                rows_dec = db.conn.execute(
-                    "SELECT (year/10)*10 AS decade, COUNT(*) AS n FROM laws "
-                    "WHERE year > 0 GROUP BY decade ORDER BY decade"
-                ).fetchall()
-                if rows_dec:
-                    data_dec = {f"{r[0]}s": r[1] for r in rows_dec}
-                    st.bar_chart(data_dec)
-            except Exception as e:
-                st.warning(f"Errore decennio: {e}")
-
-            st.divider()
-
-            # ── Kingdom-era laws still in force ───────────────────
-            st.markdown("#### 🏛️ Norme del Regno d'Italia ancora vigenti")
-            st.caption("Regio Decreti e leggi emanate prima del 1946 che rimangono in vigore oggi.")
-            try:
-                rows_regno = db.conn.execute(
-                    "SELECT urn, title, type, year, status FROM laws "
-                    "WHERE year < 1946 AND year > 0 AND status='in_force' "
-                    "ORDER BY year ASC LIMIT 30"
-                ).fetchall()
-                if rows_regno:
-                    st.info(f"**{len(rows_regno)} norme pre-Repubblica ancora vigenti** (mostrando le prime 30)")
-                    for j, r in enumerate(rows_regno):
-                        law = dict(r)
-                        _card(law, f"regno-{j}")
+        else:  # groq_rag — general question with FTS + Groq
+            context_laws = _retrieve_context(pending, limit=12)
+            if has_groq and context_laws:
+                with st.spinner("\U0001f50d Ricerca nel dataset Normattiva\u2026"):
+                    answer, err = _call_groq(
+                        pending, context_laws,
+                        model=GROQ_DEFAULT_MODEL, max_tokens=1200, temperature=0.1,
+                    )
+                used_model = st.session_state.get("last_groq_model_used")
+                if answer:
+                    reply = answer
+                    if used_model:
+                        reply += f"\n\n*Modello: {GROQ_MODELS.get(used_model, used_model)} ({used_model})*"
                 else:
-                    st.info("Nessuna norma pre-1946 vigente trovata nel dataset.")
-            except Exception as e:
-                st.warning(f"Errore: {e}")
+                    reply = _build_accountable_fallback(pending, context_laws, err or "Errore AI")
+            elif has_groq and not context_laws:
+                reply = (
+                    "Non ho trovato evidenze nel dataset per questa domanda. "
+                    "Prova a essere pi\u00f9 specifico (es. \u2018congedo parentale dipendente privato 2024\u2019)."
+                )
+                context_laws = []
+            elif context_laws:
+                titles = "\n".join(
+                    f"- **{l.get('title','')[:68]}** ({l.get('year','')})"
+                    for l in context_laws[:6]
+                )
+                reply = (
+                    f"**Norme trovate nel dataset:**\n\n{titles}\n\n"
+                    "*Configura `GROQ_API_KEY` per ricevere risposte in linguaggio semplice.*"
+                )
+            else:
+                reply = "Nessuna norma trovata. Prova con parole chiave diverse."
+                context_laws = []
+            new_msg["content"] = reply
+            new_msg["laws"] = context_laws
 
-            st.divider()
+        st.session_state["citizen_chat"].append(new_msg)
 
-            # ── Explore & download ─────────────────────────────────
-            st.markdown("#### 🔗 Accesso ai file del dataset")
-            st.markdown("""
-| Risorsa | Link |
-|---------|------|
-| 📦 Dataset HuggingFace | [diatribe00/normattivavigente-data](https://huggingface.co/datasets/diatribe00/normattivavigente-data) |
-| 📝 Corpus vigenti (JSONL) | `/data/vigenti.jsonl` nel dataset |
-| 📝 Corpus abrogati (JSONL) | `/data/abrogati.jsonl` nel dataset |
-| 🔍 Source code Space | [diatribe00/normattivavigente](https://huggingface.co/spaces/diatribe00/normattivavigente/tree/main) |
-| ⚖️ Normattiva (fonte ufficiale) | [normattiva.it](https://www.normattiva.it) |
-            """)
+    # ── Render chat history ────────────────────────────────────────
+    for idx, msg in enumerate(st.session_state["citizen_chat"]):
+        with st.chat_message(msg["role"]):
+            if msg.get("content"):
+                st.markdown(msg["content"])
+            laws = msg.get("laws") or []
+            if laws:
+                st.caption(f"\U0001f4da **{len(laws)} norme** nel dataset \u2014 clicca per aprire:")
+                g1, g2 = st.columns(2)
+                for j, law in enumerate(laws[:8]):
+                    _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
 
-            # ── Ask AI about the dataset ───────────────────────────
-            st.divider()
-            st.markdown("#### 🤖 Chiedi all'AI sul dataset")
-            data_q = st.text_input(
-                "Es. quante leggi del 1942 sono ancora vigenti? Cosa c'è in vigore dal codice civile?",
-                key="data-tab-q",
-                placeholder="Domanda sul corpus legislativo…",
-            )
-            if data_q.strip() and st.button("Analizza →", key="data-tab-go"):
-                with st.spinner("Ricerca nel dataset…"):
-                    ctx = _retrieve_context(data_q.strip(), limit=10) if db else []
-                if ctx and has_groq:
-                    ans, err = _call_groq(data_q.strip(), ctx, model=GROQ_DEFAULT_MODEL,
-                                         max_tokens=800, temperature=0.05)
-                    if ans:
-                        st.markdown(ans)
-                    else:
-                        st.warning(err or "Nessuna risposta AI.")
-                    with st.expander("Norme di riferimento"):
-                        for j, law in enumerate(ctx[:6]):
-                            _card_inline(law, f"dq-{j}")
-                elif ctx:
-                    for j, law in enumerate(ctx[:6]):
-                        _card(law, f"dq2-{j}")
-                else:
-                    st.info("Nessuna norma trovata. Prova con parole chiave più specifiche.")
-        else:
-            st.warning("Database non disponibile — il dataset non è stato caricato.")
-            st.markdown("""
-Il dataset Normattiva Vigente è disponibile su HuggingFace:
-- 📦 [diatribe00/normattivavigente-data](https://huggingface.co/datasets/diatribe00/normattivavigente-data)
-- Contiene 67.000+ norme vigenti in formato JSONL con full-text, URN, tipo e anno.
-            """)
+    # ── Chat input (sticky bottom) ─────────────────────────────────
+    user_input = st.chat_input("Fai una domanda sulla legge italiana\u2026")
+    if user_input:
+        st.session_state["citizen_chat"].append({"role": "user", "content": user_input, "laws": []})
+        st.session_state["citizen_pending"] = user_input
+        st.rerun()
+
+    # ── Clear button ───────────────────────────────────────────────
+    if len(st.session_state.get("citizen_chat", [])) > 1:
+        if st.button("\U0001f5d1\ufe0f Nuova conversazione", key="clear-chat"):
+            st.session_state["citizen_chat"] = []
+            st.rerun()
 
 def main():
     # Build a complete registry of pages and then expose only the subset
