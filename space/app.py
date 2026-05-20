@@ -5973,14 +5973,78 @@ def _citizen_mvp(db):
         year = law.get("year") or ""
         safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
         target = col if col is not None else st
+
+        # Clickable URN link to Normattiva.it official source
+        norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+        urn_html = (
+            f"<a href='{norm_url}' target='_blank' rel='noopener' "
+            f"style='color:#1d4ed8;font-size:0.76rem;text-decoration:underline;word-break:break-all;'>"
+            f"{urn[:80]}</a>"
+        ) if urn else f"<code style='font-size:0.76rem;'>{urn[:80]}</code>"
+
+        # Preview: relevance note (from AI) OR text excerpt from DB
+        relevance = (law.get("relevance") or "").strip()
+        if not relevance:
+            exc = _law_proof_excerpt(law)
+            if exc and exc != "Estratto non disponibile nel dataset.":
+                relevance = exc
+
+        preview_html = (
+            f"<p style='font-size:0.82rem;color:#334155;margin:0.25rem 0 0;"
+            f"line-height:1.45;'>\U0001f4a1 {relevance[:200]}</p>"
+        ) if relevance else ""
+
         target.markdown(
-            f"<div class='nv-inline-law'><strong>{badge} {title}</strong><br>"
-            f"<code style='font-size:0.78rem'>{urn[:80]}</code> \u00b7 {typ} {year}</div>",
+            f"<div class='nv-inline-law'>"
+            f"<strong>{badge} {title}</strong><br>"
+            f"{urn_html} \u00b7 {typ} {year}"
+            f"{preview_html}"
+            f"</div>",
             unsafe_allow_html=True,
         )
         if target.button("\U0001f4d6 Apri testo", key=f"open-{safe}-{key_suffix}", use_container_width=True):
             st.session_state["citizen_open_urn"] = urn
             st.rerun()
+
+    def _annotate_relevance(answer: str, laws: list) -> list:
+        """Attach a 'relevance' sentence to each law dict by finding where the AI cited it."""
+        if not answer or not laws:
+            return laws
+        # Split answer into sentences for matching
+        sentences = _re.split(r"(?<=[.!?])\s+", answer)
+        result = []
+        for law in laws:
+            law_copy = dict(law)
+            urn = law.get("urn") or ""
+            title_words = [
+                w for w in (law.get("title") or "").lower().split()
+                if len(w) > 4 and w not in {"della", "dello", "degli", "delle", "nella", "negli", "dalle"}
+            ]
+            # URN number fragments like "2023;5" or "1942;262"
+            urn_fragments = _re.findall(r"\d{4}[;\-]\d+", urn)
+            urn_year = _re.search(r":(\d{4})-", urn)
+            if urn_year:
+                urn_fragments.append(urn_year.group(1))
+
+            best = ""
+            best_score = 0
+            for sent in sentences:
+                sent_l = sent.lower()
+                score = 0
+                for frag in urn_fragments:
+                    if frag in sent:
+                        score += 3
+                for w in title_words[:5]:
+                    if w in sent_l:
+                        score += 1
+                if score > best_score:
+                    best_score = score
+                    best = sent.strip()
+
+            if best and best_score >= 2:
+                law_copy["relevance"] = best[:220]
+            result.append(law_copy)
+        return result
 
     # ── Dataset statistics helper ─────────────────────────────────
     def _dataset_stats_msg() -> tuple:
@@ -6107,6 +6171,8 @@ def _citizen_mvp(db):
             if has_groq and cost_rows:
                 with st.spinner("Consulto la Costituzione\u2026"):
                     answer, err = _call_groq(pending, cost_rows, model=GROQ_DEFAULT_MODEL, max_tokens=700)
+                if answer:
+                    cost_rows = _annotate_relevance(answer, cost_rows)
                 new_msg["content"] = answer or f"\u26a0\ufe0f {err}"
             else:
                 new_msg["content"] = "**Principi fondamentali della Costituzione**\n\nEcco le norme correlate:"
@@ -6135,6 +6201,8 @@ def _citizen_mvp(db):
                     reply = answer
                     if used_model:
                         reply += f"\n\n*Modello: {GROQ_MODELS.get(used_model, used_model)} ({used_model})*"
+                    # Annotate each law with the sentence where the AI cited it
+                    context_laws = _annotate_relevance(answer, context_laws)
                 else:
                     reply = _build_accountable_fallback(pending, context_laws, err or "Errore AI")
             elif has_groq and not context_laws:
@@ -6167,10 +6235,23 @@ def _citizen_mvp(db):
                 st.markdown(msg["content"])
             laws = msg.get("laws") or []
             if laws:
-                st.caption(f"\U0001f4da **{len(laws)} norme** nel dataset \u2014 clicca per aprire:")
-                g1, g2 = st.columns(2)
-                for j, law in enumerate(laws[:8]):
-                    _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
+                has_relevance = any(l.get("relevance") for l in laws)
+                if has_relevance:
+                    st.caption(
+                        f"\U0001f4da **{len(laws)} norme pertinenti** \u2014 "
+                        "ogni scheda mostra perch\u00e9 questa legge \u00e8 rilevante "
+                        "e il link \u0022URN\u0022 porta al testo ufficiale su Normattiva.it:"
+                    )
+                    for j, law in enumerate(laws[:8]):
+                        _card_chat(law, f"h{idx}-{j}")
+                else:
+                    st.caption(
+                        f"\U0001f4da **{len(laws)} norme** nel dataset \u2014 "
+                        "il link URN apre il testo ufficiale su Normattiva.it:"
+                    )
+                    g1, g2 = st.columns(2)
+                    for j, law in enumerate(laws[:8]):
+                        _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
 
     # ── Chat input (sticky bottom) ─────────────────────────────────
     user_input = st.chat_input("Fai una domanda sulla legge italiana\u2026")
