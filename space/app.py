@@ -5966,7 +5966,7 @@ def _citizen_mvp(db):
     # ── Inline law card (no expander — avoids nesting) ────────────
     def _card_chat(law, key_suffix, col=None):
         urn = law.get("urn") or ""
-        title = (law.get("title") or "N/A")[:70]
+        title = (law.get("title") or "N/A")[:72]
         status = _normalize_status(law.get("status"))
         badge = "\U0001f7e2" if status == "in_force" else "\U0001f534"
         typ = law.get("type") or ""
@@ -5974,75 +5974,164 @@ def _citizen_mvp(db):
         safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
         target = col if col is not None else st
 
-        # Clickable URN link to Normattiva.it official source
+        # Clickable URN → Normattiva.it official source
         norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
         urn_html = (
             f"<a href='{norm_url}' target='_blank' rel='noopener' "
-            f"style='color:#1d4ed8;font-size:0.76rem;text-decoration:underline;word-break:break-all;'>"
-            f"{urn[:80]}</a>"
-        ) if urn else f"<code style='font-size:0.76rem;'>{urn[:80]}</code>"
+            f"style='color:#1d4ed8;font-size:0.74rem;text-decoration:underline;"
+            f"word-break:break-all;'>{urn[:80]}</a>"
+        ) if urn else f"<code style='font-size:0.74rem;'>{urn[:80]}</code>"
 
-        # Preview: relevance note (from AI) OR text excerpt from DB
-        relevance = (law.get("relevance") or "").strip()
-        if not relevance:
-            exc = _law_proof_excerpt(law)
-            if exc and exc != "Estratto non disponibile nel dataset.":
-                relevance = exc
+        # ── Section 1: what the AI said about this law ────────────
+        ai_ctx = (law.get("ai_context") or law.get("relevance") or "").strip()
+        ai_html = ""
+        if ai_ctx:
+            # Escape HTML special chars
+            safe_ctx = (ai_ctx
+                        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace('"', "&quot;"))
+            ai_html = (
+                f"<div style='margin-top:0.45rem;padding:0.35rem 0.5rem;"
+                f"background:#eff6ff;border-radius:6px;border-left:3px solid #1d4ed8;'>"
+                f"<span style='font-size:0.74rem;font-weight:700;color:#1e3a8a;"
+                f"text-transform:uppercase;letter-spacing:0.04em;'>💬 Perché è rilevante</span><br>"
+                f"<span style='font-size:0.83rem;color:#1e293b;line-height:1.5;"
+                f"display:block;margin-top:0.2rem;'>{safe_ctx[:320]}</span>"
+                f"</div>"
+            )
 
-        preview_html = (
-            f"<p style='font-size:0.82rem;color:#334155;margin:0.25rem 0 0;"
-            f"line-height:1.45;'>\U0001f4a1 {relevance[:200]}</p>"
-        ) if relevance else ""
+        # ── Section 2: excerpt from the law's own text ────────────
+        exc = (law.get("text_excerpt") or "").strip()
+        exc_html = ""
+        if exc:
+            safe_exc = (exc
+                        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace('"', "&quot;"))
+            exc_html = (
+                f"<div style='margin-top:0.4rem;padding:0.35rem 0.5rem;"
+                f"background:#f8fafc;border-radius:6px;border-left:3px solid #94a3b8;'>"
+                f"<span style='font-size:0.74rem;font-weight:700;color:#475569;"
+                f"text-transform:uppercase;letter-spacing:0.04em;'>📄 Dal testo della norma</span><br>"
+                f"<span style='font-size:0.81rem;color:#334155;font-style:italic;"
+                f"line-height:1.5;display:block;margin-top:0.2rem;'>{safe_exc[:280]}</span>"
+                f"</div>"
+            )
 
         target.markdown(
-            f"<div class='nv-inline-law'>"
-            f"<strong>{badge} {title}</strong><br>"
-            f"{urn_html} \u00b7 {typ} {year}"
-            f"{preview_html}"
+            f"<div class='nv-inline-law' style='padding:0.65rem 0.8rem;'>"
+            f"<strong style='font-size:0.91rem;'>{badge} {title}</strong><br>"
+            f"<span style='font-size:0.78rem;color:#64748b;'>{typ} {year}</span> &nbsp;·&nbsp; "
+            f"{urn_html}"
+            f"{ai_html}"
+            f"{exc_html}"
             f"</div>",
             unsafe_allow_html=True,
         )
-        if target.button("\U0001f4d6 Apri testo", key=f"open-{safe}-{key_suffix}", use_container_width=True):
+        if target.button(
+            "\U0001f4d6 Apri testo completo",
+            key=f"open-{safe}-{key_suffix}",
+            use_container_width=True,
+        ):
             st.session_state["citizen_open_urn"] = urn
             st.rerun()
 
-    def _annotate_relevance(answer: str, laws: list) -> list:
-        """Attach a 'relevance' sentence to each law dict by finding where the AI cited it."""
+    def _annotate_relevance(answer: str, laws: list, query: str = "") -> list:
+        """For each law attach two explainer fields:
+          - law["ai_context"]   : 1-3 sentences from the AI answer that cite this law
+          - law["text_excerpt"] : most query-relevant passage from the law's own DB text
+        """
         if not answer or not laws:
             return laws
-        # Split answer into sentences for matching
-        sentences = _re.split(r"(?<=[.!?])\s+", answer)
+
+        # Normalised query tokens (for excerpt scoring)
+        q_tokens = set(
+            w for w in _re.sub(r"[^\w\s]", " ", (query or "").lower()).split()
+            if len(w) > 3 and w not in {
+                "della", "dello", "degli", "delle", "nella", "negli", "dalle",
+                "sono", "come", "cosa", "quando", "dove", "questo", "questa",
+                "quali", "qual", "vuole", "vuoi", "anche", "legge", "norme",
+                "norma", "atti", "atto",
+            }
+        )
+
+        # Split AI answer into individual sentences
+        sentences = _re.split(r"(?<=[.!?])\s+", _re.sub(r"\n+", " ", answer))
+
+        _STOP = {"della", "dello", "degli", "delle", "nella", "negli", "dalle",
+                 "negli", "sulle", "sulla", "sullo", "negli", "negli"}
+
         result = []
         for law in laws:
             law_copy = dict(law)
             urn = law.get("urn") or ""
+            title = (law.get("title") or "").lower()
             title_words = [
-                w for w in (law.get("title") or "").lower().split()
-                if len(w) > 4 and w not in {"della", "dello", "degli", "delle", "nella", "negli", "dalle"}
+                w for w in title.split()
+                if len(w) > 4 and w not in _STOP
             ]
-            # URN number fragments like "2023;5" or "1942;262"
-            urn_fragments = _re.findall(r"\d{4}[;\-]\d+", urn)
-            urn_year = _re.search(r":(\d{4})-", urn)
-            if urn_year:
-                urn_fragments.append(urn_year.group(1))
 
-            best = ""
-            best_score = 0
+            # URN fragments: "2023;5", "1942-262", and the year alone
+            urn_fragments = _re.findall(r"\d{4}[;\-]\d+", urn)
+            urn_year_m = _re.search(r":(\d{4})-", urn)
+            if urn_year_m:
+                urn_fragments.append(urn_year_m.group(1))
+            # Also law number from URN tail e.g. ";107" → "107"
+            urn_num = _re.search(r";(\d+)$", urn)
+            if urn_num:
+                urn_fragments.append(urn_num.group(1))
+
+            # ── Collect ALL sentences that mention this law ────────
+            cited_sentences = []
             for sent in sentences:
                 sent_l = sent.lower()
                 score = 0
                 for frag in urn_fragments:
                     if frag in sent:
-                        score += 3
-                for w in title_words[:5]:
+                        score += 4
+                for w in title_words[:6]:
                     if w in sent_l:
                         score += 1
-                if score > best_score:
-                    best_score = score
-                    best = sent.strip()
+                if score >= 2:
+                    cited_sentences.append((score, sent.strip()))
 
-            if best and best_score >= 2:
-                law_copy["relevance"] = best[:220]
+            cited_sentences.sort(key=lambda x: -x[0])
+            # Up to 3 sentences, deduplicated, joined naturally
+            seen_s: set = set()
+            picked = []
+            for _, s in cited_sentences:
+                key = s[:40]
+                if key not in seen_s and len(s) > 20:
+                    seen_s.add(key)
+                    picked.append(s)
+                if len(picked) >= 3:
+                    break
+
+            if picked:
+                law_copy["ai_context"] = " ".join(picked)
+
+            # ── Best-matching excerpt from DB text ────────────────
+            raw_text = _re.sub(r"\s+", " ", (law.get("snippet") or law.get("text") or "").strip())
+            if raw_text and len(raw_text) > 40:
+                # Build overlapping windows of ~240 chars
+                window, step = 280, 140
+                best_exc, best_exc_score = "", 0
+                for start in range(0, min(len(raw_text), 4000), step):
+                    chunk = raw_text[start: start + window]
+                    chunk_l = chunk.lower()
+                    sc = 0
+                    for tok in q_tokens:
+                        if tok in chunk_l:
+                            sc += 2
+                    for tw in title_words[:4]:
+                        if tw in chunk_l:
+                            sc += 1
+                    if sc > best_exc_score:
+                        best_exc_score = sc
+                        best_exc = chunk.strip()
+                if not best_exc:
+                    best_exc = raw_text[:240]
+                law_copy["text_excerpt"] = best_exc[:280] + ("…" if len(best_exc) >= 280 else "")
+
             result.append(law_copy)
         return result
 
@@ -6172,7 +6261,7 @@ def _citizen_mvp(db):
                 with st.spinner("Consulto la Costituzione\u2026"):
                     answer, err = _call_groq(pending, cost_rows, model=GROQ_DEFAULT_MODEL, max_tokens=700)
                 if answer:
-                    cost_rows = _annotate_relevance(answer, cost_rows)
+                    cost_rows = _annotate_relevance(answer, cost_rows, query=pending)
                 new_msg["content"] = answer or f"\u26a0\ufe0f {err}"
             else:
                 new_msg["content"] = "**Principi fondamentali della Costituzione**\n\nEcco le norme correlate:"
@@ -6201,8 +6290,8 @@ def _citizen_mvp(db):
                     reply = answer
                     if used_model:
                         reply += f"\n\n*Modello: {GROQ_MODELS.get(used_model, used_model)} ({used_model})*"
-                    # Annotate each law with the sentence where the AI cited it
-                    context_laws = _annotate_relevance(answer, context_laws)
+                    # Annotate each law with AI context + best text excerpt
+                    context_laws = _annotate_relevance(answer, context_laws, query=pending)
                 else:
                     reply = _build_accountable_fallback(pending, context_laws, err or "Errore AI")
             elif has_groq and not context_laws:
@@ -6235,19 +6324,20 @@ def _citizen_mvp(db):
                 st.markdown(msg["content"])
             laws = msg.get("laws") or []
             if laws:
-                has_relevance = any(l.get("relevance") for l in laws)
-                if has_relevance:
+                has_ctx = any(l.get("ai_context") or l.get("text_excerpt") for l in laws)
+                if has_ctx:
                     st.caption(
-                        f"\U0001f4da **{len(laws)} norme pertinenti** \u2014 "
-                        "ogni scheda mostra perch\u00e9 questa legge \u00e8 rilevante "
-                        "e il link \u0022URN\u0022 porta al testo ufficiale su Normattiva.it:"
+                        f"\U0001f4da **{len(laws)} norme pertinenti** — "
+                        "ogni scheda riporta **perché è rilevante** (risposta AI) "
+                        "e **un estratto dal testo ufficiale**. "
+                        "Il link URN apre la fonte su Normattiva.it."
                     )
                     for j, law in enumerate(laws[:8]):
                         _card_chat(law, f"h{idx}-{j}")
                 else:
                     st.caption(
-                        f"\U0001f4da **{len(laws)} norme** nel dataset \u2014 "
-                        "il link URN apre il testo ufficiale su Normattiva.it:"
+                        f"\U0001f4da **{len(laws)} norme** nel dataset — "
+                        "il link URN porta al testo ufficiale su Normattiva.it:"
                     )
                     g1, g2 = st.columns(2)
                     for j, law in enumerate(laws[:8]):
