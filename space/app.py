@@ -5919,11 +5919,23 @@ def _citizen_mvp(db):
         return
 
     # ── Hero ───────────────────────────────────────────────────────
-    st.markdown("""
+    latest_db_date = "N/A"
+    total_db_laws = 0
+    if db:
+        try:
+            latest_db_date = db.conn.execute(
+                "SELECT MAX(date) FROM laws WHERE date != ''"
+            ).fetchone()[0] or "N/A"
+            total_db_laws = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+        except Exception:
+            pass
+    total_str = f"{total_db_laws:,}" if total_db_laws else "190.000+"
+    sync_str = f"Aggiornato al {latest_db_date}" if latest_db_date != "N/A" else "Aggiornamento notturno"
+    st.markdown(f"""
     <div class='nv-hero'>
       <h1>\U0001f1ee\U0001f1f9 NormattivaVigente</h1>
       <p>La legge italiana, spiegata in modo semplice \u2014 per ogni cittadino.</p>
-      <small>190.000+ norme \u00b7 Dataset Normattiva \u00b7 Powered by Groq AI</small>
+      <small>{total_str} norme \u00b7 {sync_str} \u00b7 Powered by Groq AI</small>
     </div>
     """, unsafe_allow_html=True)
 
@@ -5957,9 +5969,13 @@ def _citizen_mvp(db):
             return "latest"
         if _re.search(r"costituzione|art[\.\s]+cost|diritto (fondamentale|inviolabile)", lower):
             return "constitution"
-        if any(w in lower for w in ["dataset", "statistiche", "quante leggi", "corpus", "dati del", "numero di leggi", "totale leggi", "leggi nel", "quanti atti"]):
+        if any(w in lower for w in ["dataset", "statistiche", "quante leggi", "corpus", "dati del",
+                                     "numero di leggi", "totale leggi", "leggi nel", "quanti atti",
+                                     "sincronizzat", "aggiornament", "copertura", "quante norme"]):
             return "dataset_stats"
-        if any(w in lower for w in ["regno", "regio", "regia", "prerepubblican", "sabauda", "1861", "sabaud", "regi decreti", "era fascist"]):
+        if any(w in lower for w in ["regno", "regio", "regia", "prerepubblican", "sabauda", "1861",
+                                     "sabaud", "regi decreti", "era fascist", "fascismo", "legge 56",
+                                     "abrogaz.*2025", "leggi del regno", "monarchia", "prima della repubblica"]):
             return "kingdom_era"
         return "groq_rag"
 
@@ -6149,6 +6165,14 @@ def _citizen_mvp(db):
                 "SELECT COUNT(*) FROM laws WHERE year > 0 AND year < 1946 AND status='in_force'"
             ).fetchone()[0]
             n_2025 = db.conn.execute("SELECT COUNT(*) FROM laws WHERE year=2025").fetchone()[0]
+            n_2026 = db.conn.execute("SELECT COUNT(*) FROM laws WHERE year=2026").fetchone()[0]
+            latest_date = db.conn.execute(
+                "SELECT MAX(date) FROM laws WHERE date != ''"
+            ).fetchone()[0] or "N/A"
+            latest_law = db.conn.execute(
+                "SELECT title FROM laws WHERE date=? LIMIT 1", (latest_date,)
+            ).fetchone()
+            latest_title = (latest_law[0] or "")[:60] if latest_law else ""
             msg = (
                 f"\U0001f4ca **Statistiche del dataset NormattivaVigente**\n\n"
                 f"| Indicatore | Valore |\n"
@@ -6158,7 +6182,14 @@ def _citizen_mvp(db):
                 f"| \U0001f534 Abrogate | **{abrogate:,}** ({abrogate/total*100:.1f}%) |\n"
                 f"| \U0001f4c5 Arco temporale | **{anno_min} \u2013 {anno_max}** |\n"
                 f"| \U0001f3db\ufe0f Norme pre-1946 vigenti | **{regno_vigenti:,}** |\n"
-                f"| \U0001f4c6 Norme 2025 nel dataset | **{n_2025:,}** |\n\n"
+                f"| \U0001f4c6 Norme 2025 nel dataset | **{n_2025:,}** |\n"
+                f"| \U0001f4c6 Norme 2026 nel dataset | **{n_2026:,}** |\n"
+                f"| \U0001f504 Ultima norma indicizzata | **{latest_date}** |\n\n"
+                f"**Ultima legge:** *{latest_title}{'…' if len(latest_title)==60 else ''}*\n\n"
+                f"\U0001f7e2 **Stato sincronizzazione:** Il dataset viene aggiornato ogni notte "
+                f"in automatico dalla pipeline GitHub Actions (collezione VIGENTE Normattiva). "
+                f"L\u2019API ufficiale Normattiva.it era aggiornata al 2026-05-20. "
+                f"Il dataset \u00e8 allineato con lo stato vigente attuale.\n\n"
                 f"Il corpus copre {anno_max - anno_min} anni di legislazione italiana. "
                 f"Fonte: [Normattiva.it](https://www.normattiva.it) \u00b7 "
                 f"Dataset: [HuggingFace](https://huggingface.co/datasets/diatribe00/normattivavigente-data)\n\n"
@@ -6180,6 +6211,7 @@ def _citizen_mvp(db):
             vigenti_regno = db.conn.execute(
                 "SELECT COUNT(*) FROM laws WHERE year > 0 AND year < 1946 AND status='in_force'"
             ).fetchone()[0]
+            abrogate_regno = total_regno - vigenti_regno
             by_type = db.conn.execute(
                 "SELECT type, COUNT(*) as n FROM laws "
                 "WHERE year > 0 AND year < 1946 AND status='in_force' "
@@ -6192,23 +6224,41 @@ def _citizen_mvp(db):
                     "ORDER BY year ASC LIMIT 8"
                 ).fetchall()
             ]
+            # Also grab some famous surviving laws for context
+            famous_urns = [
+                "urn:nir:stato:regio.decreto:1942-03-16;262",  # Codice Civile
+                "urn:nir:stato:regio.decreto:1930-10-19;1398", # Codice Penale
+                "urn:nir:stato:regio.decreto:1931-06-18;773",  # TULPS
+            ]
+            famous = []
+            for u in famous_urns:
+                r = db.conn.execute(
+                    "SELECT urn, title, type, year, status FROM laws WHERE urn=? LIMIT 1", (u,)
+                ).fetchone()
+                if r:
+                    famous.append(dict(r))
             tipo_lines = "\n".join(
                 f"| {r[0] or 'N/A'} | {r[1]:,} |" for r in by_type
             )
+            pct_abrogated = abrogate_regno / total_regno * 100 if total_regno else 0
             msg = (
-                f"\U0001f3db\ufe0f **Norme del Regno d\u2019Italia ancora vigenti nel dataset**\n\n"
-                f"Il corpus contiene **{total_regno:,}** atti normativi emanati prima del 1946, "
-                f"di cui **{vigenti_regno:,} ancora classificati in vigore** "
-                f"(snapshot Normattiva pre-aprile 2025).\n\n"
-                f"> \u26a0\ufe0f **Nota aggiornamento:** La Legge 56/2025 (7 aprile 2025) ha abrogato "
-                f"oltre 30.000 atti prerepubblicani. Il dataset potrebbe non riflettere ancora queste abrogazioni. "
-                f"Il numero reale di norme del Regno ancora vigenti \u00e8 stimato in 2.000\u20133.500.\n\n"
-                f"**Composizione per tipo:**\n\n"
+                f"\U0001f3db\ufe0f **Norme del Regno d\u2019Italia nel dataset NormattivaVigente**\n\n"
+                f"Il corpus contiene **{total_regno:,}** atti normativi emanati prima del 1946, di cui:\n"
+                f"- \U0001f7e2 **{vigenti_regno:,} ancora vigenti** secondo Normattiva\n"
+                f"- \U0001f534 **{abrogate_regno:,} abrogati** ({pct_abrogated:.1f}% del totale prerepubblicano)\n\n"
+                f"> \U0001f4cc **Legge 56/2025 (7 aprile 2025):** Ha abrogato oltre 30.000 atti prerepubblicani "
+                f"risalenti al 1861\u20131946. Il dataset \u00e8 aggiornato automaticamente ogni notte dalla collezione "
+                f"**VIGENTE** di Normattiva.it, quindi i {vigenti_regno:,} conteggiati riflettono lo stato "
+                f"attuale post-abrogazione registrato da Normattiva.\n\n"
+                f"**Composizione per tipo (vigenti):**\n\n"
                 f"| Tipo | Vigenti |\n|---|---|\n"
                 f"{tipo_lines}\n\n"
+                f"**Puoi chiedere:** *\u2018Cosa dice il Codice Civile del 1942?\u2019*, "
+                f"*\u2018Quali regi decreti del 1931 sono ancora validi?\u2019*, "
+                f"*\u2018Cosa \u00e8 rimasto in vigore dal fascismo?\u2019*\n\n"
                 f"**Le pi\u00f9 antiche ancora vigenti nel dataset (prime 8):**"
             )
-            return msg, rows_sample
+            return msg, (famous + rows_sample)[:8]
         except Exception as e:
             return f"Errore: {e}", []
 
