@@ -5900,6 +5900,13 @@ def _citizen_mvp(db):
     st.markdown(_CITIZEN_CSS, unsafe_allow_html=True)
     has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
 
+    # ── Sidebar navigation ────────────────────────────────────────
+    citizen_view = st.sidebar.radio(
+        "📌 Sezione",
+        ["🤖 Assistente AI", "🇪🇺 Norme UE"],
+        key="citizen-view",
+    )
+
     # ── Law detail overlay (full-screen, blocks chat) ─────────────
     open_urn = st.session_state.get("citizen_open_urn")
     if open_urn and db:
@@ -6567,51 +6574,49 @@ def _citizen_mvp(db):
                     for j, law in enumerate(eu_context[:4]):
                         _card_chat(law, f"eu-ans-{j}")
 
-    # ── Main tabs: Chat + EU laws ──────────────────────────────────
-    tab_chat, tab_eu = st.tabs(["🤖 Assistente AI", "🇪🇺 Norme UE"])
-
-    with tab_chat:
-        # ── Render chat history ────────────────────────────────────
-        for idx, msg in enumerate(st.session_state["citizen_chat"]):
-            with st.chat_message(msg["role"]):
-                if msg.get("content"):
-                    st.markdown(msg["content"])
-                laws = msg.get("laws") or []
-                if laws:
-                    has_ctx = any(l.get("ai_context") or l.get("text_excerpt") for l in laws)
-                    if has_ctx:
-                        st.caption(
-                            f"\U0001f4da **{len(laws)} norme pertinenti** — "
-                            "ogni scheda riporta **perché è rilevante** (risposta AI) "
-                            "e **un estratto dal testo ufficiale**. "
-                            "Il link URN apre la fonte su Normattiva.it."
-                        )
-                        for j, law in enumerate(laws[:8]):
-                            _card_chat(law, f"h{idx}-{j}")
-                    else:
-                        st.caption(
-                            f"\U0001f4da **{len(laws)} norme** nel dataset — "
-                            "il link URN porta al testo ufficiale su Normattiva.it:"
-                        )
-                        g1, g2 = st.columns(2)
-                        for j, law in enumerate(laws[:8]):
-                            _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
-
-        # ── Chat input (sticky bottom) ─────────────────────────────
-        user_input = st.chat_input("Fai una domanda sulla legge italiana\u2026")
-        if user_input:
-            st.session_state["citizen_chat"].append({"role": "user", "content": user_input, "laws": []})
-            st.session_state["citizen_pending"] = user_input
-            st.rerun()
-
-        # ── Clear button ───────────────────────────────────────────
-        if len(st.session_state.get("citizen_chat", [])) > 1:
-            if st.button("\U0001f5d1\ufe0f Nuova conversazione", key="clear-chat"):
-                st.session_state["citizen_chat"] = []
-                st.rerun()
-
-    with tab_eu:
+    # ── Route by sidebar selection ─────────────────────────────────
+    if citizen_view == "🇪🇺 Norme UE":
         _eu_laws_tab_render()
+        return
+
+    # ── Render chat history ────────────────────────────────────────
+    for idx, msg in enumerate(st.session_state["citizen_chat"]):
+        with st.chat_message(msg["role"]):
+            if msg.get("content"):
+                st.markdown(msg["content"])
+            laws = msg.get("laws") or []
+            if laws:
+                has_ctx = any(l.get("ai_context") or l.get("text_excerpt") for l in laws)
+                if has_ctx:
+                    st.caption(
+                        f"\U0001f4da **{len(laws)} norme pertinenti** — "
+                        "ogni scheda riporta **perché è rilevante** (risposta AI) "
+                        "e **un estratto dal testo ufficiale**. "
+                        "Il link URN apre la fonte su Normattiva.it."
+                    )
+                    for j, law in enumerate(laws[:8]):
+                        _card_chat(law, f"h{idx}-{j}")
+                else:
+                    st.caption(
+                        f"\U0001f4da **{len(laws)} norme** nel dataset — "
+                        "il link URN porta al testo ufficiale su Normattiva.it:"
+                    )
+                    g1, g2 = st.columns(2)
+                    for j, law in enumerate(laws[:8]):
+                        _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
+
+    # ── Chat input (sticky bottom) ─────────────────────────────
+    user_input = st.chat_input("Fai una domanda sulla legge italiana\u2026")
+    if user_input:
+        st.session_state["citizen_chat"].append({"role": "user", "content": user_input, "laws": []})
+        st.session_state["citizen_pending"] = user_input
+        st.rerun()
+
+    # ── Clear button ───────────────────────────────────────────
+    if len(st.session_state.get("citizen_chat", [])) > 1:
+        if st.button("\U0001f5d1\ufe0f Nuova conversazione", key="clear-chat"):
+            st.session_state["citizen_chat"] = []
+            st.rerun()
 
 def main():
     # Build a complete registry of pages and then expose only the subset
