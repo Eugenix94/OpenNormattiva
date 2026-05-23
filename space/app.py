@@ -128,6 +128,45 @@ def _status_chip(raw_status: str | None) -> str:
     return "⚪ SCONOSCIUTO"
 
 
+# ── Legal hierarchy tier badges ─────────────────────────────────────
+_SOURCE_TIER: dict[str, tuple[str, str, str]] = {
+    # (tier_roman, bg_color, short_label)
+    "Leggi costituzionali":                           ("I",   "#6d28d9", "Costituzionale"),
+    "Codici":                                         ("II",  "#1d4ed8", "Codice"),
+    "Testi Unici":                                    ("II",  "#1d4ed8", "Testo Unico"),
+    "DL e leggi di conversione":                      ("III", "#0369a1", "Legge"),
+    "Leggi delega e relativi provvedimenti delegati": ("III", "#0369a1", "L.Delega"),
+    "Leggi contenenti deleghe":                       ("III", "#0369a1", "L.Delega"),
+    "Leggi finanziarie e di bilancio":                ("III", "#0369a1", "L.Bilancio"),
+    "Leggi di ratifica":                              ("III", "#0369a1", "L.Ratifica"),
+    "Leggi di delegazione europea":                   ("III", "#0369a1", "Del.EU"),
+    "Regi decreti":                                   ("III", "#92400e", "R.D."),
+    "Regi decreti legislativi":                       ("III", "#92400e", "R.D.L."),
+    "Decreti legislativi luogotenenziali":            ("III", "#92400e", "D.L.Luog."),
+    "Decreti Legislativi":                            ("IV",  "#0f766e", "D.Lgs."),
+    "Atti di recepimento direttive UE":               ("IV",  "#1e40af", "Recep.UE"),
+    "Atti di attuazione Regolamenti UE":              ("IV",  "#1e40af", "Att.UE"),
+    "DPR":                                            ("V",   "#475569", "DPR"),
+    "Regolamenti ministeriali":                       ("V",   "#475569", "Reg.Min."),
+    "DPCM":                                           ("V",   "#475569", "DPCM"),
+    "Atti normativi abrogati (in originale)":         ("✕",  "#9ca3af", "Abrogato"),
+    "DL decaduti":                                    ("✕",  "#9ca3af", "DL Decad."),
+    "DL proroghe":                                    ("✕",  "#9ca3af", "DL Proroga"),
+}
+
+
+def _tier_badge(source_collection: str | None) -> str:
+    """Return an inline HTML tier badge for a law's source collection."""
+    if not source_collection:
+        return ""
+    tier, color, label = _SOURCE_TIER.get(source_collection, ("?", "#94a3b8", (source_collection or "")[:15]))
+    return (
+        f"<span style='display:inline-block;font-size:0.67rem;font-weight:700;"
+        f"background:{color};color:#fff;border-radius:3px;padding:1px 5px;"
+        f"margin-left:4px;vertical-align:middle;'>T{tier} {label}</span>"
+    )
+
+
 def _plain_language_summary(law: Dict) -> str:
     """Return a short citizen-friendly explanation for a law result."""
     status = _normalize_status(law.get("status"))
@@ -842,11 +881,13 @@ def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
         status_label = "VIGENTE ✓" if status == "in_force" else "ABROGATA ✗"
         text = (law.get("text") or law.get("snippet") or "").strip()
         excerpt = text[:max_chars_per_law] + ("…" if len(text) > max_chars_per_law else "")
+        cit_n = int(law.get("citation_count_incoming") or 0)
+        cit_str = f" | Citata da: {cit_n} norme" if cit_n > 0 else ""
         parts.append(
             f"[NORMA {i}]\n"
             f"Titolo: {law.get('title', 'N/A')}\n"
             f"URN: {law.get('urn', 'N/A')}\n"
-            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: {status_label}\n"
+            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: {status_label}{cit_str}\n"
             f"Testo:\n{excerpt}"
         )
     return "\n\n---\n\n".join(parts)
@@ -3286,52 +3327,78 @@ def page_law_detail():
 
 
 def page_citations():
+    """Enhanced citation network explorer."""
     st.header("🔗 Rete Citazioni")
+    st.caption(
+        "Analisi del grafo delle citazioni tra le 190.000+ norme del dataset. "
+        "Identifica le leggi-pilastro che strutturano l'intero ordinamento."
+    )
     db = load_db()
+    if not db:
+        st.info("Database richiesto.")
+        return
 
-    if db:
-        st.subheader("Most Cited Laws")
+    tab_top, tab_cross, tab_explore = st.tabs([
+        "🌟 Più citate",
+        "🔀 Citazioni cross-dominio",
+        "🔍 Esplora norma",
+    ])
+
+    with tab_top:
+        st.subheader("Top 30 norme più citate")
         try:
-            top = db.conn.execute(
-                "SELECT l.urn, l.title, l.year, m.citation_count_incoming "
-                "FROM laws l JOIN law_metadata m ON l.urn = m.urn "
-                "WHERE m.citation_count_incoming > 0 "
-                "ORDER BY m.citation_count_incoming DESC LIMIT 25"
-            ).fetchall()
-            if top:
-                df = pd.DataFrame([dict(r) for r in top])
-                df.columns = ["URN", "Title", "Year", "Cited By"]
-                df["Title"] = df["Title"].str[:50]
-                fig = px.bar(df, x="Title", y="Cited By",
-                             title="Top 25 Most Cited Laws",
-                             hover_data=["URN", "Year"])
-                st.plotly_chart(fig, width='stretch')
-                st.dataframe(df, width='stretch', hide_index=True)
+            top = db.conn.execute("""
+                SELECT l.urn, l.title, l.year, l.type, l.status, l.source_collection,
+                       m.citation_count_incoming, m.citation_count_outgoing, m.domain_cluster
+                FROM laws l JOIN law_metadata m ON l.urn = m.urn
+                WHERE m.citation_count_incoming > 0
+                ORDER BY m.citation_count_incoming DESC LIMIT 30
+            """).fetchall()
         except Exception as e:
-            st.warning(f"Error loading citation data: {e}")
+            st.warning(f"Errore: {e}")
+            top = []
 
-        st.subheader("Citation Graph Explorer")
-        urn_input = st.text_input(
-            "Enter a law URN to explore its citation neighborhood:"
-        )
-        depth = st.slider("Graph depth", 1, 3, 2)
-        max_n = st.slider("Max nodes", 10, 100, 40)
-        if urn_input:
-            try:
-                neighborhood = db.get_citation_neighborhood(
-                    urn_input, depth=depth, max_nodes=max_n
+        if top:
+            df_top = pd.DataFrame([dict(r) for r in top])
+            df_top["short"] = df_top["title"].str[:50]
+            df_top["vigor"] = df_top["status"].apply(
+                lambda s: "Vigente" if _normalize_status(s) == "in_force" else "Abrogata"
+            )
+            fig = px.bar(
+                df_top, x="citation_count_incoming", y="short",
+                orientation="h", color="vigor",
+                color_discrete_map={"Vigente": "#0a7a5a", "Abrogata": "#c0392b"},
+                title="Norme per citazioni in entrata",
+                labels={"citation_count_incoming": "Citazioni", "short": ""},
+            )
+            fig.update_layout(yaxis={"autorange": "reversed"}, height=520)
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("Schede norma")
+            for i, r in enumerate(top[:10], 1):
+                r = dict(r)
+                cit_in  = int(r.get("citation_count_incoming") or 0)
+                cit_out = int(r.get("citation_count_outgoing") or 0)
+                urn     = r.get("urn") or ""
+                norm_u  = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+                tier_h  = _tier_badge(r.get("source_collection"))
+                st.markdown(
+                    f"<div style='border:1px solid #e2e8f0;border-radius:8px;"
+                    f"padding:0.7rem 1rem;margin-bottom:0.5rem;background:#f8fafc;'>"
+                    f"<strong>#{i} {(r.get('title') or '')[:75]}</strong>{tier_h}<br>"
+                    f"<span style='font-size:0.77rem;color:#64748b;'>{r.get('type','')} {r.get('year','')} "
+                    f"· Area: {r.get('domain_cluster') or '—'}</span><br>"
+                    f"<span style='color:#0f766e;font-weight:700;'>📥 {cit_in:,} citazioni in entrata</span>"
+                    f" &nbsp;·&nbsp; <span style='color:#0369a1;'>📤 {cit_out} cita altre</span><br>"
+                    f"<a href='{norm_u}' target='_blank' style='font-size:0.73rem;color:#1d4ed8;'>{urn[:70]}</a>"
+                    f"</div>",
+                    unsafe_allow_html=True,
                 )
-                if neighborhood and neighborhood.get("nodes"):
-                    _render_graph_plotly(
-                        neighborhood["nodes"], neighborhood["edges"],
-                        title=f"Neighborhood of {urn_input}"
-                    )
-                else:
-                    st.warning("No graph data for this URN.")
-            except Exception as e:
-                st.error(f"Graph error: {e}")
+        else:
+            st.info("Dati citazioni non disponibili.")
 
-        st.subheader("Cross-Domain Citations")
+    with tab_cross:
+        st.subheader("Citazioni tra aree del diritto")
         try:
             cross = db.conn.execute("""
                 SELECT m1.domain_cluster as from_domain,
@@ -3339,97 +3406,184 @@ def page_citations():
                        COUNT(*) as cnt
                 FROM citations c
                 JOIN law_metadata m1 ON c.citing_urn = m1.urn
-                JOIN law_metadata m2 ON c.cited_urn = m2.urn
-                WHERE m1.domain_cluster IS NOT NULL
-                  AND m2.domain_cluster IS NOT NULL
-                  AND m1.domain_cluster != ''
-                  AND m2.domain_cluster != ''
+                JOIN law_metadata m2 ON c.cited_urn  = m2.urn
+                WHERE m1.domain_cluster IS NOT NULL AND m1.domain_cluster != ''
+                  AND m2.domain_cluster IS NOT NULL AND m2.domain_cluster != ''
                 GROUP BY m1.domain_cluster, m2.domain_cluster
                 ORDER BY cnt DESC LIMIT 30
             """).fetchall()
-            if cross:
-                df = pd.DataFrame([dict(r) for r in cross])
-                fig = px.treemap(
-                    df, path=["from_domain", "to_domain"], values="cnt",
-                    title="How Legal Domains Reference Each Other"
-                )
-                st.plotly_chart(fig, width='stretch')
         except Exception:
-            pass
-    else:
-        laws = load_laws_from_jsonl()
-        if not laws:
-            st.info("No data available.")
-            return
-        cit_counts = Counter()
-        for law in laws:
-            for c in law.get("citations", []):
-                target = c.get("target_urn", c) if isinstance(c, dict) else c
-                cit_counts[target] += 1
-        if cit_counts:
-            top = cit_counts.most_common(20)
-            df = pd.DataFrame(top, columns=["URN", "Times Cited"])
-            fig = px.bar(df, x="URN", y="Times Cited",
-                         title="Most Referenced Laws")
-            st.plotly_chart(fig, width='stretch')
+            cross = []
+
+        if cross:
+            df_cross = pd.DataFrame([dict(r) for r in cross])
+            fig2 = px.treemap(
+                df_cross, path=["from_domain", "to_domain"], values="cnt",
+                title="Come le aree del diritto si richiamano a vicenda",
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+            st.subheader("Tabella citazioni cross-dominio")
+            df_cross.columns = ["Da", "A", "Citazioni"]
+            st.dataframe(df_cross.head(20), use_container_width=True, hide_index=True)
+        else:
+            st.info("Dati cross-dominio non disponibili.")
+
+    with tab_explore:
+        st.subheader("🔍 Esplora la rete di una norma specifica")
+        urn_input = st.text_input(
+            "Inserisci l'URN della norma (es. urn:nir:stato:legge:1988-08-23;400)",
+            key="cit-urn-input",
+            placeholder="urn:nir:stato:...",
+        )
+        if urn_input.strip():
+            urn_clean = urn_input.strip()
+            try:
+                meta = db.conn.execute(
+                    "SELECT citation_count_incoming, citation_count_outgoing, domain_cluster "
+                    "FROM law_metadata WHERE urn = ?", (urn_clean,)
+                ).fetchone()
+                law_row = db.conn.execute(
+                    "SELECT title, type, year, status FROM laws WHERE urn = ?", (urn_clean,)
+                ).fetchone()
+                cited_by = db.conn.execute(
+                    "SELECT c.citing_urn, l.title, l.year, l.type "
+                    "FROM citations c LEFT JOIN laws l ON c.citing_urn = l.urn "
+                    "WHERE c.cited_urn = ? ORDER BY l.year DESC LIMIT 20", (urn_clean,)
+                ).fetchall()
+                cites = db.conn.execute(
+                    "SELECT c.cited_urn, l.title, l.year, l.type "
+                    "FROM citations c LEFT JOIN laws l ON c.cited_urn = l.urn "
+                    "WHERE c.citing_urn = ? ORDER BY l.year DESC LIMIT 20", (urn_clean,)
+                ).fetchall()
+            except Exception as e:
+                st.error(f"Errore: {e}")
+                meta, law_row, cited_by, cites = None, None, [], []
+
+            if law_row:
+                st.success(f"**{law_row['title']}** ({law_row['type']} {law_row['year']}) — {_status_chip(law_row['status'])}")
+                if meta:
+                    m1, m2 = st.columns(2)
+                    m1.metric("📥 Citata da", f"{meta['citation_count_incoming'] or 0:,} norme")
+                    m2.metric("📤 Cita", f"{meta['citation_count_outgoing'] or 0:,} norme")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.subheader(f"📥 Citata da ({len(cited_by)} norme mostrate)")
+                    for r in cited_by:
+                        r = dict(r)
+                        st.markdown(f"- **{(r.get('title') or r.get('citing_urn'))[:60]}** `{r.get('year') or ''}`")
+                with c2:
+                    st.subheader(f"📤 Cita ({len(cites)} norme mostrate)")
+                    for r in cites:
+                        r = dict(r)
+                        st.markdown(f"- **{(r.get('title') or r.get('cited_urn'))[:60]}** `{r.get('year') or ''}`")
+            elif urn_input.strip():
+                st.warning("URN non trovato nel database. Verifica il formato.")
+                st.caption("Esempio: `urn:nir:stato:legge:1988-08-23;400`")
 
 
 def page_domains():
-    st.header("🏛️ Aree Giuridiche")
+    """Enhanced domain cluster browser with citation-ranked laws."""
+    st.header("🏛️ Aree Giuridiche del Diritto Italiano")
+    st.caption(
+        "Ogni area del diritto raccoglie le norme classificate per materia. "
+        "Le leggi sono ordinate per numero di citazioni in entrata — un indicatore di autorevolezza."
+    )
     db = load_db()
     if not db:
-        st.info("Database required for domain analysis.")
+        st.info("Database richiesto per questa sezione.")
         return
 
     try:
         domains = db.conn.execute("""
-            SELECT domain_cluster, COUNT(*) as cnt
-            FROM law_metadata
-            WHERE domain_cluster IS NOT NULL AND domain_cluster != ''
-            GROUP BY domain_cluster ORDER BY cnt DESC
+            SELECT m.domain_cluster,
+                   COUNT(*) as cnt,
+                   SUM(m.citation_count_incoming) as total_cit,
+                   AVG(m.citation_count_incoming) as avg_cit
+            FROM law_metadata m
+            WHERE m.domain_cluster IS NOT NULL AND m.domain_cluster != ''
+            GROUP BY m.domain_cluster
+            ORDER BY cnt DESC
         """).fetchall()
     except Exception:
-        st.info("Domain data not available.")
+        st.info("Dati di dominio non disponibili.")
         return
 
     if not domains:
-        st.info("No domain data available.")
+        st.info("Nessun dato disponibile.")
         return
 
-    domain_names = [d[0] for d in domains]
-    domain_counts = [d[1] for d in domains]
+    # Summary metrics
+    domain_names  = [d["domain_cluster"] for d in domains]
+    domain_counts = [d["cnt"] for d in domains]
+    domain_cits   = [int(d["total_cit"] or 0) for d in domains]
 
     col1, col2 = st.columns(2)
     with col1:
-        fig = px.pie(names=domain_names, values=domain_counts,
-                     title="Distribution of Legal Domains", hole=0.3)
-        st.plotly_chart(fig, width='stretch')
+        fig = px.pie(
+            names=domain_names, values=domain_counts,
+            title="Distribuzione norme per area del diritto", hole=0.3,
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        st.plotly_chart(fig, use_container_width=True)
     with col2:
-        fig = px.bar(x=domain_names, y=domain_counts, title="Laws per Domain",
-                     labels={"x": "Domain", "y": "Count"})
-        st.plotly_chart(fig, width='stretch')
+        fig2 = px.bar(
+            x=domain_names, y=domain_cits,
+            title="Citazioni totali per area",
+            labels={"x": "Area", "y": "Citazioni totali"},
+            color=domain_cits,
+            color_continuous_scale="Blues",
+        )
+        st.plotly_chart(fig2, use_container_width=True)
 
-    selected_domain = st.selectbox("Explore domain:", domain_names)
+    st.divider()
+    st.subheader("🔍 Esplora un'area giuridica")
+    selected_domain = st.selectbox("Seleziona area:", domain_names, key="dom-sel")
+    status_filt = st.checkbox("Solo norme vigenti", value=True, key="dom-vigente")
+
     if selected_domain:
-        laws_in_domain = db.conn.execute("""
-            SELECT l.urn, l.title, l.year, l.type, l.importance_score
-            FROM laws l JOIN law_metadata m ON l.urn = m.urn
-            WHERE m.domain_cluster = ?
-            ORDER BY l.importance_score DESC NULLS LAST
-            LIMIT 50
-        """, (selected_domain,)).fetchall()
+        status_where = "AND l.status = 'in_force'" if status_filt else ""
+        try:
+            laws_in_domain = db.conn.execute(f"""
+                SELECT l.urn, l.title, l.year, l.type, l.status, l.source_collection,
+                       m.citation_count_incoming, m.citation_count_outgoing
+                FROM laws l JOIN law_metadata m ON l.urn = m.urn
+                WHERE m.domain_cluster = ? {status_where}
+                ORDER BY m.citation_count_incoming DESC NULLS LAST
+                LIMIT 60
+            """, (selected_domain,)).fetchall()
+        except Exception as e:
+            st.error(f"Errore: {e}")
+            return
+
         if laws_in_domain:
-            df = pd.DataFrame([dict(r) for r in laws_in_domain])
-            df.columns = ["URN", "Title", "Year", "Type", "Importance"]
-            df["Title"] = df["Title"].str[:60]
-            df["Importance"] = df["Importance"].apply(
-                lambda x: f"{x:.4f}" if x else "N/A"
-            )
-            st.write(
-                f"**{len(laws_in_domain)} laws** in domain "
-                f"_{selected_domain}_:"
-            )
-            st.dataframe(df, width='stretch', hide_index=True)
+            st.success(f"**{len(laws_in_domain)} norme** nell'area _{selected_domain}_ (ordinate per citazioni)")
+            for i, r in enumerate(laws_in_domain[:30], 1):
+                r = dict(r)
+                cit_in  = int(r.get("citation_count_incoming") or 0)
+                status  = _normalize_status(r.get("status"))
+                sb      = "🟢" if status == "in_force" else "🔴"
+                tier_h  = _tier_badge(r.get("source_collection"))
+                urn     = r.get("urn") or ""
+                norm_u  = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+                cit_b   = (
+                    f"<span style='background:#dcfce7;color:#166534;border-radius:3px;"
+                    f"padding:1px 5px;font-size:0.7rem;font-weight:700;margin-left:4px;'>"
+                    f"📥 {cit_in:,}</span>"
+                ) if cit_in >= 5 else ""
+                st.markdown(
+                    f"<div style='border:1px solid #e2e8f0;border-radius:6px;"
+                    f"padding:0.55rem 0.8rem;margin-bottom:0.35rem;background:#f8fafc;'>"
+                    f"<strong style='font-size:0.88rem;'>#{i} {sb} {(r.get('title') or '')[:72]}</strong>"
+                    f"{tier_h}{cit_b}<br>"
+                    f"<span style='font-size:0.75rem;color:#64748b;'>{r.get('type','')} {r.get('year','')}</span>"
+                    f" &nbsp;·&nbsp; "
+                    f"<a href='{norm_u}' target='_blank' style='font-size:0.73rem;color:#1d4ed8;'>{urn[:60]}</a>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            if len(laws_in_domain) > 30:
+                st.caption(f"Visualizzate 30 su {len(laws_in_domain)} norme. Raffina i filtri per vedere altre.")
 
 
 def page_notifications():
@@ -5888,6 +6042,25 @@ def _citizen_mvp(db):
             )
 
         ranked = sorted(combined, key=_score, reverse=True)
+        top_urns = [r.get("urn") for r in ranked[:limit] if r.get("urn")]
+        if top_urns and db:
+            try:
+                placeholders = ",".join("?" * len(top_urns))
+                meta_rows = db.conn.execute(
+                    f"SELECT urn, citation_count_incoming, domain_cluster, source_collection "
+                    f"FROM law_metadata WHERE urn IN ({placeholders})",
+                    top_urns,
+                ).fetchall()
+                meta_map = {r[0]: dict(r) for r in meta_rows}
+                for law in ranked[:limit]:
+                    u = law.get("urn") or ""
+                    if u in meta_map:
+                        m = meta_map[u]
+                        law.setdefault("citation_count_incoming", m.get("citation_count_incoming") or 0)
+                        law.setdefault("domain_cluster", m.get("domain_cluster") or "")
+                        law.setdefault("source_collection", m.get("source_collection") or "")
+            except Exception:
+                pass
         return ranked[:limit]
 
     def _law_proof_excerpt(law: dict, max_chars: int = 220) -> str:
@@ -6075,9 +6248,17 @@ def _citizen_mvp(db):
                 f"</div>"
             )
 
+        sc = law.get("source_collection") or ""
+        tier_html = _tier_badge(sc) if sc else ""
+        cit_in = int(law.get("citation_count_incoming") or 0)
+        cit_badge = (
+            f"<span style='font-size:0.67rem;background:#dcfce7;color:#166534;"
+            f"border-radius:3px;padding:1px 5px;margin-left:4px;font-weight:700;'>"
+            f"📥 {cit_in:,} cit.</span>"
+        ) if cit_in >= 10 else ""
         target.markdown(
             f"<div class='nv-inline-law' style='padding:0.65rem 0.8rem;'>"
-            f"<strong style='font-size:0.91rem;'>{badge} {title}</strong><br>"
+            f"<strong style='font-size:0.91rem;'>{badge} {title}</strong>{tier_html}{cit_badge}<br>"
             f"<span style='font-size:0.78rem;color:#64748b;'>{typ} {year}</span> &nbsp;·&nbsp; "
             f"{urn_html}"
             f"{ai_html}"
@@ -6767,6 +6948,306 @@ def _citizen_mvp(db):
             st.session_state["citizen_chat"] = []
             st.rerun()
 
+
+
+def page_hierarchy_visualizer():
+    """5-tier legal hierarchy browser."""
+    st.header("🏛️ Gerarchia delle Fonti del Diritto")
+    st.caption(
+        "Il sistema giuridico italiano è organizzato in 5 livelli gerarchici. "
+        "Una norma di livello inferiore non può contraddire quelle superiori. "
+        "Clicca su un livello per esplorare le norme di quella categoria."
+    )
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    TIERS = [
+        ("I",   "#6d28d9", "#f5f3ff",
+         "⚖️ Livello I — Leggi Costituzionali",
+         "La Costituzione e le leggi costituzionali si trovano al vertice. Non possono essere derogate da norme inferiori.",
+         ["Leggi costituzionali"]),
+        ("II",  "#1d4ed8", "#eff6ff",
+         "📚 Livello II — Codici & Testi Unici",
+         "I Codici (Civile, Penale, ecc.) e i Testi Unici consolidano interi settori del diritto.",
+         ["Codici", "Testi Unici"]),
+        ("III", "#0369a1", "#f0f9ff",
+         "📜 Livello III — Leggi Ordinarie & Regi Decreti",
+         "Le leggi ordinarie approvate dal Parlamento, i Decreti Legge e la normativa dell'era regia.",
+         ["DL e leggi di conversione", "Leggi delega e relativi provvedimenti delegati",
+          "Leggi contenenti deleghe", "Leggi finanziarie e di bilancio", "Leggi di ratifica",
+          "Leggi di delegazione europea", "Regi decreti", "Regi decreti legislativi",
+          "Decreti legislativi luogotenenziali"]),
+        ("IV",  "#0f766e", "#f0fdf4",
+         "🔧 Livello IV — Decreti Legislativi & Atti UE",
+         "Decreti legislativi emanati su delega parlamentare e atti di recepimento/attuazione del diritto UE.",
+         ["Decreti Legislativi", "Atti di recepimento direttive UE", "Atti di attuazione Regolamenti UE"]),
+        ("V",   "#475569", "#f8fafc",
+         "📋 Livello V — Regolamenti & Decreti Esecutivi",
+         "DPR, DPCM e regolamenti ministeriali. Danno attuazione concreta alle leggi primarie.",
+         ["DPR", "Regolamenti ministeriali", "DPCM"]),
+    ]
+
+    try:
+        coll_counts = {
+            r[0]: r[1]
+            for r in db.conn.execute(
+                "SELECT source_collection, COUNT(*) FROM laws WHERE status='in_force' GROUP BY source_collection"
+            ).fetchall()
+        }
+    except Exception:
+        coll_counts = {}
+
+    total_vigente = max(sum(coll_counts.values()), 1)
+
+    tier_html = ""
+    for tier_num, color, bg, label, desc, colls in TIERS:
+        count = sum(coll_counts.get(c, 0) for c in colls)
+        pct = round(count / total_vigente * 100, 1)
+        coll_list = ", ".join(colls[:3]) + ("…" if len(colls) > 3 else "")
+        tier_html += (
+            f"<div style='background:{bg};border-left:5px solid {color};"
+            f"border-radius:8px;margin:0.4rem 0;padding:0.75rem 1rem;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+            f"<strong style='color:{color};font-size:1rem;'>Livello {tier_num}</strong>"
+            f"<span style='background:{color};color:#fff;border-radius:20px;"
+            f"padding:2px 10px;font-size:0.8rem;font-weight:700;'>{count:,} norme ({pct}%)</span>"
+            f"</div>"
+            f"<div style='font-size:0.92rem;font-weight:700;margin:0.3rem 0;color:#1e293b;'>{label}</div>"
+            f"<div style='font-size:0.82rem;color:#475569;line-height:1.5;'>{desc}</div>"
+            f"<div style='font-size:0.73rem;color:#94a3b8;margin-top:0.3rem;'>Collezioni: {coll_list}</div>"
+            f"</div>"
+        )
+
+    st.markdown(tier_html, unsafe_allow_html=True)
+    st.divider()
+    st.subheader("🔍 Esplora un livello")
+
+    tier_opts: dict = {}
+    for t in TIERS:
+        key = f"Livello {t[0]} — {t[3].split('—')[1].strip()}"
+        tier_opts[key] = t
+
+    chosen = st.selectbox("Seleziona livello", list(tier_opts.keys()), key="hier-sel")
+    if chosen:
+        _, color, _, label, desc, colls = tier_opts[chosen]
+        status_filter = st.checkbox("Solo norme vigenti", value=True, key="hier-vigente")
+        try:
+            where_colls = " OR ".join(f"source_collection=?" for _ in colls)
+            status_where = " AND status='in_force'" if status_filter else ""
+            rows = db.conn.execute(
+                f"SELECT urn, title, type, year, date, status, article_count, source_collection "
+                f"FROM laws WHERE ({where_colls}){status_where} ORDER BY date DESC LIMIT 100",
+                colls,
+            ).fetchall()
+        except Exception as e:
+            st.error(f"Errore: {e}")
+            rows = []
+        if rows:
+            st.success(f"**{len(rows)} norme** trovate (prime 100 per data)")
+            df = pd.DataFrame([dict(r) for r in rows])
+            df["stato"] = df["status"].apply(_status_chip)
+            disp = df[["date", "type", "source_collection", "title", "stato", "article_count", "urn"]].rename(
+                columns={
+                    "date": "Data", "type": "Tipo", "source_collection": "Collezione",
+                    "title": "Titolo", "stato": "Stato", "article_count": "Articoli", "urn": "URN",
+                }
+            )
+            disp["Titolo"] = disp["Titolo"].str[:70]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+            urn_sel = {
+                f"{r['title'][:65]} ({r['year']})": r['urn']
+                for r in [dict(x) for x in rows[:50]] if r.get("urn")
+            }
+            sel = st.selectbox("Apri scheda", list(urn_sel.keys()), key="hier-open-sel")
+            if sel and st.button("Apri scheda norma →", key="hier-open-btn"):
+                st.session_state["detail_urn"] = urn_sel[sel]
+                st.session_state["goto_page"] = "📖 Scheda Norma"
+                st.rerun()
+        else:
+            st.info("Nessuna norma trovata per questo livello.")
+
+
+def page_authoritative_laws():
+    """Ranked list of most-cited / most authoritative Italian laws."""
+    st.header("🌟 Leggi più Autorevoli")
+    st.caption(
+        "Classificazione delle norme per numero di citazioni in entrata: "
+        "quante altre leggi fanno riferimento a questa norma. "
+        "Un alto numero di citazioni indica una norma-cardine dell'ordinamento."
+    )
+    db = load_db()
+    if not db:
+        st.error("Database non disponibile.")
+        return
+
+    try:
+        rows = db.conn.execute("""
+            SELECT l.urn, l.title, l.type, l.year, l.date, l.status,
+                   l.article_count, l.source_collection,
+                   m.citation_count_incoming, m.citation_count_outgoing,
+                   m.domain_cluster
+            FROM law_metadata m
+            JOIN laws l ON m.urn = l.urn
+            WHERE m.citation_count_incoming > 0
+            ORDER BY m.citation_count_incoming DESC
+            LIMIT 100
+        """).fetchall()
+    except Exception as e:
+        st.error(f"Errore nel caricare i dati: {e}")
+        return
+
+    if not rows:
+        st.info("Dati di citazione non disponibili.")
+        return
+
+    max_cit = rows[0]["citation_count_incoming"] if rows else 0
+    total_vigente_auth = sum(1 for r in rows if _normalize_status(r["status"]) == "in_force")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Record citazioni", f"{max_cit:,}")
+    col2.metric("Vigenti in top 100", f"{total_vigente_auth}")
+    col3.metric("Norme analizzate", "100")
+
+    df_top = pd.DataFrame([dict(r) for r in rows[:25]])
+    df_top["short_title"] = df_top["title"].str[:45]
+    df_top["vigor"] = df_top["status"].apply(
+        lambda s: "Vigente" if _normalize_status(s) == "in_force" else "Abrogata"
+    )
+    fig = px.bar(
+        df_top, x="citation_count_incoming", y="short_title",
+        orientation="h", color="vigor",
+        color_discrete_map={"Vigente": "#0a7a5a", "Abrogata": "#c0392b"},
+        title="Top 25 norme più citate nell'ordinamento italiano",
+        labels={"citation_count_incoming": "Citazioni in entrata", "short_title": ""},
+    )
+    fig.update_layout(yaxis={"autorange": "reversed"}, height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.subheader("📋 Top 100 — elenco completo")
+
+    domain_opts = ["Tutte"] + sorted({r["domain_cluster"] for r in rows if r.get("domain_cluster")})
+    col_f1, col_f2 = st.columns(2)
+    domain_filter = col_f1.selectbox("Area del diritto", domain_opts, key="auth-domain")
+    status_filt   = col_f2.selectbox("Stato", ["Tutte", "Solo vigenti", "Solo abrogate"], key="auth-status")
+
+    filtered = list(rows)
+    if domain_filter != "Tutte":
+        filtered = [r for r in filtered if r.get("domain_cluster") == domain_filter]
+    if status_filt == "Solo vigenti":
+        filtered = [r for r in filtered if _normalize_status(r["status"]) == "in_force"]
+    elif status_filt == "Solo abrogate":
+        filtered = [r for r in filtered if _normalize_status(r["status"]) != "in_force"]
+
+    for i, r in enumerate(filtered[:50], 1):
+        r = dict(r)
+        status = _normalize_status(r.get("status"))
+        badge = "🟢" if status == "in_force" else "🔴"
+        cit_in  = int(r.get("citation_count_incoming") or 0)
+        cit_out = int(r.get("citation_count_outgoing") or 0)
+        tier_html = _tier_badge(r.get("source_collection"))
+        urn = r.get("urn") or ""
+        norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+        st.markdown(
+            f"<div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;"
+            f"padding:0.7rem 1rem;margin-bottom:0.5rem;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+            f"<strong style='font-size:0.92rem;'>#{i} {badge} {(r.get('title') or '')[:72]}</strong>"
+            f"<span style='white-space:nowrap;margin-left:0.5rem;'>{tier_html}</span></div>"
+            f"<div style='display:flex;justify-content:space-between;margin-top:0.2rem;'>"
+            f"<span style='font-size:0.77rem;color:#64748b;'>{r.get('type','')} {r.get('year','')} "
+            f"· Area: {r.get('domain_cluster') or '—'} · Cita: {cit_out} norme</span>"
+            f"<span style='font-size:0.8rem;font-weight:700;color:#0f766e;'>📥 {cit_in:,} citazioni</span></div>"
+            f"<a href='{norm_url}' target='_blank' rel='noopener' "
+            f"style='font-size:0.73rem;color:#1d4ed8;text-decoration:underline;'>{urn[:70]}</a>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2)
+        if c1.button("📖 Scheda norma", key=f"auth-det-{i}", use_container_width=True):
+            st.session_state["detail_urn"] = urn
+            st.session_state["goto_page"] = "📖 Scheda Norma"
+            st.rerun()
+        if c2.button("🔗 Esplora citazioni", key=f"auth-cit-{i}", use_container_width=True):
+            st.session_state["cit_explore_urn"] = urn
+            st.session_state["goto_page"] = "🧩 Rete Normativa"
+            st.rerun()
+
+
+def page_regional_gap():
+    """Info page explaining dataset scope — state-only, no regional laws."""
+    st.header("🗺️ Normativa Regionale — Guida al Sistema")
+    st.info(
+        "**Il dataset NormattivaVigente è esclusivamente statale.** "
+        "Non contiene leggi regionali, regolamenti comunali o atti degli enti locali. "
+        "Questa pagina spiega la struttura del sistema normativo italiano e dove trovare "
+        "la normativa sub-statale."
+    )
+
+    st.subheader("📐 Struttura del sistema normativo italiano")
+    levels = [
+        ("🏛️ Stato — IN QUESTO DATASET", "#0a7a5a",
+         "190.911 atti · Costituzione, leggi ordinarie, D.Lgs., DPR, DPCM e molto altro.\n"
+         "Fonte: Normattiva.it (portale ufficiale dello Stato).\n"
+         "Il dataset copre il 100% della normativa primaria statale vigente."),
+        ("🏘️ Regioni — NON in questo dataset", "#dc2626",
+         "20 regioni con propri statuti e leggi su materie concorrenti: sanità, istruzione\n"
+         "professionale, governo del territorio, commercio locale.\n"
+         "Fonte: portali regionali ufficiali (BUR — Bollettino Ufficiale Regionale)."),
+        ("🏙️ Province / Città metropolitane — NON in questo dataset", "#b45309",
+         "Atti di indirizzo e pianificazione territoriale.\n"
+         "Fonte: siti istituzionali delle province."),
+        ("🏠 Comuni — NON in questo dataset", "#6b7280",
+         "Regolamenti comunali (edilizio, commercio, polizia locale, tributi comunali).\n"
+         "Fonte: albì pretori comunali e comuneweb.it."),
+    ]
+    for label, color, desc in levels:
+        st.markdown(
+            f"<div style='background:#f8fafc;border-left:5px solid {color};"
+            f"border-radius:6px;padding:0.75rem 1rem;margin:0.4rem 0;'>"
+            f"<strong style='color:{color};font-size:0.95rem;'>{label}</strong><br>"
+            f"<span style='font-size:0.84rem;color:#334155;white-space:pre-line;'>{desc}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.subheader("🔗 Portali per la normativa regionale")
+    portals = [
+        ("Lombardia", "https://www.leggiregionali.it/lr/lombardia"),
+        ("Lazio", "https://www.regione.lazio.it/normativa"),
+        ("Veneto", "https://bur.regione.veneto.it"),
+        ("Sicilia", "https://www.gurs.regione.sicilia.it"),
+        ("Toscana", "https://raccoltanormativa.consiglio.regione.toscana.it"),
+        ("EUR-Lex UE", "https://eur-lex.europa.eu"),
+        ("Normattiva.it", "https://www.normattiva.it"),
+        ("Giustizia.it", "https://www.giustizia.it"),
+        ("Camera.it (leggi)", "https://www.camera.it/leg19/290"),
+    ]
+    cols = st.columns(3)
+    for i, (name, url) in enumerate(portals):
+        cols[i % 3].markdown(f"[🔗 {name}]({url})")
+
+    st.divider()
+    st.subheader("📊 Riepilogo delle collezioni nel dataset")
+    db = load_db()
+    if db:
+        try:
+            counts = db.conn.execute(
+                "SELECT source_collection, COUNT(*) cnt FROM laws "
+                "WHERE status='in_force' GROUP BY source_collection ORDER BY cnt DESC"
+            ).fetchall()
+            if counts:
+                df_rc = pd.DataFrame([dict(r) for r in counts], columns=["Collezione", "Norme vigenti"])
+                df_rc["Livello"] = df_rc["Collezione"].apply(
+                    lambda c: f"T{_SOURCE_TIER.get(c, ('?','',''))[0]}" if c else "?"
+                )
+                st.dataframe(df_rc[["Livello", "Collezione", "Norme vigenti"]], use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+
+
 def main():
     # Build a complete registry of pages and then expose only the subset
     # appropriate for the active `APP_PROFILE` (search / lab / italianlab).
@@ -6799,6 +7280,9 @@ def main():
         "🔔 Notifications": page_notifications,
         "📝 Update Log": page_update_log,
         "📥 Export": page_export,
+        "🏛️ Gerarchia delle Fonti": page_hierarchy_visualizer,
+        "🌟 Leggi più Autorevoli": page_authoritative_laws,
+        "🗺️ Normativa Regionale": page_regional_gap,
     }
 
     # Select visible pages per profile
@@ -6873,6 +7357,9 @@ def main():
             "📥 Dati & Download": all_pages["📥 Export"],
             "🔔 Aggiornamenti": all_pages["🔔 Notifications"],
             "📝 Registro Update": all_pages["📝 Update Log"],
+            "🏛️ Gerarchia delle Fonti": all_pages["🏛️ Gerarchia delle Fonti"],
+            "🌟 Leggi più Autorevoli": all_pages["🌟 Leggi più Autorevoli"],
+            "🗺️ Normativa Regionale": all_pages["🗺️ Normativa Regionale"],
         }
         if mobile_simple:
             pages = {
