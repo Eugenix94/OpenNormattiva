@@ -6402,44 +6402,216 @@ def _citizen_mvp(db):
 
         st.session_state["citizen_chat"].append(new_msg)
 
-    # ── Render chat history ────────────────────────────────────────
-    for idx, msg in enumerate(st.session_state["citizen_chat"]):
-        with st.chat_message(msg["role"]):
-            if msg.get("content"):
-                st.markdown(msg["content"])
-            laws = msg.get("laws") or []
-            if laws:
-                has_ctx = any(l.get("ai_context") or l.get("text_excerpt") for l in laws)
-                if has_ctx:
-                    st.caption(
-                        f"\U0001f4da **{len(laws)} norme pertinenti** — "
-                        "ogni scheda riporta **perché è rilevante** (risposta AI) "
-                        "e **un estratto dal testo ufficiale**. "
-                        "Il link URN apre la fonte su Normattiva.it."
-                    )
-                    for j, law in enumerate(laws[:8]):
-                        _card_chat(law, f"h{idx}-{j}")
-                else:
-                    st.caption(
-                        f"\U0001f4da **{len(laws)} norme** nel dataset — "
-                        "il link URN porta al testo ufficiale su Normattiva.it:"
-                    )
-                    g1, g2 = st.columns(2)
-                    for j, law in enumerate(laws[:8]):
-                        _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
+    # ── EU Laws tab helper (defined here so it can access nested fns) ─
+    def _eu_laws_tab_render():
+        """Dedicated EU laws browser — directives transposed into Italian law."""
+        import re as _re2
 
-    # ── Chat input (sticky bottom) ─────────────────────────────────
-    user_input = st.chat_input("Fai una domanda sulla legge italiana\u2026")
-    if user_input:
-        st.session_state["citizen_chat"].append({"role": "user", "content": user_input, "laws": []})
-        st.session_state["citizen_pending"] = user_input
-        st.rerun()
+        EU_CATEGORIES = {
+            "🔒 Sicurezza digitale": ["cybersicurezza", "cybersecurity", "nis", "dora", "digitale"],
+            "🔐 Dati & Privacy":     ["dati personali", "privacy", "gdpr", "protezione dei dati"],
+            "👷 Lavoro":             ["lavoratori", "lavoro", "occupazione", "maternit", "paternit"],
+            "🌱 Ambiente":           ["ambiente", "emissioni", "sostenibilit", "rifiuti", "clima", "energia"],
+            "💰 Finanza":            ["finanziar", "bancari", "banca", "credito", "capitali", "assicuraz"],
+            "🏥 Salute":             ["salute", "farmaci", "medic", "sanitari", "malattia"],
+            "📦 Mercato interno":    ["mercato interno", "prodotti", "consumatori", "servizi", "concorrenza"],
+            "🚗 Trasporti":          ["trasporti", "veicoli", "ferroviari", "marittimi"],
+        }
+        EU_WHERE = (
+            "(title LIKE '%direttiva%' OR title LIKE '%(UE)%' OR "
+            "title LIKE '%(CE)%' OR title LIKE '%(CEE)%' OR "
+            "title LIKE '%recepimento%')"
+        )
 
-    # ── Clear button ───────────────────────────────────────────────
-    if len(st.session_state.get("citizen_chat", [])) > 1:
-        if st.button("\U0001f5d1\ufe0f Nuova conversazione", key="clear-chat"):
-            st.session_state["citizen_chat"] = []
+        if not db:
+            st.warning("Database non disponibile.")
+            return
+
+        # ── Stats row ─────────────────────────────────────────────
+        try:
+            total_eu    = db.conn.execute(f"SELECT COUNT(*) FROM laws WHERE {EU_WHERE}").fetchone()[0]
+            vigenti_eu  = db.conn.execute(f"SELECT COUNT(*) FROM laws WHERE {EU_WHERE} AND status='in_force'").fetchone()[0]
+            abrogate_eu = total_eu - vigenti_eu
+            latest_eu   = db.conn.execute(f"SELECT MAX(date) FROM laws WHERE {EU_WHERE} AND date != ''").fetchone()[0] or "N/A"
+            by_decade   = db.conn.execute(
+                f"SELECT (year/10)*10 AS decade, COUNT(*) AS n FROM laws WHERE {EU_WHERE} "
+                "AND year > 0 GROUP BY decade ORDER BY decade DESC LIMIT 8"
+            ).fetchall()
+        except Exception as e:
+            st.error(f"Errore statistiche UE: {e}")
+            return
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📋 Totale norme UE", f"{total_eu:,}")
+        c2.metric("🟢 Vigenti", f"{vigenti_eu:,}")
+        c3.metric("🔴 Abrogate", f"{abrogate_eu:,}")
+        c4.metric("📅 Ultima indicizzata", latest_eu)
+        st.markdown(
+            "Queste norme recepiscono o attuano **direttive e regolamenti europei** "
+            "nell'ordinamento italiano. Clicca per aprire su Normattiva.it o chiedi all'AI."
+        )
+
+        # ── Decade chart ─────────────────────────────────────────
+        if by_decade:
+            decade_labels = [f"{r[0]}s" for r in by_decade]
+            decade_vals   = [r[1] for r in by_decade]
+            try:
+                import altair as alt, pandas as pd
+                df_d = pd.DataFrame({"Decade": decade_labels[::-1], "Norme": decade_vals[::-1]})
+                chart = (
+                    alt.Chart(df_d)
+                    .mark_bar(color="#1d4ed8")
+                    .encode(
+                        x=alt.X("Decade:N", sort=None, title="Decade"),
+                        y=alt.Y("Norme:Q", title=""),
+                        tooltip=["Decade", "Norme"],
+                    )
+                    .properties(height=180, title="Norme UE per decade")
+                )
+                st.altair_chart(chart, use_container_width=True)
+            except Exception:
+                st.caption("📊 " + " | ".join(f"{l}: {v}" for l, v in zip(decade_labels, decade_vals)))
+
+        st.divider()
+
+        # ── Filters ──────────────────────────────────────────────
+        col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
+        eu_search    = col_f1.text_input("🔍 Cerca nelle norme UE", placeholder="es. cybersicurezza, privacy, ambiente…", key="eu-search")
+        cat_opts     = ["Tutte"] + list(EU_CATEGORIES.keys())
+        eu_cat       = col_f2.selectbox("📂 Categoria", cat_opts, key="eu-cat")
+        vigente_only = col_f3.checkbox("Solo vigenti", value=True, key="eu-vigente")
+
+        # ── Build SQL WHERE ───────────────────────────────────────
+        conds = [EU_WHERE]
+        if vigente_only:
+            conds.append("status='in_force'")
+        if eu_cat != "Tutte":
+            kws = EU_CATEGORIES[eu_cat]
+            conds.append("(" + " OR ".join(f"title LIKE '%{k}%'" for k in kws) + ")")
+        if eu_search.strip():
+            for w in eu_search.strip().split()[:4]:
+                if len(w) > 2:
+                    conds.append(f"(title LIKE '%{w}%' OR text LIKE '%{w}%')")
+        where_clause = "WHERE " + " AND ".join(f"({c})" for c in conds)
+
+        try:
+            count_filtered = db.conn.execute(f"SELECT COUNT(*) FROM laws {where_clause}").fetchone()[0]
+            eu_laws = [
+                dict(r) for r in db.conn.execute(
+                    f"SELECT urn, title, type, year, status, date, article_count "
+                    f"FROM laws {where_clause} ORDER BY date DESC, year DESC LIMIT 40"
+                ).fetchall()
+            ]
+        except Exception as e:
+            st.error(f"Errore nella ricerca UE: {e}")
+            return
+
+        st.caption(f"**{count_filtered:,} norme** corrispondono ai filtri — mostrando le 40 più recenti.")
+
+        if not eu_laws:
+            st.info("Nessuna norma trovata. Prova ad allargare i filtri.")
+            return
+
+        # ── Law cards ─────────────────────────────────────────────
+        g1, g2 = st.columns(2)
+        for j, law in enumerate(eu_laws):
+            col = g1 if j % 2 == 0 else g2
+            urn      = law.get("urn") or ""
+            title    = (law.get("title") or "N/A")[:80]
+            badge    = "🟢" if _normalize_status(law.get("status")) == "in_force" else "🔴"
+            typ      = law.get("type") or ""
+            year     = law.get("year") or ""
+            articles = law.get("article_count") or 0
+            norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+            safe     = _re2.sub(r"[^a-z0-9]", "-", urn.lower())[:60]
+
+            col.markdown(
+                f"<div class='nv-inline-law' style='padding:0.6rem 0.75rem;'>"
+                f"<strong style='font-size:0.88rem;'>{badge} {title}</strong><br>"
+                f"<span style='font-size:0.77rem;color:#64748b;'>{typ} {year}"
+                f"{f' · {articles} art.' if articles else ''}</span><br>"
+                f"<a href='{norm_url}' target='_blank' rel='noopener' "
+                f"style='font-size:0.73rem;color:#1d4ed8;text-decoration:underline;"
+                f"word-break:break-all;'>{urn[:70]}</a>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            btn1, btn2 = col.columns(2)
+            if btn1.button("📖 Apri testo", key=f"eu-open-{safe}-{j}", use_container_width=True):
+                st.session_state["citizen_open_urn"] = urn
+                st.rerun()
+            if has_groq and btn2.button("🤖 Spiega", key=f"eu-ask-{safe}-{j}", use_container_width=True):
+                with st.spinner("AI in elaborazione…"):
+                    snippet, _ = _call_groq(
+                        f"Spiega in italiano semplice cosa prevede e cosa comporta per i cittadini: {law.get('title','')}",
+                        [law], model=GROQ_DEFAULT_MODEL, max_tokens=400,
+                    )
+                col.info(snippet or "Risposta non disponibile.")
+
+        # ── AI question about EU landscape ────────────────────────
+        if has_groq:
+            st.divider()
+            eu_q = st.text_input(
+                "🤖 Chiedi all'AI sulle norme UE",
+                placeholder="Es.: Come ha recepito l'Italia la direttiva NIS2?",
+                key="eu-ai-q",
+            )
+            if eu_q.strip() and st.button("Chiedi →", key="eu-ai-ask"):
+                with st.spinner("Ricerca nel dataset UE…"):
+                    fts_eu = _smart_search(f"direttiva {eu_q}", limit=8)
+                    eu_context = (fts_eu or eu_laws)[:8]
+                    answer, err = _call_groq(eu_q, eu_context, model=GROQ_DEFAULT_MODEL, max_tokens=700)
+                st.markdown(answer or f"⚠️ {err}")
+                if eu_context:
+                    st.caption(f"📚 Basato su {len(eu_context)} norme UE nel dataset:")
+                    for j, law in enumerate(eu_context[:4]):
+                        _card_chat(law, f"eu-ans-{j}")
+
+    # ── Main tabs: Chat + EU laws ──────────────────────────────────
+    tab_chat, tab_eu = st.tabs(["🤖 Assistente AI", "🇪🇺 Norme UE"])
+
+    with tab_chat:
+        # ── Render chat history ────────────────────────────────────
+        for idx, msg in enumerate(st.session_state["citizen_chat"]):
+            with st.chat_message(msg["role"]):
+                if msg.get("content"):
+                    st.markdown(msg["content"])
+                laws = msg.get("laws") or []
+                if laws:
+                    has_ctx = any(l.get("ai_context") or l.get("text_excerpt") for l in laws)
+                    if has_ctx:
+                        st.caption(
+                            f"\U0001f4da **{len(laws)} norme pertinenti** — "
+                            "ogni scheda riporta **perché è rilevante** (risposta AI) "
+                            "e **un estratto dal testo ufficiale**. "
+                            "Il link URN apre la fonte su Normattiva.it."
+                        )
+                        for j, law in enumerate(laws[:8]):
+                            _card_chat(law, f"h{idx}-{j}")
+                    else:
+                        st.caption(
+                            f"\U0001f4da **{len(laws)} norme** nel dataset — "
+                            "il link URN porta al testo ufficiale su Normattiva.it:"
+                        )
+                        g1, g2 = st.columns(2)
+                        for j, law in enumerate(laws[:8]):
+                            _card_chat(law, f"h{idx}-{j}", g1 if j % 2 == 0 else g2)
+
+        # ── Chat input (sticky bottom) ─────────────────────────────
+        user_input = st.chat_input("Fai una domanda sulla legge italiana\u2026")
+        if user_input:
+            st.session_state["citizen_chat"].append({"role": "user", "content": user_input, "laws": []})
+            st.session_state["citizen_pending"] = user_input
             st.rerun()
+
+        # ── Clear button ───────────────────────────────────────────
+        if len(st.session_state.get("citizen_chat", [])) > 1:
+            if st.button("\U0001f5d1\ufe0f Nuova conversazione", key="clear-chat"):
+                st.session_state["citizen_chat"] = []
+                st.rerun()
+
+    with tab_eu:
+        _eu_laws_tab_render()
 
 def main():
     # Build a complete registry of pages and then expose only the subset
