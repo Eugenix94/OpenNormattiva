@@ -5749,26 +5749,34 @@ def _citizen_mvp(db):
         if not db:
             return []
         kw = _keywords(query)
-        # Pass 1 — keywords FTS
-        if kw:
-            try:
-                res = db.search_fts(kw, limit=limit)
-                if res:
-                    return res
-            except Exception:
-                pass
-        # Pass 2 — per-word union
         seen: set = set()
         combined: list = []
-        for w in (kw.split() if kw else [])[:5]:
+
+        # Pass 1 — AND FTS on all keywords (high precision)
+        if kw:
             try:
-                for r in db.search_fts(w, limit=20):
+                for r in db.search_fts(kw, limit=limit):
                     u = r.get("urn", "")
                     if u not in seen:
                         seen.add(u)
                         combined.append(r)
             except Exception:
                 pass
+
+        # Pass 2 — per-word FTS union (broader recall; always run to diversify candidates)
+        words = (kw.split() if kw else [])[:6]
+        if len(words) <= 3 or len(combined) < 10:
+            # Only run per-word if short query OR Pass 1 gave too few results
+            for w in words:
+                try:
+                    for r in db.search_fts(w, limit=25):
+                        u = r.get("urn", "")
+                        if u not in seen:
+                            seen.add(u)
+                            combined.append(r)
+                except Exception:
+                    pass
+
         if combined:
             return combined[:limit]
         # Pass 3 — LIKE fallback across multiple terms
@@ -5793,16 +5801,28 @@ def _citizen_mvp(db):
             return []
 
     _QUERY_EXPANSIONS = {
-        "congedo": "congedo parentale maternita paternita decreto legislativo 151 2001",
-        "maternita": "congedo maternita paternita decreto legislativo 151 2001",
-        "paternita": "congedo paternita decreto legislativo 151 2001",
-        "licenziamento": "licenziamento giusta causa statuto lavoratori legge 300 1970",
-        "affitto": "locazione contratto locazione sfratto legge 392 1978",
-        "pensione": "pensione previdenza INPS",
-        "iva": "imposta valore aggiunto decreto del presidente della repubblica 633 1972",
-        "privacy": "protezione dati personali decreto legislativo 196 2003 gdpr",
-        "salute": "servizio sanitario nazionale tutela salute",
-        "lavoro": "diritto del lavoro statuto lavoratori",
+        "congedo": "congedo parentale maternita paternita testo unico 151 2001",
+        "maternita": "tutela maternita paternita congedo testo unico 151 2001",
+        "paternita": "congedo paternita maternita testo unico 151 2001",
+        "licenziamento": "licenziamento individuale giusta causa statuto lavoratori 300 1970",
+        "affitto": "locazione immobili urbani disciplina locazioni sfratto 392 1978",
+        "locazione": "disciplina locazioni immobili urbani affitto 392 1978",
+        "sfratto": "sfratto locazione procedura affitto immobili 392 1978",
+        "pensione": "pensione previdenza INPS regime pensionistico",
+        "iva": "imposta valore aggiunto dpr 633 1972",
+        "privacy": "protezione dati personali gdpr decreto legislativo 196 2003",
+        "salute": "servizio sanitario nazionale tutela salute legge 833 1978",
+        "lavoro": "statuto lavoratori diritto lavoro 300 1970",
+        "codice": "codice civile 262 1942",
+        "penale": "codice penale reato 1398 1930",
+        "eredita": "successione eredita codice civile testamento 262 1942",
+        "divorzio": "divorzio separazione coniugi legge 898 1970",
+        "sicurezza": "sicurezza lavoro decreto legislativo 81 2008",
+        "studente": "istruzione scuola decreto ministeriale programma scolastico",
+        "scuola": "istruzione scolastica legge norme programma studio",
+        "università": "università ateneo istruzione superiore legge",
+        "tasse": "imposta reddito irpef dpr 917 1986",
+        "immigrazione": "immigrazione stranieri ingresso soggiorno decreto legislativo 286 1998",
     }
 
     def _retrieve_context(question: str, limit: int = 12) -> list:
@@ -5834,9 +5854,7 @@ def _citizen_mvp(db):
                 if urn and urn not in seen:
                     seen.add(urn)
                     combined.append(r)
-                if len(combined) >= 80:
-                    break
-            if len(combined) >= 80:
+            if len(combined) >= 100:
                 break
 
         if not combined:
@@ -5844,13 +5862,30 @@ def _citizen_mvp(db):
 
         q_tokens = set((kw or base).lower().split())
 
-        def _score(r: dict) -> tuple:
+        def _score(r: dict) -> float:
             title = str(r.get("title") or "").lower()
             text = str(r.get("snippet") or r.get("text") or "").lower()
             overlap = sum(1 for t in q_tokens if t and (t in title or t in text))
-            is_vigente = 1 if _normalize_status(r.get("status")) == "in_force" else 0
-            has_year = 1 if r.get("year") else 0
-            return (is_vigente, overlap, has_year)
+            title_match = sum(1 for t in q_tokens if t and t in title)
+            is_vigente = 1.0 if _normalize_status(r.get("status")) == "in_force" else 0.0
+            # Bigger/more comprehensive laws should rank higher
+            article_count = int(r.get("article_count") or 0)
+            text_len = int(r.get("text_length") or 0)
+            article_score = min(article_count / 80.0, 1.5)   # cap at 120 articles
+            text_score    = min(text_len / 150_000.0, 1.0)   # cap at 150K chars
+            # Bonus for testi unici (comprehensive codes / consolidated texts)
+            is_testo_unico = 0.8 if "testo unico" in title else 0.0
+            # Light penalty for EU directive transpositions shown instead of primary Italian law
+            is_eu_xp = -0.4 if ("direttiva" in title and ("recepimento" in title or "attuazione" in title)) else 0.0
+            return (
+                is_vigente * 10.0
+                + title_match * 3.0
+                + overlap * 2.0
+                + article_score * 2.0
+                + text_score
+                + is_testo_unico
+                + is_eu_xp
+            )
 
         ranked = sorted(combined, key=_score, reverse=True)
         return ranked[:limit]
