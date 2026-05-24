@@ -855,7 +855,8 @@ REGOLE FONDAMENTALI:
 1. Rispondi ESCLUSIVAMENTE basandoti sui testi normativi forniti nel CONTESTO qui sotto.
 2. Non inventare leggi, articoli, importi o scadenze non presenti nel contesto.
 3. Cita SEMPRE per ogni affermazione: titolo della norma + URN tra parentesi quadre. Esempio: [urn:nir:stato:decreto.legislativo:2003-06-30;196]
-4. Indica esplicitamente se la norma citata è VIGENTE ✓ o ABROGATA ✗.
+4. Cita SEMPRE per ogni affermazione: titolo della norma + URN tra parentesi quadre. Esempio: [urn:nir:stato:decreto.legislativo:2003-06-30;196]
+5. Tutte le norme nel contesto sono VIGENTI (in forza) — usa sempre questo stato quando citi.
 5. Usa linguaggio semplice, frasi brevi, paragrafi chiari — scrivi come se spiegassi a un amico.
 6. Struttura la risposta con:
    - **Risposta breve** (1-2 frasi che rispondono direttamente alla domanda)
@@ -866,7 +867,7 @@ REGOLE FONDAMENTALI:
 7. Se la risposta NON è ricavabile dal contesto, dì esplicitamente: "Le norme disponibili nel dataset non coprono direttamente questo aspetto. Ti consiglio di [azione pratica]."
 8. Per domande su importi, scadenze o agevolazioni: cita sempre l'anno della norma — la legge può essere cambiata.
 9. Quando pertinente, evidenzia il collegamento ai principi costituzionali della Repubblica (uguaglianza, tutela del lavoro, salute, famiglia, istruzione, libertà).
-10. Salvo richiesta esplicita di storia normativa, privilegia norme VIGENTI e segnala chiaramente eventuali riferimenti abrogati.
+10. Il dataset contiene ESCLUSIVAMENTE norme vigenti — non citare leggi come abrogate a meno che il contesto non menzioni esplicitamente una legge successiva che le ha sostituite.
 
 NORME ESTRATTE DAL DATABASE NORMATTIVA (190.000+ leggi vigenti):
 {context}
@@ -874,11 +875,12 @@ NORME ESTRATTE DAL DATABASE NORMATTIVA (190.000+ leggi vigenti):
 
 
 def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
-    """Build a structured context string from retrieved law records."""
+    """Build a structured context string from retrieved vigente law records."""
     parts = []
     for i, law in enumerate(laws, 1):
-        status = _normalize_status(law.get("status"))
-        status_label = "VIGENTE ✓" if status == "in_force" else "ABROGATA ✗"
+        # Only include vigente laws in the Groq context
+        if _normalize_status(law.get("status")) != "in_force":
+            continue
         text = (law.get("text") or law.get("snippet") or "").strip()
         excerpt = text[:max_chars_per_law] + ("…" if len(text) > max_chars_per_law else "")
         cit_n = int(law.get("citation_count_incoming") or 0)
@@ -887,7 +889,7 @@ def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
             f"[NORMA {i}]\n"
             f"Titolo: {law.get('title', 'N/A')}\n"
             f"URN: {law.get('urn', 'N/A')}\n"
-            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: {status_label}{cit_str}\n"
+            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: VIGENTE ✓{cit_str}\n"
             f"Testo:\n{excerpt}"
         )
     return "\n\n---\n\n".join(parts)
@@ -5946,8 +5948,10 @@ def _citizen_mvp(db):
                     pass
 
         if combined:
-            return combined[:limit]
-        # Pass 3 — LIKE fallback across multiple terms
+            # Only return vigente (in_force) laws
+            vigente = [r for r in combined if _normalize_status(r.get("status")) == "in_force"]
+            return vigente[:limit] if vigente else combined[:limit]
+        # Pass 3 — LIKE fallback across multiple terms (vigente only)
         try:
             terms = (kw.split() or _re.sub(r"[^\w\s]", " ", query).split())[:4]
             terms = [t for t in terms if len(t) > 2]
@@ -5961,7 +5965,7 @@ def _citizen_mvp(db):
             params.append(limit)
             rows = db.conn.execute(
                 "SELECT urn, title, type, year, date, status, '' AS snippet "
-                f"FROM laws WHERE {like_clauses} LIMIT ?",
+                f"FROM laws WHERE status='in_force' AND ({like_clauses}) LIMIT ?",
                 tuple(params),
             ).fetchall()
             return [dict(r) for r in rows]
@@ -6083,6 +6087,8 @@ def _citizen_mvp(db):
             )
 
         ranked = sorted(combined, key=_score, reverse=True)
+        # Keep only vigente (in_force) laws — this is the scope of the citizen assistant
+        ranked = [r for r in ranked if _normalize_status(r.get("status")) == "in_force"]
 
         # Out-of-scope detection: if substantial keywords (>4 chars) don't appear in
         # titles or snippets of top results, query is likely not about Italian law.
@@ -6199,10 +6205,12 @@ def _citizen_mvp(db):
             latest_db_date = db.conn.execute(
                 "SELECT MAX(date) FROM laws WHERE date != ''"
             ).fetchone()[0] or "N/A"
-            total_db_laws = db.conn.execute("SELECT COUNT(*) FROM laws").fetchone()[0]
+            total_db_laws = db.conn.execute(
+                "SELECT COUNT(*) FROM laws WHERE status='in_force'"
+            ).fetchone()[0]
         except Exception:
             pass
-    total_str = f"{total_db_laws:,}" if total_db_laws else "190.000+"
+    total_str = f"{total_db_laws:,}" if total_db_laws else "107.000+"
     sync_str = f"Aggiornato al {latest_db_date}" if latest_db_date != "N/A" else "Aggiornamento notturno"
     st.markdown(f"""
     <div class='nv-hero'>
@@ -6257,7 +6265,9 @@ def _citizen_mvp(db):
         urn = law.get("urn") or ""
         title = (law.get("title") or "N/A")[:72]
         status = _normalize_status(law.get("status"))
-        badge = "\U0001f7e2" if status == "in_force" else "\U0001f534"
+        # Only show vigente laws; skip abrogated silently
+        if status != "in_force":
+            return
         typ = law.get("type") or ""
         year = law.get("year") or ""
         safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
@@ -6316,7 +6326,7 @@ def _citizen_mvp(db):
         ) if cit_in >= 10 else ""
         target.markdown(
             f"<div class='nv-inline-law' style='padding:0.65rem 0.8rem;'>"
-            f"<strong style='font-size:0.91rem;'>{badge} {title}</strong>{tier_html}{cit_badge}<br>"
+            f"<strong style='font-size:0.91rem;'>🟢 {title}</strong>{tier_html}{cit_badge}<br>"
             f"<span style='font-size:0.78rem;color:#64748b;'>{typ} {year}</span> &nbsp;·&nbsp; "
             f"{urn_html}"
             f"{ai_html}"
