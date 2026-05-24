@@ -5886,6 +5886,20 @@ def _citizen_mvp(db):
         "solo","sono","su","sua","suoi","sul","sulla","sulle","sugli","sullo","te",
         "ti","tra","tu","tutti","un","una","uno","vi","voi","dura","fare","avere",
         "questo","questa","questi","queste","quale","quali","sarà","verrà","essere",
+        # Common question/action verbs that pollute FTS with irrelevant results
+        "funziona","calcola","calcolare","dice","dicono","vinto","fai","puoi","devi",
+        "vuoi","sanno","sai","sapete","capire","capisce","spiegami","spiega","dimmi",
+        "serve","occorre","bisogna","basta","resta","rimane","cambia","succede",
+        "avviene","permettono","consente","prevede","stabilisce","afferma","chiede",
+        "richiede","vuol","devo","deve","dobbiamo","devono","posso","possono","potete",
+        "andare","venire","uscire","entrare","farlo","farla","farne","all","dal","nell",
+        "tutto","tutta","molti","molte","alcuni","alcune","altro","altra","altri","altre",
+        "stesso","stessa","proprio","propria","propri","tale","tali","simile","simili",
+        "hai","abbiamo","avete","hanno","avevo","aveva","ero","eri","eravamo","erano",
+        "oggi","ieri","domani","adesso","presto","tardi","subito","molto","poco","tanto",
+        "troppo","abbastanza","sempre","mai","forse","magari","certamente","ovviamente",
+        "vinto","capito","trovato","fatto","detto","letto","scritto","messo","dati",
+        "diritto","diritti","legge","leggi","norma","norme","articolo","articoli",
     }
 
     def _keywords(text: str) -> str:
@@ -5957,26 +5971,45 @@ def _citizen_mvp(db):
     _QUERY_EXPANSIONS = {
         "congedo": "congedo parentale maternita paternita testo unico 151 2001",
         "maternita": "tutela maternita paternita congedo testo unico 151 2001",
+        "maternità": "tutela maternita paternita congedo testo unico 151 2001",
         "paternita": "congedo paternita maternita testo unico 151 2001",
+        "paternità": "congedo paternita maternita testo unico 151 2001",
         "licenziamento": "licenziamento individuale giusta causa statuto lavoratori 300 1970",
         "affitto": "locazione immobili urbani disciplina locazioni sfratto 392 1978",
         "locazione": "disciplina locazioni immobili urbani affitto 392 1978",
-        "sfratto": "sfratto locazione procedura affitto immobili 392 1978",
+        "sfratto": "sfratto locazione procedura affitto morosita 392 1978 431 1998",
+        "morosità": "sfratto locazione morosita procedura 392 1978",
+        "morosita": "sfratto locazione morosita procedura 392 1978",
         "pensione": "pensione previdenza INPS regime pensionistico",
+        "pensioni": "pensione previdenza INPS regime pensionistico riforma",
         "iva": "imposta valore aggiunto dpr 633 1972",
+        "irpef": "imposta reddito persone fisiche testo unico imposte redditi tuir 917 1986",
+        "ires": "imposta reddito societa testo unico imposte redditi tuir 917 1986",
+        "imu": "imposta municipale propria tributi locali decreto legislativo 23 2011",
+        "inps": "previdenza sociale pensione contributi inps legge",
         "privacy": "protezione dati personali gdpr decreto legislativo 196 2003",
+        "gdpr": "protezione dati personali decreto legislativo 196 2003 679 2016",
         "salute": "servizio sanitario nazionale tutela salute legge 833 1978",
         "lavoro": "statuto lavoratori diritto lavoro 300 1970",
+        "lavoratori": "statuto lavoratori tutela lavoro dipendente 300 1970",
         "codice": "codice civile 262 1942",
         "penale": "codice penale reato 1398 1930",
         "eredita": "successione eredita codice civile testamento 262 1942",
+        "eredità": "successione eredita codice civile testamento 262 1942",
         "divorzio": "divorzio separazione coniugi legge 898 1970",
+        "separazione": "separazione coniugale divorzio matrimonio legge 898 1970",
         "sicurezza": "sicurezza lavoro decreto legislativo 81 2008",
         "studente": "istruzione scuola decreto ministeriale programma scolastico",
         "scuola": "istruzione scolastica legge norme programma studio",
         "università": "università ateneo istruzione superiore legge",
+        "universita": "università ateneo istruzione superiore legge",
         "tasse": "imposta reddito irpef dpr 917 1986",
         "immigrazione": "immigrazione stranieri ingresso soggiorno decreto legislativo 286 1998",
+        "stranieri": "immigrazione stranieri ingresso soggiorno decreto legislativo 286 1998",
+        "reato": "codice penale reato pena reclusione 1398 1930",
+        "contratto": "contratto obbligazioni codice civile 262 1942",
+        "appalto": "appalto contratti pubblici codice 36 2023 50 2016",
+        "fallimento": "fallimento insolvenza crisi impresa codice 14 2019 267 1942",
     }
 
     def _retrieve_context(question: str, limit: int = 12) -> list:
@@ -5997,8 +6030,11 @@ def _citizen_mvp(db):
             if exp:
                 variants.append(exp)
 
-        # Include a constitutional lens for broad civic questions.
-        variants.append(f"costituzione repubblica italiana {kw or base}".strip())
+        # Remove the noisy constitutional lens variant — it pulls in irrelevant results
+        # for most civic queries; only add it if the query explicitly mentions constitution
+        _q_lower = (kw or base).lower()
+        if any(w in _q_lower for w in ("costituzione","costituzionale","fondamentale","art","articolo")):
+            variants.append(f"costituzione repubblica italiana {kw or base}".strip())
 
         seen = set()
         combined = []
@@ -6018,7 +6054,8 @@ def _citizen_mvp(db):
 
         def _score(r: dict) -> float:
             title = str(r.get("title") or "").lower()
-            text = str(r.get("snippet") or r.get("text") or "").lower()
+            # Use only snippet (not full text) to avoid matching unrelated text deep in law body
+            text = str(r.get("snippet") or "").lower()[:2000]
             overlap = sum(1 for t in q_tokens if t and (t in title or t in text))
             title_match = sum(1 for t in q_tokens if t and t in title)
             is_vigente = 1.0 if _normalize_status(r.get("status")) == "in_force" else 0.0
@@ -6028,20 +6065,41 @@ def _citizen_mvp(db):
             article_score = min(article_count / 80.0, 1.5)   # cap at 120 articles
             text_score    = min(text_len / 150_000.0, 1.0)   # cap at 150K chars
             # Bonus for testi unici (comprehensive codes / consolidated texts)
-            is_testo_unico = 0.8 if "testo unico" in title else 0.0
-            # Light penalty for EU directive transpositions shown instead of primary Italian law
-            is_eu_xp = -0.4 if ("direttiva" in title and ("recepimento" in title or "attuazione" in title)) else 0.0
+            is_testo_unico = 2.0 if "testo unico" in title else 0.0
+            # Strong penalty for EU directive transpositions unless query is EU-related
+            _is_eu_topic = any(w in _q_lower for w in ("direttiv","europe","ue ","union","recep","europea"))
+            is_eu_xp = -3.0 if (not _is_eu_topic and "direttiva" in title and ("recepimento" in title or "attuazione" in title)) else 0.0
+            # BM25 relevance from FTS (normalized)
+            bm25 = float(r.get("relevance_score") or 0) / 10.0
             return (
-                is_vigente * 10.0
-                + title_match * 3.0
-                + overlap * 2.0
+                title_match * 12.0           # Title match is the primary relevance signal
+                + overlap * 3.0              # Text/snippet match bonus
+                + is_vigente * 3.0           # Vigente bonus (reduced: relevance > status)
                 + article_score * 2.0
                 + text_score
                 + is_testo_unico
                 + is_eu_xp
+                + bm25
             )
 
         ranked = sorted(combined, key=_score, reverse=True)
+
+        # Out-of-scope detection: if substantial keywords (>4 chars) don't appear in
+        # titles or snippets of top results, query is likely not about Italian law.
+        if ranked and len(q_tokens) >= 2:
+            substantial = [t for t in q_tokens if len(t) > 4]
+            if substantial:
+                max_title_match = max(
+                    sum(1 for t in substantial if t in str(r.get("title") or "").lower())
+                    for r in ranked[:5]
+                )
+                max_snip_match = max(
+                    sum(1 for t in substantial if t in str(r.get("snippet") or "").lower()[:500])
+                    for r in ranked[:5]
+                )
+                if max_title_match == 0 and max_snip_match == 0:
+                    return []  # Off-topic query: no relevant Italian law found
+
         top_urns = [r.get("urn") for r in ranked[:limit] if r.get("urn")]
         if top_urns and db:
             try:
@@ -6569,8 +6627,13 @@ def _citizen_mvp(db):
                     reply = _build_accountable_fallback(pending, context_laws, err or "Errore AI")
             elif has_groq and not context_laws:
                 reply = (
-                    "Non ho trovato evidenze nel dataset per questa domanda. "
-                    "Prova a essere pi\u00f9 specifico (es. \u2018congedo parentale dipendente privato 2024\u2019)."
+                    "\u26a0\ufe0f **Domanda fuori ambito legale italiano.**\n\n"
+                    "Non ho trovato norme pertinenti nel dataset Normattiva per questa domanda. "
+                    "Questo assistente risponde solo su **leggi e norme dell'ordinamento italiano**.\n\n"
+                    "Esempi di domande utili:\n"
+                    "- *Quanto dura il congedo di maternit\u00e0?*\n"
+                    "- *Come funziona lo sfratto per morosit\u00e0?*\n"
+                    "- *Cosa dice la legge sul licenziamento per giusta causa?*"
                 )
                 context_laws = []
             elif context_laws:
