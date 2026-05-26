@@ -3541,10 +3541,9 @@ def page_domains():
     st.divider()
     st.subheader("🔍 Esplora un'area giuridica")
     selected_domain = st.selectbox("Seleziona area:", domain_names, key="dom-sel")
-    status_filt = st.checkbox("Solo norme vigenti", value=True, key="dom-vigente")
 
     if selected_domain:
-        status_where = "AND l.status = 'in_force'" if status_filt else ""
+        status_where = "AND l.status = 'in_force'"  # Always vigente only
         try:
             laws_in_domain = db.conn.execute(f"""
                 SELECT l.urn, l.title, l.year, l.type, l.status, l.source_collection,
@@ -4557,7 +4556,7 @@ def page_latest_laws():
         with col_f1:
             status_filter = st.selectbox(
                 "Stato",
-                ["Tutte", "Solo vigenti", "Solo abrogate"],
+                ["Solo vigenti", "Tutte"],
                 key="latest-status-filter",
             )
         with col_f2:
@@ -4577,8 +4576,6 @@ def page_latest_laws():
         params: list = []
         if status_filter == "Solo vigenti":
             where_parts.append("status = 'in_force'")
-        elif status_filter == "Solo abrogate":
-            where_parts.append("status = 'abrogated'")
         if type_filter != "Tutti i tipi":
             where_parts.append("type = ?")
             params.append(type_filter)
@@ -6681,7 +6678,10 @@ def _citizen_mvp(db):
         EU_WHERE = (
             "(title LIKE '%direttiva%' OR title LIKE '%(UE)%' OR "
             "title LIKE '%(CE)%' OR title LIKE '%(CEE)%' OR "
-            "title LIKE '%recepimento%')"
+            "title LIKE '%recepimento%' OR "
+            "source_collection = 'Atti di recepimento direttive UE' OR "
+            "source_collection = 'Atti di attuazione Regolamenti UE' OR "
+            "source_collection = 'Leggi di delegazione europea')"
         )
 
         def _extract_eu_ref(title: str) -> str | None:
@@ -7105,7 +7105,7 @@ def page_hierarchy_visualizer():
     chosen = st.selectbox("Seleziona livello", list(tier_opts.keys()), key="hier-sel")
     if chosen:
         _, color, _, label, desc, colls = tier_opts[chosen]
-        status_filter = st.checkbox("Solo norme vigenti", value=True, key="hier-vigente")
+        status_filter = True  # Always show only vigente laws
         try:
             where_colls = " OR ".join(f"source_collection=?" for _ in colls)
             status_where = " AND status='in_force'" if status_filter else ""
@@ -7163,7 +7163,7 @@ def page_authoritative_laws():
                    m.domain_cluster
             FROM law_metadata m
             JOIN laws l ON m.urn = l.urn
-            WHERE m.citation_count_incoming > 0
+            WHERE m.citation_count_incoming > 0 AND l.status = 'in_force'
             ORDER BY m.citation_count_incoming DESC
             LIMIT 100
         """).fetchall()
@@ -7204,15 +7204,13 @@ def page_authoritative_laws():
     domain_opts = ["Tutte"] + sorted({r["domain_cluster"] for r in rows if r.get("domain_cluster")})
     col_f1, col_f2 = st.columns(2)
     domain_filter = col_f1.selectbox("Area del diritto", domain_opts, key="auth-domain")
-    status_filt   = col_f2.selectbox("Stato", ["Tutte", "Solo vigenti", "Solo abrogate"], key="auth-status")
+    status_filt   = col_f2.selectbox("Stato", ["Solo vigenti", "Tutte"], key="auth-status")
 
     filtered = list(rows)
     if domain_filter != "Tutte":
         filtered = [r for r in filtered if r.get("domain_cluster") == domain_filter]
     if status_filt == "Solo vigenti":
         filtered = [r for r in filtered if _normalize_status(r["status"]) == "in_force"]
-    elif status_filt == "Solo abrogate":
-        filtered = [r for r in filtered if _normalize_status(r["status"]) != "in_force"]
 
     for i, r in enumerate(filtered[:50], 1):
         r = dict(r)
