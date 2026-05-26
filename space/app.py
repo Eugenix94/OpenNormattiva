@@ -5869,8 +5869,85 @@ _CITIZEN_CSS = """<style>
 </style>"""
 
 
+def _card_chat(law, key_suffix, col=None):
+    """Render a single law card in chat/EU context. Module-level so it's accessible everywhere."""
+    urn = law.get("urn") or ""
+    title = (law.get("title") or "N/A")[:72]
+    status = _normalize_status(law.get("status"))
+    if status != "in_force":
+        return
+    typ = law.get("type") or ""
+    year = law.get("year") or ""
+    safe = re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
+    target = col if col is not None else st
+
+    norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+    urn_html = (
+        f"<a href='{norm_url}' target='_blank' rel='noopener' "
+        f"style='color:#1d4ed8;font-size:0.74rem;text-decoration:underline;"
+        f"word-break:break-all;'>{urn[:80]}</a>"
+    ) if urn else f"<code style='font-size:0.74rem;'>{urn[:80]}</code>"
+
+    ai_ctx = (law.get("ai_context") or law.get("relevance") or "").strip()
+    ai_html = ""
+    if ai_ctx:
+        safe_ctx = (ai_ctx
+                    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    .replace('"', "&quot;"))
+        ai_html = (
+            f"<div style='margin-top:0.45rem;padding:0.35rem 0.5rem;"
+            f"background:#eff6ff;border-radius:6px;border-left:3px solid #1d4ed8;'>"
+            f"<span style='font-size:0.74rem;font-weight:700;color:#1e3a8a;"
+            f"text-transform:uppercase;letter-spacing:0.04em;'>💬 Perché è rilevante</span><br>"
+            f"<span style='font-size:0.83rem;color:#1e293b;line-height:1.5;"
+            f"display:block;margin-top:0.2rem;'>{safe_ctx[:320]}</span>"
+            f"</div>"
+        )
+
+    exc = (law.get("text_excerpt") or "").strip()
+    exc_html = ""
+    if exc:
+        safe_exc = (exc
+                    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    .replace('"', "&quot;"))
+        exc_html = (
+            f"<div style='margin-top:0.4rem;padding:0.35rem 0.5rem;"
+            f"background:#f8fafc;border-radius:6px;border-left:3px solid #94a3b8;'>"
+            f"<span style='font-size:0.74rem;font-weight:700;color:#475569;"
+            f"text-transform:uppercase;letter-spacing:0.04em;'>📄 Dal testo della norma</span><br>"
+            f"<span style='font-size:0.81rem;color:#334155;font-style:italic;"
+            f"line-height:1.5;display:block;margin-top:0.2rem;'>{safe_exc[:280]}</span>"
+            f"</div>"
+        )
+
+    sc = law.get("source_collection") or ""
+    tier_html = _tier_badge(sc) if sc else ""
+    cit_in = int(law.get("citation_count_incoming") or 0)
+    cit_badge = (
+        f"<span style='font-size:0.67rem;background:#dcfce7;color:#166534;"
+        f"border-radius:3px;padding:1px 5px;margin-left:4px;font-weight:700;'>"
+        f"📥 {cit_in:,} cit.</span>"
+    ) if cit_in >= 10 else ""
+    target.markdown(
+        f"<div class='nv-inline-law' style='padding:0.65rem 0.8rem;'>"
+        f"<strong style='font-size:0.91rem;'>🟢 {title}</strong>{tier_html}{cit_badge}<br>"
+        f"<span style='font-size:0.78rem;color:#64748b;'>{typ} {year}</span> &nbsp;·&nbsp; "
+        f"{urn_html}"
+        f"{ai_html}"
+        f"{exc_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if target.button(
+        "\U0001f4d6 Apri testo completo",
+        key=f"open-{safe}-{key_suffix}",
+        use_container_width=True,
+    ):
+        st.session_state["citizen_open_urn"] = urn
+        st.rerun()
+
+
 def _citizen_mvp(db):
-    """Citizen-first MVP — AI chatbot, law search, latest norms, constitution."""
     import re as _re
 
     # ── Italian stop-words stripped before FTS (avoids AND-match failure) ──
@@ -6257,87 +6334,7 @@ def _citizen_mvp(db):
             return "kingdom_era"
         return "groq_rag"
 
-    # ── Inline law card (no expander — avoids nesting) ────────────
-    def _card_chat(law, key_suffix, col=None):
-        urn = law.get("urn") or ""
-        title = (law.get("title") or "N/A")[:72]
-        status = _normalize_status(law.get("status"))
-        # Only show vigente laws; skip abrogated silently
-        if status != "in_force":
-            return
-        typ = law.get("type") or ""
-        year = law.get("year") or ""
-        safe = _re.sub(r"[^a-z0-9]", "-", urn.lower())[:80]
-        target = col if col is not None else st
-
-        # Clickable URN → Normattiva.it official source
-        norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
-        urn_html = (
-            f"<a href='{norm_url}' target='_blank' rel='noopener' "
-            f"style='color:#1d4ed8;font-size:0.74rem;text-decoration:underline;"
-            f"word-break:break-all;'>{urn[:80]}</a>"
-        ) if urn else f"<code style='font-size:0.74rem;'>{urn[:80]}</code>"
-
-        # ── Section 1: what the AI said about this law ────────────
-        ai_ctx = (law.get("ai_context") or law.get("relevance") or "").strip()
-        ai_html = ""
-        if ai_ctx:
-            # Escape HTML special chars
-            safe_ctx = (ai_ctx
-                        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        .replace('"', "&quot;"))
-            ai_html = (
-                f"<div style='margin-top:0.45rem;padding:0.35rem 0.5rem;"
-                f"background:#eff6ff;border-radius:6px;border-left:3px solid #1d4ed8;'>"
-                f"<span style='font-size:0.74rem;font-weight:700;color:#1e3a8a;"
-                f"text-transform:uppercase;letter-spacing:0.04em;'>💬 Perché è rilevante</span><br>"
-                f"<span style='font-size:0.83rem;color:#1e293b;line-height:1.5;"
-                f"display:block;margin-top:0.2rem;'>{safe_ctx[:320]}</span>"
-                f"</div>"
-            )
-
-        # ── Section 2: excerpt from the law's own text ────────────
-        exc = (law.get("text_excerpt") or "").strip()
-        exc_html = ""
-        if exc:
-            safe_exc = (exc
-                        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                        .replace('"', "&quot;"))
-            exc_html = (
-                f"<div style='margin-top:0.4rem;padding:0.35rem 0.5rem;"
-                f"background:#f8fafc;border-radius:6px;border-left:3px solid #94a3b8;'>"
-                f"<span style='font-size:0.74rem;font-weight:700;color:#475569;"
-                f"text-transform:uppercase;letter-spacing:0.04em;'>📄 Dal testo della norma</span><br>"
-                f"<span style='font-size:0.81rem;color:#334155;font-style:italic;"
-                f"line-height:1.5;display:block;margin-top:0.2rem;'>{safe_exc[:280]}</span>"
-                f"</div>"
-            )
-
-        sc = law.get("source_collection") or ""
-        tier_html = _tier_badge(sc) if sc else ""
-        cit_in = int(law.get("citation_count_incoming") or 0)
-        cit_badge = (
-            f"<span style='font-size:0.67rem;background:#dcfce7;color:#166534;"
-            f"border-radius:3px;padding:1px 5px;margin-left:4px;font-weight:700;'>"
-            f"📥 {cit_in:,} cit.</span>"
-        ) if cit_in >= 10 else ""
-        target.markdown(
-            f"<div class='nv-inline-law' style='padding:0.65rem 0.8rem;'>"
-            f"<strong style='font-size:0.91rem;'>🟢 {title}</strong>{tier_html}{cit_badge}<br>"
-            f"<span style='font-size:0.78rem;color:#64748b;'>{typ} {year}</span> &nbsp;·&nbsp; "
-            f"{urn_html}"
-            f"{ai_html}"
-            f"{exc_html}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        if target.button(
-            "\U0001f4d6 Apri testo completo",
-            key=f"open-{safe}-{key_suffix}",
-            use_container_width=True,
-        ):
-            st.session_state["citizen_open_urn"] = urn
-            st.rerun()
+    # ── Inline law card — defined at module level as _card_chat() ──
 
     def _annotate_relevance(answer: str, laws: list, query: str = "") -> list:
         """For each law attach two explainer fields:
@@ -6660,322 +6657,9 @@ def _citizen_mvp(db):
 
         st.session_state["citizen_chat"].append(new_msg)
 
-    # ── EU Laws tab helper (defined here so it can access nested fns) ─
-    def _eu_laws_tab_render():
-        """Dedicated EU laws browser with compliance tracker."""
-        import re as _re2
+    # ── EU laws tab is now a module-level function: _eu_laws_tab_render() ──
 
-        EU_CATEGORIES = {
-            "🔒 Sicurezza digitale": ["cybersicurezza", "cybersecurity", "nis", "dora", "digitale"],
-            "🔐 Dati & Privacy":     ["dati personali", "privacy", "gdpr", "protezione dei dati"],
-            "👷 Lavoro":             ["lavoratori", "lavoro", "occupazione", "maternit", "paternit"],
-            "🌱 Ambiente":           ["ambiente", "emissioni", "sostenibilit", "rifiuti", "clima", "energia"],
-            "💰 Finanza":            ["finanziar", "bancari", "banca", "credito", "capitali", "assicuraz"],
-            "🏥 Salute":             ["salute", "farmaci", "medic", "sanitari", "malattia"],
-            "📦 Mercato interno":    ["mercato interno", "prodotti", "consumatori", "servizi", "concorrenza"],
-            "🚗 Trasporti":          ["trasporti", "veicoli", "ferroviari", "marittimi"],
-        }
-        EU_WHERE = (
-            "(title LIKE '%direttiva%' OR title LIKE '%(UE)%' OR "
-            "title LIKE '%(CE)%' OR title LIKE '%(CEE)%' OR "
-            "title LIKE '%recepimento%' OR "
-            "source_collection = 'Atti di recepimento direttive UE' OR "
-            "source_collection = 'Atti di attuazione Regolamenti UE' OR "
-            "source_collection = 'Leggi di delegazione europea')"
-        )
-
-        def _extract_eu_ref(title: str) -> str | None:
-            """Extract EU directive reference like '(UE) 2022/2555' from a title."""
-            m = _re2.search(r"\((?:UE|CE|CEE|EURATOM)\)\s*(\d{4})/(\d+)", title or "", _re2.IGNORECASE)
-            if m:
-                return f"{m.group(0).strip()}"
-            return None
-
-        def _extract_eu_year(title: str) -> int | None:
-            m = _re2.search(r"\((?:UE|CE|CEE|EURATOM)\)\s*(\d{4})/\d+", title or "", _re2.IGNORECASE)
-            return int(m.group(1)) if m else None
-
-        if not db:
-            st.warning("Database non disponibile.")
-            return
-
-        # ── Top-level stats (always visible) ──────────────────────
-        try:
-            total_eu   = db.conn.execute(f"SELECT COUNT(*) FROM laws WHERE {EU_WHERE}").fetchone()[0]
-            vigenti_eu = db.conn.execute(f"SELECT COUNT(*) FROM laws WHERE {EU_WHERE} AND status='in_force'").fetchone()[0]
-            latest_eu  = db.conn.execute(f"SELECT MAX(date) FROM laws WHERE {EU_WHERE} AND date != ''").fetchone()[0] or "N/A"
-        except Exception as e:
-            st.error(f"Errore statistiche UE: {e}")
-            return
-
-        pct_v = vigenti_eu / total_eu * 100 if total_eu else 0
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📋 Norme UE nel dataset", f"{total_eu:,}")
-        c2.metric("🟢 Vigenti", f"{vigenti_eu:,}", f"{pct_v:.0f}%")
-        c3.metric("🔴 Abrogate / superate", f"{total_eu - vigenti_eu:,}")
-        c4.metric("📅 Ultima indicizzata", latest_eu)
-
-        st.markdown(
-            "Norme italiane che **recepiscono o attuano direttive e regolamenti UE**. "
-            "Esplora lo stato di recepimento oppure cerca una norma specifica."
-        )
-        st.divider()
-
-        # ── Sub-tabs ──────────────────────────────────────────────
-        tab_compliance, tab_cerca = st.tabs(["📊 Stato di recepimento", "🔍 Cerca norme"])
-
-        # ══════════════════════════════════════════════════════════
-        # TAB 1 — COMPLIANCE TRACKER
-        # ══════════════════════════════════════════════════════════
-        with tab_compliance:
-            st.markdown("### 🇮🇹 Come l'Italia ha recepito le direttive UE")
-            st.caption(
-                "Analisi basata sulle norme nel dataset. "
-                "Le direttive recenti post-2023 potrebbero non essere ancora tutte recepite."
-            )
-
-            # ── Per-category compliance bars ──────────────────────
-            st.markdown("#### Copertura per area tematica")
-            cat_rows = []
-            for cat_label, kws in EU_CATEGORIES.items():
-                kw_cond = " OR ".join(f"title LIKE '%{k}%'" for k in kws)
-                try:
-                    tot = db.conn.execute(
-                        f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond})"
-                    ).fetchone()[0]
-                    vig = db.conn.execute(
-                        f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond}) AND status='in_force'"
-                    ).fetchone()[0]
-                    cat_rows.append((cat_label, tot, vig))
-                except Exception:
-                    pass
-
-            for cat_label, tot, vig in sorted(cat_rows, key=lambda x: -x[1]):
-                if tot == 0:
-                    continue
-                pct = vig / tot * 100
-                status_icon = "🟢" if pct >= 70 else "🟡" if pct >= 40 else "🔴"
-                col_l, col_r = st.columns([3, 1])
-                col_l.markdown(f"**{cat_label}** — {vig}/{tot} vigenti")
-                col_r.markdown(f"{status_icon} **{pct:.0f}%**")
-                st.progress(int(pct))
-
-            st.divider()
-
-            # ── Transposition speed analysis ──────────────────────
-            st.markdown("#### ⏱️ Velocità di recepimento (lag direttiva → legge italiana)")
-            st.caption("Calcolato sulle norme in cui il titolo contiene l'anno della direttiva UE e l'anno della norma italiana.")
-            try:
-                sample = [
-                    dict(r) for r in db.conn.execute(
-                        f"SELECT title, year FROM laws WHERE {EU_WHERE} AND year > 1990 AND status='in_force' LIMIT 500"
-                    ).fetchall()
-                ]
-                lags = []
-                for row in sample:
-                    eu_yr = _extract_eu_year(row["title"])
-                    it_yr = row.get("year")
-                    if eu_yr and it_yr and 0 <= (it_yr - eu_yr) <= 10:
-                        lags.append(it_yr - eu_yr)
-                if lags:
-                    avg_lag = sum(lags) / len(lags)
-                    lag_0   = lags.count(0)
-                    lag_1_2 = sum(1 for l in lags if 1 <= l <= 2)
-                    lag_3p  = sum(1 for l in lags if l >= 3)
-                    lc1, lc2, lc3, lc4 = st.columns(4)
-                    lc1.metric("📐 Lag medio", f"{avg_lag:.1f} anni")
-                    lc2.metric("⚡ Recepimento immediato (0 anni)", f"{lag_0}")
-                    lc3.metric("✅ Entro 2 anni", f"{lag_1_2}")
-                    lc4.metric("⚠️ Oltre 3 anni", f"{lag_3p}")
-                    try:
-                        import altair as alt, pandas as pd
-                        from collections import Counter
-                        lag_counts = Counter(lags)
-                        df_lag = pd.DataFrame(
-                            sorted(lag_counts.items()),
-                            columns=["Anni di ritardo", "Norme"]
-                        )
-                        chart_lag = (
-                            alt.Chart(df_lag)
-                            .mark_bar(color="#0ea5e9")
-                            .encode(
-                                x=alt.X("Anni di ritardo:O", title="Anni tra direttiva UE e legge italiana"),
-                                y=alt.Y("Norme:Q", title=""),
-                                tooltip=["Anni di ritardo", "Norme"],
-                            )
-                            .properties(height=200, title="Distribuzione del lag di recepimento")
-                        )
-                        st.altair_chart(chart_lag, use_container_width=True)
-                    except Exception:
-                        st.caption(f"Lag 0a:{lag_0} | 1-2a:{lag_1_2} | 3+a:{lag_3p}")
-                else:
-                    st.info("Dati insufficienti per calcolare il lag (titoli senza riferimento direttiva esplicito).")
-            except Exception as e:
-                st.warning(f"Analisi lag non disponibile: {e}")
-
-            st.divider()
-
-            # ── Activity timeline (transpositions by year) ─────────
-            st.markdown("#### 📅 Attività di recepimento per anno (ultimi 25 anni)")
-            try:
-                import altair as alt, pandas as pd
-                by_year = db.conn.execute(
-                    f"SELECT year, COUNT(*) AS n FROM laws WHERE {EU_WHERE} "
-                    "AND year >= 2000 AND status='in_force' GROUP BY year ORDER BY year"
-                ).fetchall()
-                if by_year:
-                    df_yr = pd.DataFrame(by_year, columns=["Anno", "Norme"])
-                    chart_yr = (
-                        alt.Chart(df_yr)
-                        .mark_area(color="#3b82f6", opacity=0.7, line=True)
-                        .encode(
-                            x=alt.X("Anno:O", title=""),
-                            y=alt.Y("Norme:Q", title="Norme recepite"),
-                            tooltip=["Anno", "Norme"],
-                        )
-                        .properties(height=200, title="Norme UE vigenti recepite per anno (dal 2000)")
-                    )
-                    st.altair_chart(chart_yr, use_container_width=True)
-            except Exception:
-                pass
-
-            # ── Most recently transposed ───────────────────────────
-            st.markdown("#### 🆕 Direttive recepite più di recente")
-            try:
-                recent_eu = [
-                    dict(r) for r in db.conn.execute(
-                        f"SELECT urn, title, type, year, date, article_count FROM laws "
-                        f"WHERE {EU_WHERE} AND status='in_force' ORDER BY date DESC, year DESC LIMIT 10"
-                    ).fetchall()
-                ]
-                for law in recent_eu:
-                    eu_ref = _extract_eu_ref(law.get("title") or "")
-                    eu_tag = f" · **`{eu_ref}`**" if eu_ref else ""
-                    norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{law['urn']}"
-                    st.markdown(
-                        f"🟢 [{(law.get('title') or '')[:75]}]({norm_url}) "
-                        f"*{law.get('type','')} {law.get('year','')}*{eu_tag}"
-                    )
-            except Exception as e:
-                st.warning(f"Errore elenco recenti: {e}")
-
-            st.divider()
-
-            # ── AI compliance analysis ─────────────────────────────
-            if has_groq:
-                st.markdown("#### 🤖 Analisi di conformità AI")
-                comp_q = st.text_input(
-                    "Chiedi come l'Italia ha recepito una specifica direttiva",
-                    placeholder="Es.: Come ha recepito l'Italia la direttiva NIS2? Qual è lo stato attuale?",
-                    key="eu-compliance-q",
-                )
-                if comp_q.strip() and st.button("Analizza →", key="eu-compliance-ask"):
-                    with st.spinner("Ricerca nel dataset e analisi AI…"):
-                        fts_ctx = _smart_search(f"direttiva recepimento {comp_q}", limit=10)
-                        eu_ctx  = [l for l in fts_ctx if any(
-                            kw in (l.get("title") or "").lower()
-                            for kw in ["direttiva", "(ue)", "(ce)", "(cee)", "recepimento"]
-                        )][:8] or fts_ctx[:6]
-                        prompt = (
-                            f"Analizza come l'Italia ha recepito e implementato questa direttiva/normativa UE. "
-                            f"Indica: 1) quale norma italiana ha attuato il recepimento, "
-                            f"2) i punti principali dell'implementazione, "
-                            f"3) eventuali lacune o ritardi noti. "
-                            f"Basati esclusivamente sulle norme del dataset fornite. Domanda: {comp_q}"
-                        )
-                        answer, err = _call_groq(prompt, eu_ctx, model=GROQ_DEFAULT_MODEL, max_tokens=900)
-                    st.markdown(answer or f"⚠️ {err}")
-                    if eu_ctx:
-                        st.caption(f"📚 {len(eu_ctx)} norme di riferimento dal dataset:")
-                        for j, law in enumerate(eu_ctx[:5]):
-                            eu_ref = _extract_eu_ref(law.get("title") or "")
-                            if eu_ref:
-                                law = dict(law)
-                                law["ai_context"] = f"Recepisce la direttiva {eu_ref}"
-                            _card_chat(law, f"comp-ans-{j}")
-
-        # ══════════════════════════════════════════════════════════
-        # TAB 2 — BROWSER / SEARCH
-        # ══════════════════════════════════════════════════════════
-        with tab_cerca:
-            # ── Filters ──────────────────────────────────────────
-            col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
-            eu_search    = col_f1.text_input("🔍 Cerca nelle norme UE", placeholder="es. NIS2, GDPR, ambiente…", key="eu-search")
-            cat_opts     = ["Tutte"] + list(EU_CATEGORIES.keys())
-            eu_cat       = col_f2.selectbox("📂 Categoria", cat_opts, key="eu-cat")
-            vigente_only = col_f3.checkbox("Solo vigenti", value=True, key="eu-vigente")
-
-            conds = [EU_WHERE]
-            if vigente_only:
-                conds.append("status='in_force'")
-            if eu_cat != "Tutte":
-                kws = EU_CATEGORIES[eu_cat]
-                conds.append("(" + " OR ".join(f"title LIKE '%{k}%'" for k in kws) + ")")
-            if eu_search.strip():
-                for w in eu_search.strip().split()[:4]:
-                    if len(w) > 2:
-                        conds.append(f"(title LIKE '%{w}%' OR text LIKE '%{w}%')")
-            where_clause = "WHERE " + " AND ".join(f"({c})" for c in conds)
-
-            try:
-                count_filtered = db.conn.execute(f"SELECT COUNT(*) FROM laws {where_clause}").fetchone()[0]
-                eu_laws = [
-                    dict(r) for r in db.conn.execute(
-                        f"SELECT urn, title, type, year, status, date, article_count "
-                        f"FROM laws {where_clause} ORDER BY date DESC, year DESC LIMIT 40"
-                    ).fetchall()
-                ]
-            except Exception as e:
-                st.error(f"Errore nella ricerca UE: {e}")
-                return
-
-            st.caption(f"**{count_filtered:,} norme** corrispondono ai filtri — mostrando le 40 più recenti.")
-
-            if not eu_laws:
-                st.info("Nessuna norma trovata. Prova ad allargare i filtri.")
-                return
-
-            # ── Law cards ─────────────────────────────────────────
-            g1, g2 = st.columns(2)
-            for j, law in enumerate(eu_laws):
-                col = g1 if j % 2 == 0 else g2
-                urn      = law.get("urn") or ""
-                title    = (law.get("title") or "N/A")[:80]
-                badge    = "🟢" if _normalize_status(law.get("status")) == "in_force" else "🔴"
-                typ      = law.get("type") or ""
-                year     = law.get("year") or ""
-                articles = law.get("article_count") or 0
-                eu_ref   = _extract_eu_ref(law.get("title") or "")
-                norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
-                safe     = _re2.sub(r"[^a-z0-9]", "-", urn.lower())[:60]
-                eu_tag   = (
-                    f"<span style='font-size:0.72rem;background:#dbeafe;color:#1e40af;"
-                    f"border-radius:4px;padding:1px 5px;margin-left:4px;'>{eu_ref}</span>"
-                ) if eu_ref else ""
-
-                col.markdown(
-                    f"<div class='nv-inline-law' style='padding:0.6rem 0.75rem;'>"
-                    f"<strong style='font-size:0.88rem;'>{badge} {title}</strong>{eu_tag}<br>"
-                    f"<span style='font-size:0.77rem;color:#64748b;'>{typ} {year}"
-                    f"{f' · {articles} art.' if articles else ''}</span><br>"
-                    f"<a href='{norm_url}' target='_blank' rel='noopener' "
-                    f"style='font-size:0.73rem;color:#1d4ed8;text-decoration:underline;"
-                    f"word-break:break-all;'>{urn[:70]}</a>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-                btn1, btn2 = col.columns(2)
-                if btn1.button("📖 Apri testo", key=f"eu-open-{safe}-{j}", use_container_width=True):
-                    st.session_state["citizen_open_urn"] = urn
-                    st.rerun()
-                if has_groq and btn2.button("🤖 Spiega", key=f"eu-ask-{safe}-{j}", use_container_width=True):
-                    with st.spinner("AI in elaborazione…"):
-                        snippet, _ = _call_groq(
-                            f"Spiega in italiano semplice cosa prevede questa norma, quale direttiva UE recepisce "
-                            f"e cosa comporta per i cittadini: {law.get('title','')}",
-                            [law], model=GROQ_DEFAULT_MODEL, max_tokens=400,
-                        )
-                    col.info(snippet or "Risposta non disponibile.")
+    # ── Render chat history ────────────────────────────────────────
 
     # ── Render chat history ────────────────────────────────────────
     for idx, msg in enumerate(st.session_state["citizen_chat"]):
@@ -7016,6 +6700,233 @@ def _citizen_mvp(db):
             st.session_state["citizen_chat"] = []
             st.rerun()
 
+
+
+def _eu_laws_tab_render():
+    """Dedicated EU laws browser with compliance tracker. Module-level."""
+    EU_CATEGORIES = {
+        "🔒 Sicurezza digitale": ["cybersicurezza", "cybersecurity", "nis", "dora", "digitale"],
+        "🔐 Dati & Privacy":     ["dati personali", "privacy", "gdpr", "protezione dei dati"],
+        "👷 Lavoro":             ["lavoratori", "lavoro", "occupazione", "maternit", "paternit"],
+        "🌱 Ambiente":           ["ambiente", "emissioni", "sostenibilit", "rifiuti", "clima", "energia"],
+        "💰 Finanza":            ["finanziar", "bancari", "banca", "credito", "capitali", "assicuraz"],
+        "🏥 Salute":             ["salute", "farmaci", "medic", "sanitari", "malattia"],
+        "📦 Mercato interno":    ["mercato interno", "prodotti", "consumatori", "servizi", "concorrenza"],
+        "🚗 Trasporti":          ["trasporti", "veicoli", "ferroviari", "marittimi"],
+    }
+    EU_WHERE = (
+        "(title LIKE '%direttiva%' OR title LIKE '%(UE)%' OR "
+        "title LIKE '%(CE)%' OR title LIKE '%(CEE)%' OR "
+        "title LIKE '%recepimento%' OR "
+        "source_collection = 'Atti di recepimento direttive UE' OR "
+        "source_collection = 'Atti di attuazione Regolamenti UE' OR "
+        "source_collection = 'Leggi di delegazione europea')"
+    )
+
+    def _extract_eu_ref(title: str):
+        m = re.search(r"\((?:UE|CE|CEE|EURATOM)\)\s*(\d{4})/(\d+)", title or "", re.IGNORECASE)
+        return m.group(0).strip() if m else None
+
+    def _extract_eu_year(title: str):
+        m = re.search(r"\((?:UE|CE|CEE|EURATOM)\)\s*(\d{4})/\d+", title or "", re.IGNORECASE)
+        return int(m.group(1)) if m else None
+
+    db = load_db()
+    has_groq = bool(os.environ.get("GROQ_API_KEY", "").strip())
+
+    if not db:
+        st.warning("Database non disponibile.")
+        return
+
+    try:
+        total_eu   = db.conn.execute(f"SELECT COUNT(*) FROM laws WHERE {EU_WHERE}").fetchone()[0]
+        vigenti_eu = db.conn.execute(f"SELECT COUNT(*) FROM laws WHERE {EU_WHERE} AND status='in_force'").fetchone()[0]
+        latest_eu  = db.conn.execute(f"SELECT MAX(date) FROM laws WHERE {EU_WHERE} AND date != ''").fetchone()[0] or "N/A"
+    except Exception as e:
+        st.error(f"Errore statistiche UE: {e}")
+        return
+
+    pct_v = vigenti_eu / total_eu * 100 if total_eu else 0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📋 Norme UE nel dataset", f"{total_eu:,}")
+    c2.metric("🟢 Vigenti", f"{vigenti_eu:,}", f"{pct_v:.0f}%")
+    c3.metric("🔴 Abrogate / superate", f"{total_eu - vigenti_eu:,}")
+    c4.metric("📅 Ultima indicizzata", latest_eu)
+
+    st.markdown(
+        "Norme italiane che **recepiscono o attuano direttive e regolamenti UE**. "
+        "Esplora lo stato di recepimento oppure cerca una norma specifica."
+    )
+    st.divider()
+
+    tab_compliance, tab_cerca = st.tabs(["📊 Stato di recepimento", "🔍 Cerca norme"])
+
+    with tab_compliance:
+        st.markdown("### 🇮🇹 Come l'Italia ha recepito le direttive UE")
+        st.caption(
+            "Analisi basata sulle norme nel dataset. "
+            "Le direttive recenti post-2023 potrebbero non essere ancora tutte recepite."
+        )
+        st.markdown("#### Copertura per area tematica")
+        cat_rows = []
+        for cat_label, kws in EU_CATEGORIES.items():
+            kw_cond = " OR ".join(f"title LIKE '%{k}%'" for k in kws)
+            try:
+                tot = db.conn.execute(
+                    f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond})"
+                ).fetchone()[0]
+                vig = db.conn.execute(
+                    f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond}) AND status='in_force'"
+                ).fetchone()[0]
+                cat_rows.append((cat_label, tot, vig))
+            except Exception:
+                pass
+
+        for cat_label, tot, vig in sorted(cat_rows, key=lambda x: -x[1]):
+            if tot == 0:
+                continue
+            pct = vig / tot * 100
+            status_icon = "🟢" if pct >= 70 else "🟡" if pct >= 40 else "🔴"
+            col_l, col_r = st.columns([3, 1])
+            col_l.markdown(f"**{cat_label}** — {vig}/{tot} vigenti")
+            col_r.markdown(f"{status_icon} **{pct:.0f}%**")
+            st.progress(int(pct))
+
+        st.divider()
+        st.markdown("#### 📈 Recepimento per anno")
+        try:
+            year_rows = db.conn.execute(
+                f"SELECT year, COUNT(*) as cnt FROM laws WHERE ({EU_WHERE}) AND status='in_force' "
+                f"AND year >= 2000 GROUP BY year ORDER BY year"
+            ).fetchall()
+            if year_rows:
+                import altair as alt
+                df_yr = pd.DataFrame(year_rows, columns=["anno", "norme"])
+                chart = (
+                    alt.Chart(df_yr)
+                    .mark_bar(color="#1d4ed8")
+                    .encode(
+                        x=alt.X("anno:O", title="Anno"),
+                        y=alt.Y("norme:Q", title="Norme vigenti recepite"),
+                        tooltip=["anno", "norme"],
+                    )
+                    .properties(height=200, title="Norme UE vigenti recepite per anno (dal 2000)")
+                )
+                st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            pass
+
+        st.divider()
+        st.markdown("#### 🤖 Chiedi sullo stato di recepimento")
+        comp_q = st.text_input(
+            "Es: 'Cosa prevede la NIS2?' o 'Come è recepita la direttiva GDPR?'",
+            key="eu-comp-q",
+        )
+        if comp_q and has_groq:
+            with st.spinner("Analisi in corso…"):
+                eu_ctx = db.conn.execute(
+                    f"SELECT urn, title, type, year, status, text, article_count "
+                    f"FROM laws WHERE ({EU_WHERE}) AND status='in_force' "
+                    f"AND (title LIKE ? OR text LIKE ?) LIMIT 8",
+                    (f"%{comp_q[:30]}%", f"%{comp_q[:30]}%"),
+                ).fetchall()
+                eu_ctx = [dict(r) for r in eu_ctx]
+                prompt = (
+                    f"Sei un esperto di diritto europeo e diritto italiano. "
+                    f"Analizza queste norme italiane che recepiscono direttive UE e rispondi "
+                    f"in modo preciso indicando: 1) quali direttive UE sono recepite, "
+                    f"2) cosa prevede la normativa italiana di attuazione, "
+                    f"3) eventuali lacune o ritardi noti. "
+                    f"Basati esclusivamente sulle norme del dataset fornite. Domanda: {comp_q}"
+                )
+                answer, err = _call_groq(prompt, eu_ctx, model=GROQ_DEFAULT_MODEL, max_tokens=900)
+            st.markdown(answer or f"\u26a0\ufe0f {err}")
+            if eu_ctx:
+                st.caption(f"📚 {len(eu_ctx)} norme di riferimento dal dataset:")
+                for j, law in enumerate(eu_ctx[:5]):
+                    eu_ref = _extract_eu_ref(law.get("title") or "")
+                    if eu_ref:
+                        law = dict(law)
+                        law["ai_context"] = f"Recepisce la direttiva {eu_ref}"
+                    _card_chat(law, f"comp-ans-{j}")
+
+    with tab_cerca:
+        col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
+        eu_search    = col_f1.text_input("🔍 Cerca nelle norme UE", placeholder="es. NIS2, GDPR, ambiente…", key="eu-search")
+        cat_opts     = ["Tutte"] + list(EU_CATEGORIES.keys())
+        eu_cat       = col_f2.selectbox("📂 Categoria", cat_opts, key="eu-cat")
+        vigente_only = col_f3.checkbox("Solo vigenti", value=True, key="eu-vigente")
+
+        conds = [EU_WHERE]
+        if vigente_only:
+            conds.append("status='in_force'")
+        if eu_cat != "Tutte":
+            kws = EU_CATEGORIES[eu_cat]
+            conds.append("(" + " OR ".join(f"title LIKE '%{k}%'" for k in kws) + ")")
+        if eu_search.strip():
+            for w in eu_search.strip().split()[:4]:
+                if len(w) > 2:
+                    conds.append(f"(title LIKE '%{w}%' OR text LIKE '%{w}%')")
+        where_clause = "WHERE " + " AND ".join(f"({c})" for c in conds)
+
+        try:
+            count_filtered = db.conn.execute(f"SELECT COUNT(*) FROM laws {where_clause}").fetchone()[0]
+            eu_laws = [
+                dict(r) for r in db.conn.execute(
+                    f"SELECT urn, title, type, year, status, date, article_count "
+                    f"FROM laws {where_clause} ORDER BY date DESC, year DESC LIMIT 40"
+                ).fetchall()
+            ]
+        except Exception as e:
+            st.error(f"Errore nella ricerca UE: {e}")
+            return
+
+        st.caption(f"**{count_filtered:,} norme** corrispondono ai filtri — mostrando le 40 più recenti.")
+
+        if not eu_laws:
+            st.info("Nessuna norma trovata. Prova ad allargare i filtri.")
+            return
+
+        g1, g2 = st.columns(2)
+        for j, law in enumerate(eu_laws):
+            col = g1 if j % 2 == 0 else g2
+            urn      = law.get("urn") or ""
+            title    = (law.get("title") or "N/A")[:80]
+            badge    = "🟢" if _normalize_status(law.get("status")) == "in_force" else "🔴"
+            typ      = law.get("type") or ""
+            year     = law.get("year") or ""
+            articles = law.get("article_count") or 0
+            eu_ref   = _extract_eu_ref(law.get("title") or "")
+            norm_url = f"https://www.normattiva.it/uri-res/N2Ls?{urn}" if urn else "#"
+            safe     = re.sub(r"[^a-z0-9]", "-", urn.lower())[:60]
+            eu_tag   = (
+                f"<span style='font-size:0.72rem;background:#dbeafe;color:#1e40af;"
+                f"border-radius:4px;padding:1px 5px;margin-left:4px;'>{eu_ref}</span>"
+            ) if eu_ref else ""
+
+            col.markdown(
+                f"<div class='nv-inline-law' style='padding:0.6rem 0.75rem;'>"
+                f"<strong style='font-size:0.88rem;'>{badge} {title}</strong>{eu_tag}<br>"
+                f"<span style='font-size:0.77rem;color:#64748b;'>{typ} {year}"
+                f"{f' · {articles} art.' if articles else ''}</span><br>"
+                f"<a href='{norm_url}' target='_blank' rel='noopener' "
+                f"style='font-size:0.73rem;color:#1d4ed8;text-decoration:underline;"
+                f"word-break:break-all;'>{urn[:70]}</a>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            btn1, btn2 = col.columns(2)
+            if btn1.button("📖 Apri testo", key=f"eu-open-{safe}-{j}", use_container_width=True):
+                st.session_state["citizen_open_urn"] = urn
+                st.rerun()
+            if has_groq and btn2.button("🤖 Spiega", key=f"eu-ask-{safe}-{j}", use_container_width=True):
+                with st.spinner("AI in elaborazione…"):
+                    snippet, _ = _call_groq(
+                        f"Spiega in italiano semplice cosa prevede questa norma, quale direttiva UE recepisce "
+                        f"e cosa comporta per i cittadini: {law.get('title','')}",
+                        [law], model=GROQ_DEFAULT_MODEL, max_tokens=400,
+                    )
+                col.info(snippet or "Risposta non disponibile.")
 
 
 def page_eu_laws():
