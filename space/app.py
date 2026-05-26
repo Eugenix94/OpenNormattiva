@@ -6137,7 +6137,7 @@ def _citizen_mvp(db):
     # ── Sidebar navigation ────────────────────────────────────────
     citizen_view = st.sidebar.radio(
         "📌 Sezione",
-        ["🤖 Assistente AI", "🇪🇺 Norme UE"],
+        ["🤖 Assistente AI"],
         key="citizen-view",
     )
 
@@ -6977,11 +6977,6 @@ def _citizen_mvp(db):
                         )
                     col.info(snippet or "Risposta non disponibile.")
 
-    # ── Route by sidebar selection ─────────────────────────────────
-    if citizen_view == "🇪🇺 Norme UE":
-        _eu_laws_tab_render()
-        return
-
     # ── Render chat history ────────────────────────────────────────
     for idx, msg in enumerate(st.session_state["citizen_chat"]):
         with st.chat_message(msg["role"]):
@@ -7021,6 +7016,12 @@ def _citizen_mvp(db):
             st.session_state["citizen_chat"] = []
             st.rerun()
 
+
+
+def page_eu_laws():
+    """🇪🇺 Norme UE — EU laws compliance tracker and search."""
+    st.header("🇪🇺 Norme UE — Direttive e Attuazioni Nazionali")
+    _eu_laws_tab_render()
 
 
 def page_hierarchy_visualizer():
@@ -7354,6 +7355,7 @@ def main():
         "🏛️ Gerarchia delle Fonti": page_hierarchy_visualizer,
         "🌟 Leggi più Autorevoli": page_authoritative_laws,
         "🗺️ Normativa Regionale": page_regional_gap,
+        "🇪🇺 Norme UE": page_eu_laws,
     }
 
     # Select visible pages per profile
@@ -7377,6 +7379,7 @@ def main():
             "🆕 Ultime Norme": all_pages["🆕 Ultime Norme"],
             "🤖 Assistente AI": all_pages["🤖 Assistente AI"],
             "📥 Esporta": all_pages["📥 Export"],
+            "🇪🇺 Norme UE": all_pages["🇪🇺 Norme UE"],
         }
         st.sidebar.success("Italian Legal Lab — VOOM: Vigente + Abrogati + Multivigente")
     elif IS_LAB:
@@ -7431,6 +7434,7 @@ def main():
             "🏛️ Gerarchia delle Fonti": all_pages["🏛️ Gerarchia delle Fonti"],
             "🌟 Leggi più Autorevoli": all_pages["🌟 Leggi più Autorevoli"],
             "🗺️ Normativa Regionale": all_pages["🗺️ Normativa Regionale"],
+            "🇪🇺 Norme UE": all_pages["🇪🇺 Norme UE"],
         }
         if mobile_simple:
             pages = {
