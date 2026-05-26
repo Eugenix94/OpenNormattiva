@@ -6702,8 +6702,9 @@ def _citizen_mvp(db):
 
 
 
-def _eu_laws_tab_render():
-    """Dedicated EU laws browser with compliance tracker. Module-level."""
+def page_eu_laws():
+    """🇪🇺 Norme UE — EU laws compliance tracker and search."""
+    st.header("🇪🇺 Norme UE — Direttive e Attuazioni Nazionali")
     EU_CATEGORIES = {
         "🔒 Sicurezza digitale": ["cybersicurezza", "cybersecurity", "nis", "dora", "digitale"],
         "🔐 Dati & Privacy":     ["dati personali", "privacy", "gdpr", "protezione dei dati"],
@@ -6929,10 +6930,6 @@ def _eu_laws_tab_render():
                 col.info(snippet or "Risposta non disponibile.")
 
 
-def page_eu_laws():
-    """🇪🇺 Norme UE — EU laws compliance tracker and search."""
-    st.header("🇪🇺 Norme UE — Direttive e Attuazioni Nazionali")
-    _eu_laws_tab_render()
 
 
 def page_hierarchy_visualizer():
