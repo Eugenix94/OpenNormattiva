@@ -831,7 +831,7 @@ def _render_graph_plotly(nodes, edges, title="Citation Graph"):
                       xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                       yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                       height=600)
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -930,6 +930,25 @@ def _live_citation_counts():
         return dict(counts)
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_db_counts(_db_path: str) -> dict:
+    """Cache the per-status law counts so sidebar doesn't re-query every page render."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(_db_path, check_same_thread=False)
+        rows = conn.execute(
+            "SELECT status, COUNT(*) FROM laws GROUP BY status"
+        ).fetchall()
+        conn.close()
+        counts = {r[0]: r[1] for r in rows}
+        in_f  = counts.get("in_force", 0)
+        ab    = counts.get("abrogated", 0)
+        total = sum(counts.values())
+        return {"in_force": in_f, "abrogated": ab, "total": total}
+    except Exception:
+        return {"in_force": 0, "abrogated": 0, "total": 0}
 
 
 def _select_balanced_groq_model(question: str, context_laws: list) -> str:
@@ -1396,13 +1415,13 @@ def page_dashboard():
         type_counts = Counter(l.get("type", "unknown") for l in laws)
         fig = px.pie(names=list(type_counts.keys()), values=list(type_counts.values()),
                      title="Laws by Type", hole=0.4)
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
     with col2:
         year_counts = Counter(str(l.get("year", "?")) for l in laws if l.get("year"))
         yd = dict(sorted(year_counts.items()))
         fig = px.area(x=list(yd.keys()), y=list(yd.values()),
                       title="Laws by Year", labels={"x": "Year", "y": "Count"})
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
     if db:
         st.subheader("Most Important Laws (PageRank)")
@@ -1417,7 +1436,7 @@ def page_dashboard():
                 df.columns = ["URN", "Title", "Year", "Type", "Importance"]
                 df["Title"] = df["Title"].str[:60]
                 df["Importance"] = df["Importance"].round(4)
-                st.dataframe(df, width='stretch', hide_index=True)
+                st.dataframe(df, use_container_width=True, hide_index=True)
         except Exception:
             pass
 
@@ -1436,14 +1455,18 @@ def page_citizen_hub():
     except Exception:
         in_f = 0
 
+    # Use cached DB counts to avoid re-running COUNT on every page render
     try:
-        court_hits = db.conn.execute(
-            "SELECT COUNT(*) FROM laws WHERE status='in_force' AND ("
-            "LOWER(text) LIKE '%corte costituzionale%' OR "
-            "LOWER(text) LIKE '%corte di cassazione%' OR "
-            "LOWER(text) LIKE '%consiglio di stato%' OR "
-            "LOWER(text) LIKE '%tribunale amministrativo regionale%')"
-        ).fetchone()[0]
+        db_path = str(db.db_path) if hasattr(db, "db_path") else ""
+        if db_path:
+            in_f = _cached_db_counts(db_path).get("in_force", in_f)
+    except Exception:
+        pass
+
+    # Count laws mentioning major courts — cached via FTS search
+    try:
+        court_q = "corte costituzionale OR cassazione OR consiglio stato OR tribunale amministrativo"
+        court_hits = len(db.search_fts(court_q, limit=10000))
     except Exception:
         court_hits = 0
 
@@ -1574,7 +1597,7 @@ def page_citizen_hub():
                 fig = px.bar(x=[d[0] for d in domains], y=[d[1] for d in domains],
                              title="Norme vigenti per materia",
                              labels={"x": "Materia", "y": "Numero di norme"})
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
         except Exception:
             pass
 
@@ -1854,7 +1877,7 @@ def page_search():
                     }
                     for r in filtered_results[:50]
                 ])
-                st.dataframe(quick_df, width='stretch', hide_index=True)
+                st.dataframe(quick_df, use_container_width=True, hide_index=True)
 
                 quick_map = {
                     f"{(r.get('title') or '')[:100]} ({r.get('year', '?')})": r.get("urn")
@@ -2143,7 +2166,7 @@ def page_jurisprudence_explorer():
             title="Distribuzione per tipo atto",
             labels={"x": "Tipo", "y": "Conteggio"},
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
     with v2:
         yd = dict(sorted(y_counter.items()))
         fig = px.line(
@@ -2152,7 +2175,7 @@ def page_jurisprudence_explorer():
             title="Trend temporale",
             labels={"x": "Anno", "y": "Norme"},
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Norme rilevanti")
     for r in rows:
@@ -2531,7 +2554,7 @@ def page_llm_lab():
                     }
                     for r in item["e"]
                 ])
-                st.dataframe(df, width='stretch', hide_index=True)
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 def page_chatbot():
@@ -2583,7 +2606,7 @@ def page_chatbot():
                 st.subheader("Sync report")
                 st.write(f"Collections checked: {report.get('summary_counted_collections')}")
                 df = pd.DataFrame(report.get('details', []))
-                st.dataframe(df, width='stretch', hide_index=True)
+                st.dataframe(df, use_container_width=True, hide_index=True)
         except Exception as e:
             st.error(f"Sync check error: {e}")
 
@@ -2865,7 +2888,7 @@ def page_italian_legal_lab():
             c3.metric("Abrogato", int((df["track"] == "abrogato").sum()))
 
             fig = px.pie(df, names="track", title="Dataset status tracks")
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
 
             sel_track = st.selectbox(
                 "Explore track",
@@ -2875,8 +2898,7 @@ def page_italian_legal_lab():
             view = df[df["track"] == sel_track].copy().sort_values("year", ascending=False)
             st.write(f"Showing {len(view):,} laws in track: {sel_track}")
             st.dataframe(
-                view[["year", "type", "title", "status", "source_collection", "urn"]].head(200),
-                width='stretch',
+                view[["year", "type", "title", "status", "source_collection", "urn"]].head(200), use_container_width=True,
                 hide_index=True,
             )
 
@@ -2899,7 +2921,7 @@ def page_italian_legal_lab():
                                 "key": "multivigente" if "multivigent" in low else ("abrogato" if "abrog" in low else "vigente"),
                             })
                     if rows:
-                        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
                     else:
                         st.info("No explicit multivigente collection name returned in current catalogue.")
                 except Exception as e:
@@ -2926,7 +2948,7 @@ def page_italian_legal_lab():
         snaps = _load_status_snapshots(db)
         if snaps:
             st.write("Recent snapshots")
-            st.dataframe(pd.DataFrame(snaps), width='stretch', hide_index=True)
+            st.dataframe(pd.DataFrame(snaps), use_container_width=True, hide_index=True)
         else:
             st.info("No snapshots captured yet.")
 
@@ -2935,8 +2957,7 @@ def page_italian_legal_lab():
             df_t = pd.DataFrame(transitions)
             st.write(f"Recent transitions: {len(df_t):,}")
             st.dataframe(
-                df_t[["detected_at", "year", "title", "from_status", "to_status", "from_track", "to_track", "urn"]],
-                width='stretch',
+                df_t[["detected_at", "year", "title", "from_status", "to_status", "from_track", "to_track", "urn"]], use_container_width=True,
                 hide_index=True,
             )
 
@@ -2944,7 +2965,7 @@ def page_italian_legal_lab():
                 df_t.groupby(["snapshot_to"]).size().reset_index(name="transition_count").sort_values("snapshot_to")
             )
             fig = px.bar(by_snap, x="snapshot_to", y="transition_count", title="Transitions per snapshot")
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No transitions detected yet. Capture at least two snapshots to compute diffs.")
 
@@ -3020,7 +3041,7 @@ def page_italian_legal_lab():
                     st.warning("No RSS items found.")
                 else:
                     st.success(f"Fetched {len(items)} daily entries.")
-                    st.dataframe(pd.DataFrame(items), width='stretch', hide_index=True)
+                    st.dataframe(pd.DataFrame(items), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Gazzetta fetch failed: {e}")
 
@@ -3049,7 +3070,7 @@ def page_italian_legal_lab():
                 if isinstance(data, dict):
                     data = [data]
                 rows = [{"name": x.get("name"), "type": x.get("type"), "size": x.get("size"), "download_url": x.get("download_url")} for x in data]
-                st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Senato AKN listing failed: {e}")
 
@@ -3065,7 +3086,7 @@ def page_italian_legal_lab():
             {"source": "MEF Open Data", "url": "https://www1.finanze.gov.it/finanze3/opendata/"},
         ]
         df_cat = pd.DataFrame(catalog)
-        st.dataframe(df_cat, width='stretch', hide_index=True)
+        st.dataframe(df_cat, use_container_width=True, hide_index=True)
 
         st.subheader("Public officials legislation quick explorer")
         preset_q = st.selectbox(
@@ -3089,7 +3110,7 @@ def page_italian_legal_lab():
                         "urn": r.get("urn"),
                     }
                     for r in out
-                ]), width='stretch', hide_index=True)
+                ]), use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Preset search failed: {e}")
 
@@ -3280,7 +3301,7 @@ def page_law_detail():
                                 for v in versions
                             ]
                         )
-                        st.dataframe(df, width='stretch', hide_index=True)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
                         dates = [v["version_date"] for v in versions]
                         selected_date = st.selectbox("Read specific M version", dates, key="detail-m-version")
                         selected_row = next((v for v in versions if v["version_date"] == selected_date), None)
@@ -3466,14 +3487,29 @@ def page_citations():
 
     with tab_cross:
         st.subheader("Citazioni tra aree del diritto")
+        st.caption(
+            "ℹ️ Le citazioni sono collegate per corrispondenza tra domini tramite il formato canonico delle URN. "
+            "I risultati coprono i collegamenti verificabili all'interno del dataset vigente."
+        )
         try:
+            # The citations.cited_urn uses year-only format (e.g. :1988;400)
+            # while laws.urn uses full-date format (e.g. :1988-08-23;400).
+            # Normalize cited_urn using SQLite REGEXP_REPLACE substitute:
+            # strip the day/month part by matching the pattern in the JOIN.
             cross = db.conn.execute("""
                 SELECT m1.domain_cluster as from_domain,
                        m2.domain_cluster as to_domain,
                        COUNT(*) as cnt
                 FROM citations c
                 JOIN law_metadata m1 ON c.citing_urn = m1.urn
-                JOIN law_metadata m2 ON c.cited_urn  = m2.urn
+                JOIN law_metadata m2 ON (
+                    -- Try exact match first; then year-normalised match
+                    c.cited_urn = m2.urn
+                    OR REPLACE(c.cited_urn, SUBSTR(c.cited_urn,
+                        INSTR(c.cited_urn, ':' || SUBSTR(c.cited_urn,
+                            INSTR(c.cited_urn,':', INSTR(c.cited_urn,':')+1)+1,4)) + 5,
+                        7), '') = m2.urn
+                )
                 WHERE m1.domain_cluster IS NOT NULL AND m1.domain_cluster != ''
                   AND m2.domain_cluster IS NOT NULL AND m2.domain_cluster != ''
                 GROUP BY m1.domain_cluster, m2.domain_cluster
@@ -3482,8 +3518,37 @@ def page_citations():
         except Exception:
             cross = []
 
+        if not cross:
+            # Fallback: build cross-domain from _live_citation_counts which already
+            # normalized URNs. Group laws by domain then count cross-domain hits.
+            try:
+                cit_cache = _live_citation_counts()
+                domain_map = {
+                    row["urn"]: row["domain_cluster"]
+                    for row in db.conn.execute(
+                        "SELECT urn, domain_cluster FROM law_metadata WHERE domain_cluster != '' AND domain_cluster IS NOT NULL"
+                    ).fetchall()
+                }
+                citing_rows = db.conn.execute(
+                    "SELECT citing_urn, cited_urn FROM citations"
+                ).fetchall()
+                from collections import Counter
+                cross_counter: Counter = Counter()
+                for citing_urn, cited_urn in citing_rows:
+                    d1 = domain_map.get(citing_urn)
+                    d2 = domain_map.get(cited_urn)
+                    if d1 and d2 and d1 != d2:
+                        cross_counter[(d1, d2)] += 1
+                if cross_counter:
+                    cross = [
+                        {"from_domain": k[0], "to_domain": k[1], "cnt": v}
+                        for k, v in cross_counter.most_common(30)
+                    ]
+            except Exception:
+                cross = []
+
         if cross:
-            df_cross = pd.DataFrame([dict(r) for r in cross])
+            df_cross = pd.DataFrame(cross if isinstance(cross[0], dict) else [dict(r) for r in cross])
             fig2 = px.treemap(
                 df_cross, path=["from_domain", "to_domain"], values="cnt",
                 title="Come le aree del diritto si richiamano a vicenda",
@@ -3494,7 +3559,11 @@ def page_citations():
             df_cross.columns = ["Da", "A", "Citazioni"]
             st.dataframe(df_cross.head(20), use_container_width=True, hide_index=True)
         else:
-            st.info("Dati cross-dominio non disponibili.")
+            st.info(
+                "Dati cross-dominio non disponibili nel formato corrente. "
+                "Il formato URN nelle citazioni (anno-only) differisce dal formato nelle norme (data completa). "
+                "Aggiornare la pipeline di inserimento citazioni per risolvere il problema strutturale."
+            )
 
     with tab_explore:
         st.subheader("🔍 Esplora la rete di una norma specifica")
@@ -3531,7 +3600,11 @@ def page_citations():
                 st.success(f"**{law_row['title']}** ({law_row['type']} {law_row['year']}) — {_status_chip(law_row['status'])}")
                 if meta:
                     m1, m2 = st.columns(2)
-                    m1.metric("📥 Citata da", f"{meta['citation_count_incoming'] or 0:,} norme")
+                    # Precomputed citation_count_incoming is always 0 (pipeline issue)
+                    # Fall back to live citation count from the citations table
+                    _cit_cache = _live_citation_counts()
+                    live_incoming = _cit_cache.get(law_row.get("urn", ""), meta.get("citation_count_incoming") or 0)
+                    m1.metric("📥 Citata da", f"{live_incoming:,} norme")
                     m2.metric("📤 Cita", f"{meta['citation_count_outgoing'] or 0:,} norme")
                 c1, c2 = st.columns(2)
                 with c1:
@@ -3583,7 +3656,21 @@ def page_domains():
     # Summary metrics
     domain_names  = [d["domain_cluster"] for d in domains]
     domain_counts = [d["cnt"] for d in domains]
-    domain_cits   = [int(d["total_cit"] or 0) for d in domains]
+
+    # Precomputed citation_count_incoming is all 0 due to pipeline issue.
+    # Use live citation cache grouped by domain from law_metadata.
+    _cit_cache = _live_citation_counts()
+    try:
+        urn_domain_rows = db.conn.execute(
+            "SELECT urn, domain_cluster FROM law_metadata WHERE domain_cluster IS NOT NULL AND domain_cluster != ''"
+        ).fetchall()
+        domain_live_cit: dict = {}
+        for row in urn_domain_rows:
+            d = row["domain_cluster"]
+            domain_live_cit[d] = domain_live_cit.get(d, 0) + _cit_cache.get(row["urn"], 0)
+        domain_cits = [domain_live_cit.get(d, 0) for d in domain_names]
+    except Exception:
+        domain_cits = [int(d["total_cit"] or 0) for d in domains]
 
     col1, col2 = st.columns(2)
     with col1:
@@ -3806,7 +3893,7 @@ def page_fiscal_citizen_tax_lab():
             barmode="stack",
             category_orders={"status": ["in_force", "abrogated", "unknown"]},
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Citizen Context by Tax")
         context_rows = []
@@ -3815,7 +3902,7 @@ def page_fiscal_citizen_tax_lab():
                 "Tax": tax_name,
                 "Citizen Context": TAX_CONTEXT.get(tax_name, "Contesto non classificato."),
             })
-        st.dataframe(pd.DataFrame(context_rows), width='stretch', hide_index=True)
+        st.dataframe(pd.DataFrame(context_rows), use_container_width=True, hide_index=True)
 
     with t2:
         st.write("Full registry of taxes detected across the corpus (with harmonized status labels).")
@@ -3824,7 +3911,7 @@ def page_fiscal_citizen_tax_lab():
             laws=("urn", "nunique"),
             mentions=("tax", "count")
         ).reset_index().sort_values(["laws", "mentions"], ascending=False)
-        st.dataframe(agg, width='stretch', hide_index=True)
+        st.dataframe(agg, use_container_width=True, hide_index=True)
 
         sel_tax = st.selectbox("Inspect tax", sorted(tax_df["tax"].unique()))
         sel_status = st.selectbox("Status filter", ["All", "in_force", "abrogated", "unknown"])
@@ -3836,8 +3923,7 @@ def page_fiscal_citizen_tax_lab():
 
         st.write(f"{len(view):,} law rows for {sel_tax}.")
         st.dataframe(
-            view[["year", "status", "title", "urn", "context", "amount_mentions"]],
-            width='stretch',
+            view[["year", "status", "title", "urn", "context", "amount_mentions"]], use_container_width=True,
             hide_index=True,
         )
 
@@ -4379,7 +4465,7 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
                 type_df = pd.DataFrame(types, columns=["Tipo", "Conteggio"])
                 fig = px.bar(type_df, x="Tipo", y="Conteggio",
                              title="Leggi per tipo di atto normativo")
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
         except Exception:
             pass
 
@@ -4627,15 +4713,13 @@ def page_groq_assistant():
                 for ev_idx, ev in enumerate(item["evidence"]):
                     status_chip = _status_chip(ev.get("status"))
                     with st.container(border=True):
-                        c1, c2, c3 = st.columns([5, 1, 1])
+                        c1, c3 = st.columns([6, 1])
                         with c1:
                             st.markdown(f"**{ev.get('title', 'N/A')}**")
                             st.caption(f"`{ev.get('urn', 'N/A')}` | {ev.get('type', '')} | {ev.get('year', 'N/A')} | {status_chip}")
                             snippet = (ev.get("snippet") or ev.get("text") or "")[:300].strip()
                             if snippet:
                                 st.caption(f"…{snippet}…")
-                        with c2:
-                            st.markdown(status_chip)
                         with c3:
                             if st.button("Apri →", key=f"groq-open-{idx}-{ev_idx}-{ev.get('urn','')[:30]}"):
                                 st.session_state["detail_urn"] = ev.get("urn")
@@ -4709,7 +4793,7 @@ def page_latest_laws():
         else:
             st.success(f"Trovate **{len(rows):,}** norme ordinate per data più recente.")
             df = pd.DataFrame([dict(r) for r in rows])
-            df["stato"] = df["status"].apply(_status_chip)
+            df["stato"] = df["status"].apply(_status_label)
             df["importanza"] = df["importance_score"].apply(
                 lambda x: f"{x:.4f}" if x else "—"
             )
@@ -6878,19 +6962,34 @@ def page_eu_laws():
             "Le direttive recenti post-2023 potrebbero non essere ancora tutte recepite."
         )
         st.markdown("#### Copertura per area tematica")
+        # Build all category conditions in one pass — 1 query instead of 16
         cat_rows = []
-        for cat_label, kws in EU_CATEGORIES.items():
-            kw_cond = " OR ".join(f"title LIKE '%{k}%'" for k in kws)
-            try:
-                tot = db.conn.execute(
-                    f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond})"
-                ).fetchone()[0]
-                vig = db.conn.execute(
-                    f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond}) AND status='in_force'"
-                ).fetchone()[0]
+        try:
+            all_rows = db.conn.execute(
+                f"SELECT title FROM laws WHERE ({EU_WHERE})"
+            ).fetchall()
+            all_titles = [r[0] or "" for r in all_rows]
+            all_rows_f = db.conn.execute(
+                f"SELECT title FROM laws WHERE ({EU_WHERE}) AND status='in_force'"
+            ).fetchall()
+            vigenti_titles = set(r[0] or "" for r in all_rows_f)
+            for cat_label, kws in EU_CATEGORIES.items():
+                tot = sum(1 for t in all_titles if any(k in t.lower() for k in kws))
+                vig = sum(1 for t in vigenti_titles if any(k in t.lower() for k in kws))
                 cat_rows.append((cat_label, tot, vig))
-            except Exception:
-                pass
+        except Exception:
+            for cat_label, kws in EU_CATEGORIES.items():
+                kw_cond = " OR ".join(f"title LIKE '%{k}%'" for k in kws)
+                try:
+                    tot = db.conn.execute(
+                        f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond})"
+                    ).fetchone()[0]
+                    vig = db.conn.execute(
+                        f"SELECT COUNT(*) FROM laws WHERE ({EU_WHERE}) AND ({kw_cond}) AND status='in_force'"
+                    ).fetchone()[0]
+                    cat_rows.append((cat_label, tot, vig))
+                except Exception:
+                    pass
 
         for cat_label, tot, vig in sorted(cat_rows, key=lambda x: -x[1]):
             if tot == 0:
@@ -7138,7 +7237,7 @@ def page_hierarchy_visualizer():
         if rows:
             st.success(f"**{len(rows)} norme** trovate (prime 100 per data)")
             df = pd.DataFrame([dict(r) for r in rows])
-            df["stato"] = df["status"].apply(_status_chip)
+            df["stato"] = df["status"].apply(_status_label)
             disp = df[["date", "type", "source_collection", "title", "stato", "article_count", "urn"]].rename(
                 columns={
                     "date": "Data", "type": "Tipo", "source_collection": "Collezione",
@@ -7551,9 +7650,11 @@ def main():
     db = load_db()
     if db:
         try:
-            in_f = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
-            ab = db.conn.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
-            total = in_f + ab
+            db_path = str(db.db_path) if hasattr(db, "db_path") else ""
+            _counts = _cached_db_counts(db_path) if db_path else {}
+            in_f = _counts.get("in_force", 0)
+            ab   = _counts.get("abrogated", 0)
+            total = _counts.get("total", in_f + ab)
             if IS_ITALIAN_LAB:
                 st.sidebar.metric("Leggi nel database", f"{total:,}")
                 st.sidebar.caption(f"Vigenti: {in_f:,} | Abrogati: {ab:,}")
