@@ -848,88 +848,116 @@ GROQ_MODELS = {
 GROQ_DEFAULT_MODEL = "expert-vigente"
 
 _GROQ_SYSTEM_PROMPT = """\
-Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino.
-Il tuo scopo è rendere il diritto comprensibile, ragionare con logica chiara e spiegare PERCHÉ ogni norma si applica alla situazione concreta.
+Sei NormattivaAI — giurista italiano di livello accademico al servizio del cittadino.
+Possiedi una profonda conoscenza enciclopedica del diritto italiano: costituzionale, civile, penale, amministrativo, tributario e del lavoro.
 
 ══════════════════════════════════════════════
-RAGIONAMENTO OBBLIGATORIO (pensa PRIMA di scrivere)
+METODOLOGIA — RAGIONA NELL'ORDINE
 ══════════════════════════════════════════════
-1. Cosa chiede veramente il cittadino? (situazione pratica, non solo le parole)
-2. Quale è il principio giuridico in gioco? (tutela del lavoratore, diritto di proprietà, privacy, ecc.)
-3. Quali norme del CONTESTO sono rilevanti e PERCHÉ si applicano a questa situazione?
-4. Ci sono condizioni, eccezioni o requisiti da soddisfare?
-5. Qual è il risultato pratico per questa persona specifica?
+1. COMPRENDI la domanda: qual è la situazione concreta? Chi è il soggetto? Quale diritto o obbligo è in gioco?
+2. INQUADRA nel sistema delle fonti (dall'alto verso il basso):
+   Costituzione → Leggi statali (TU, D.Lgs., L.) → Decreti (DPR, DPCM, D.M.) → Normativa regionale/locale → CCNL se pertinente
+3. IDENTIFICA le norme chiave dalla tua conoscenza giuridica enciclopedica
+4. VERIFICA nel CONTESTO DATASET: se la norma è presente, usa il suo testo letterale come prova diretta
+5. SINTETIZZA in modo strutturato e comprensibile — con distinzioni tecniche quando rilevanti
 
 ══════════════════════════════════════════════
-STRUTTURA OBBLIGATORIA DELLA RISPOSTA
+DUE FONTI — USALE ENTRAMBE
+══════════════════════════════════════════════
+📚 CONOSCENZA ENCICLOPEDICA (la tua formazione giuridica completa)
+ → Usala per il framework, la gerarchia delle fonti, i principi generali, le distinzioni tecniche
+ → Quando citi norme da questa fonte, aggiungi: *(enc.)*
+ → Puoi citare articoli specifici (es. Art. 74 D.Lgs. 297/1994) anche se non nel dataset
+
+📌 DATASET NORMATTIVA (norme vigenti verificate — nel CONTESTO qui sotto)
+ → Se una norma è nel contesto, usa il suo testo letterale tra virgolette — è prova primaria
+ → Aggiungi: *(✓ dataset)* per ogni norma confermata
+ → Queste norme sono garantite VIGENTI nel dataset (67.000+ leggi)
+
+══════════════════════════════════════════════
+STRUTTURA OBBLIGATORIA
 ══════════════════════════════════════════════
 
 ### 📌 Risposta diretta
-[1-3 frasi. Rispondi subito: Sì / No / Dipende da... — poi spiega brevemente.]
+[1-2 frasi sintetiche. Sì / No / Dipende da... — la risposta netta alla domanda.]
 
-### 🧠 Ragionamento giuridico
-[Spiega il percorso logico:
- - Qual è il diritto o obbligo in questione?
- - Perché le norme trovate si applicano a questa situazione?
- - Come si collegano tra loro le diverse norme citate?
- - Ci sono condizioni specifiche, eccezioni o casi limite rilevanti?]
+### 🏛️ Quadro costituzionale
+[L'articolo/i della Costituzione applicabile/i. Perché è rilevante? Come orienta l'interpretazione delle leggi ordinarie?]
 
-### 📜 Fondamento normativo
-[Per OGNI norma rilevante, spiega così:
- **Titolo norma** (Anno) — `URN`
- → **Cosa dice**: "citazione testuale breve tra virgolette"
- → **Come si applica qui**: spiegazione in 1-2 frasi di cosa significa per la situazione concreta]
+### 📐 Gerarchia normativa applicabile
+[Top-down — per ogni livello pertinente:
+ - Nome e numero della norma + anno
+ - Cosa stabilisce in merito alla domanda
+ - URN se disponibile nel dataset (tra backtick)]
 
-### ✅ Cosa significa nella pratica
-[Passi concreti e diritti esercitabili. Se ci sono termini, importi o procedure: elencali chiaramente.]
+### 📜 Analisi delle norme specifiche
+[Per ogni norma rilevante:
+ **Nome norma** (Anno) `URN-se-disponibile` *(enc.)* oppure *(✓ dataset)*
+ → **Contenuto**: "citazione letterale dal dataset" oppure sintesi precisa
+ → **Applicazione**: cosa significa concretamente per chi fa la domanda
+ → **Distinzioni tecniche**: eccezioni, condizioni, fattispecie diverse]
 
-### ⚠️ Limiti e nota legale
-[Cosa questa analisi NON copre? Quando si consiglia un professionista (avvocato, CAF, patronato)?]
+### ✅ Cosa fare concretamente
+[Passi pratici: chi contattare, quali scadenze, quali documenti, a chi rivolgersi (INPS, CAF, avvocato, patronato, prefettura)]
 
-══════════════════════════════════════════════
-REGOLE INDEROGABILI
-══════════════════════════════════════════════
-- Rispondi SOLO basandoti sulle norme nel CONTESTO. Non inventare leggi, articoli, importi o date.
-- Cita sempre: titolo + URN tra backtick per ogni affermazione. Es: `urn:nir:stato:decreto.legislativo:2003-06-30;196`
-- Tutte le norme nel contesto sono VIGENTI — non dire mai che sono abrogate a meno che il contesto lo espliciti.
-- Linguaggio semplice, frasi brevi, zero tecnicismi — come spiegheresti a un amico.
-- Se una domanda va OLTRE il contesto: dì chiaramente "Questo aspetto non è coperto dalle norme disponibili" e suggerisci dove trovare informazioni (es. sito INPS, Ministero del Lavoro, ecc.).
-- Per importi/scadenze: cita sempre l'anno della norma (le cifre cambiano con leggi di bilancio successive).
-- Quando pertinente, cita il collegamento alla Costituzione (art. rilevante: lavoro, salute, famiglia, uguaglianza).
+### ⚠️ Variabili locali e nota legale
+[Cosa può variare per regione/CCNL/contratto individuale. Quando serve un professionista. Questa analisi non costituisce consulenza legale personalizzata.]
 
 ══════════════════════════════════════════════
-NORME ESTRATTE DAL DATABASE NORMATTIVA (67.000+ leggi vigenti):
+STANDARD DI QUALITÀ
+══════════════════════════════════════════════
+- Vai IN PROFONDITÀ: il cittadino merita un'analisi completa, non superficiale
+- Fai distinzioni tecniche quando rilevanti (es. anno scolastico vs anno didattico; licenziamento per giusta causa vs giustificato motivo)
+- Cita sempre: titolo + anno + URN tra backtick se dal dataset
+- Per importi e scadenze: cita sempre l'anno della norma (aggiornabili da leggi di bilancio successive)
+- Usa linguaggio tecnico ma comprensibile — come un buon avvocato che spiega a un cliente
+- Se la domanda ha risvolti regionali: segnalalo esplicitamente
+- Completa SEMPRE tutte le sezioni — non troncare il ragionamento
+
+══════════════════════════════════════════════
+NORME ESTRATTE DAL DATABASE NORMATTIVA — VIGENTI VERIFICATI:
 ══════════════════════════════════════════════
 {context}
 """
 
 
-def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
-    """Build a structured context string from retrieved vigente law records."""
-    # Use live citation counts (cached 2h) to show law importance in context
+def _build_groq_context(laws: list, max_chars_per_law: int = 2200) -> str:
+    """Build a structured context string from retrieved vigente law records.
+    Laws are sorted by importance_score descending so the most cited appear first.
+    """
     try:
         cit_cache = _live_citation_counts()
     except Exception:
         cit_cache = {}
 
+    # Sort by importance_score descending (most fundamental laws first)
+    sorted_laws = sorted(
+        laws,
+        key=lambda r: float(r.get("importance_score") or 0),
+        reverse=True,
+    )
+
     parts = []
-    for i, law in enumerate(laws, 1):
-        # Only include vigente laws in the Groq context
+    for i, law in enumerate(sorted_laws, 1):
         if _normalize_status(law.get("status")) != "in_force":
             continue
         text = (law.get("text") or law.get("snippet") or "").strip()
         excerpt = text[:max_chars_per_law] + ("…" if len(text) > max_chars_per_law else "")
-        # Prefer live citation count over precomputed (always 0 in current DB)
         urn = law.get("urn", "")
         cit_n = cit_cache.get(urn, 0) or int(law.get("citation_count_incoming") or 0)
-        cit_str = f" | Citata da: {cit_n} norme (importanza alta)" if cit_n >= 10 else (
-            f" | Citata da: {cit_n} norme" if cit_n > 0 else ""
-        )
+        imp_score = float(law.get("importance_score") or 0)
+        importance_str = ""
+        if cit_n >= 10:
+            importance_str = f" | Importanza: ALTA (citata da {cit_n} norme)"
+        elif imp_score >= 0.7:
+            importance_str = f" | Importanza: alta (score {imp_score:.2f})"
+        elif cit_n > 0:
+            importance_str = f" | Citata da: {cit_n} norme"
         parts.append(
-            f"[NORMA {i}]\n"
+            f"[NORMA {i} — {'✓ DATASET' if urn else 'enc.'}]\n"
             f"Titolo: {law.get('title', 'N/A')}\n"
-            f"URN: {urn}\n"
-            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: VIGENTE ✓{cit_str}\n"
+            f"URN: {urn or 'N/D'}\n"
+            f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: VIGENTE ✓{importance_str}\n"
             f"Testo:\n{excerpt}"
         )
     return "\n\n---\n\n".join(parts)
@@ -4656,7 +4684,7 @@ def page_groq_assistant():
                 disabled=not has_groq,
             )
         with col_b:
-            top_k = st.slider("Norme da consultare (RAG top-k)", 3, 15, 7, key="groq-topk")
+            top_k = st.slider("Norme da consultare (top-k)", 5, 30, 15, key="groq-topk")
         with col_c:
             only_vigenti = st.checkbox("Solo norme vigenti", value=True, key="groq-vigenti")
         temperature = st.slider("Creatività risposta (0=preciso, 0.5=bilanciato)", 0.0, 0.5, 0.1, step=0.05, key="groq-temp")
@@ -4707,7 +4735,7 @@ def page_groq_assistant():
         st.session_state["groq_prefill"] = ""
         with st.spinner("🔍 Cercando norme rilevanti nel dataset…"):
             try:
-                # Strip common stopwords from query so FTS works on meaningful terms
+                # ── Stopword filter ────────────────────────────────────────────
                 _groq_sw = {
                     "il","lo","la","le","i","gli","un","una","uno","di","da","in",
                     "con","su","per","tra","fra","che","non","è","si","ha","ho","hai",
@@ -4716,20 +4744,53 @@ def page_groq_assistant():
                     "negli","nelle","sul","sulla","sullo","sugli","sulle","questo",
                     "questa","questi","queste","qual","quale","come","quando","dove",
                     "chi","cosa","posso","devo","voglio","sapere","avere","essere",
+                    "sono","fare","mio","mia","miei","mie","suo","sua","suoi","sue",
                 }
                 raw_words = question.strip().split()
                 meaningful = [w for w in raw_words if w.lower() not in _groq_sw and len(w) > 2]
                 search_q = " ".join(meaningful) if meaningful else question.strip()
-                # Primary FTS search on cleaned terms
-                results = db.search_fts(search_q, limit=100)
-                # If too few results, fall back to full original query
-                if len(results) < 5:
-                    fallback = db.search_fts(question.strip(), limit=100)
-                    seen = {r.get("urn") for r in results}
-                    results += [r for r in fallback if r.get("urn") not in seen]
+
+                # ── Phase 1: Primary FTS on the full cleaned query ─────────────
+                primary = db.search_fts(search_q, limit=50)
+                seen_urns = {r.get("urn") for r in primary}
+
+                # ── Phase 2: Individual sub-term searches ──────────────────────
+                # Each key concept searched separately to broaden coverage
+                secondary = []
+                for term in meaningful[:5]:
+                    if len(term) > 3:
+                        try:
+                            sub = db.search_fts(term, limit=20)
+                            for r in sub:
+                                if r.get("urn") not in seen_urns:
+                                    secondary.append(r)
+                                    seen_urns.add(r.get("urn"))
+                        except Exception:
+                            pass
+
+                # Secondary results ranked by importance_score (no FTS score)
+                secondary.sort(
+                    key=lambda r: float(r.get("importance_score") or 0), reverse=True
+                )
+
+                # ── Phase 3: Fallback on original question ─────────────────────
+                all_results = primary + secondary
+                if len(all_results) < 5:
+                    try:
+                        fb = db.search_fts(question.strip(), limit=30)
+                        for r in fb:
+                            if r.get("urn") not in seen_urns:
+                                all_results.append(r)
+                    except Exception:
+                        pass
+
+                # ── Filter vigenti ─────────────────────────────────────────────
                 if only_vigenti:
-                    results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
-                evidence = results[:top_k]
+                    all_results = [
+                        r for r in all_results
+                        if _normalize_status(r.get("status")) == "in_force"
+                    ]
+                evidence = all_results[:top_k]
             except Exception as e:
                 st.error(f"Errore nella ricerca: {e}")
                 evidence = []
