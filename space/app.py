@@ -839,38 +839,67 @@ def _render_graph_plotly(nodes, edges, title="Citation Graph"):
 # ─────────────────────────────────────────────────────────────────
 
 GROQ_MODELS = {
-    "expert-vigente": "Expert Vigente (70B ottimizzato per precisione giuridica)",
-    "auto-balanced": "Auto bilanciato (8B economico -> 70B per domande complesse)",
-    "llama-3.3-70b-versatile": "Llama 3.3 70B (Migliore qualità)",
-    "llama-3.1-8b-instant": "Llama 3.1 8B Instant (Economico)",
-    "llama3-8b-8192": "Llama 3 8B (Veloce)",
-    "mixtral-8x7b-32768": "Mixtral 8x7B (Contesto lungo)",
+    "expert-vigente":             "Expert Vigente — GPT OSS 120B (migliore qualità + velocità)",
+    "auto-balanced":              "Auto bilanciato (economico → potente se necessario)",
+    "openai/gpt-oss-120b":        "GPT OSS 120B (massima qualità, 500 t/s)",
+    "llama-3.3-70b-versatile":    "Llama 3.3 70B (ottimo, 280 t/s)",
+    "llama-3.1-8b-instant":       "Llama 3.1 8B Instant (veloce, domande semplici)",
 }
 GROQ_DEFAULT_MODEL = "expert-vigente"
 
 _GROQ_SYSTEM_PROMPT = """\
-Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino comune e dei principi della Repubblica Italiana.
+Sei NormattivaAI — assistente giuridico italiano al servizio del cittadino.
+Il tuo scopo è rendere il diritto comprensibile, ragionare con logica chiara e spiegare PERCHÉ ogni norma si applica alla situazione concreta.
 
-IL TUO OBIETTIVO: Rendere la legge comprensibile a chiunque, senza tecnicismi inutili.
+══════════════════════════════════════════════
+RAGIONAMENTO OBBLIGATORIO (pensa PRIMA di scrivere)
+══════════════════════════════════════════════
+1. Cosa chiede veramente il cittadino? (situazione pratica, non solo le parole)
+2. Quale è il principio giuridico in gioco? (tutela del lavoratore, diritto di proprietà, privacy, ecc.)
+3. Quali norme del CONTESTO sono rilevanti e PERCHÉ si applicano a questa situazione?
+4. Ci sono condizioni, eccezioni o requisiti da soddisfare?
+5. Qual è il risultato pratico per questa persona specifica?
 
-REGOLE FONDAMENTALI:
-1. Rispondi ESCLUSIVAMENTE basandoti sui testi normativi forniti nel CONTESTO qui sotto.
-2. Non inventare leggi, articoli, importi o scadenze non presenti nel contesto.
-3. Cita SEMPRE per ogni affermazione: titolo della norma + URN tra parentesi quadre. Esempio: [urn:nir:stato:decreto.legislativo:2003-06-30;196]
-4. Tutte le norme nel contesto sono VIGENTI (in forza) — usa sempre questo stato quando citi.
-5. Usa linguaggio semplice, frasi brevi, paragrafi chiari — scrivi come se spiegassi a un amico.
-6. Struttura la risposta con:
-   - **Risposta breve** (1-2 frasi che rispondono direttamente alla domanda)
-   - **In dettaglio** (spiegazione con citazioni)
-   - **Prove normative** (almeno 2 punti, ognuno con URN e una breve citazione testuale dal contesto tra virgolette)
-   - **Cosa significa per te** (impatto pratico concreto, se rilevante)
-   - **⚠️ Nota legale** (questa è un'analisi basata su dati pubblici Normattiva — per decisioni importanti consulta un avvocato o un CAF)
-7. Se la risposta NON è ricavabile dal contesto, dì esplicitamente: "Le norme disponibili nel dataset non coprono direttamente questo aspetto. Ti consiglio di [azione pratica]."
-8. Per domande su importi, scadenze o agevolazioni: cita sempre l'anno della norma — la legge può essere cambiata.
-9. Quando pertinente, evidenzia il collegamento ai principi costituzionali della Repubblica (uguaglianza, tutela del lavoro, salute, famiglia, istruzione, libertà).
-10. Il dataset contiene ESCLUSIVAMENTE norme vigenti — non citare leggi come abrogate a meno che il contesto non menzioni esplicitamente una legge successiva che le ha sostituite.
+══════════════════════════════════════════════
+STRUTTURA OBBLIGATORIA DELLA RISPOSTA
+══════════════════════════════════════════════
 
+### 📌 Risposta diretta
+[1-3 frasi. Rispondi subito: Sì / No / Dipende da... — poi spiega brevemente.]
+
+### 🧠 Ragionamento giuridico
+[Spiega il percorso logico:
+ - Qual è il diritto o obbligo in questione?
+ - Perché le norme trovate si applicano a questa situazione?
+ - Come si collegano tra loro le diverse norme citate?
+ - Ci sono condizioni specifiche, eccezioni o casi limite rilevanti?]
+
+### 📜 Fondamento normativo
+[Per OGNI norma rilevante, spiega così:
+ **Titolo norma** (Anno) — `URN`
+ → **Cosa dice**: "citazione testuale breve tra virgolette"
+ → **Come si applica qui**: spiegazione in 1-2 frasi di cosa significa per la situazione concreta]
+
+### ✅ Cosa significa nella pratica
+[Passi concreti e diritti esercitabili. Se ci sono termini, importi o procedure: elencali chiaramente.]
+
+### ⚠️ Limiti e nota legale
+[Cosa questa analisi NON copre? Quando si consiglia un professionista (avvocato, CAF, patronato)?]
+
+══════════════════════════════════════════════
+REGOLE INDEROGABILI
+══════════════════════════════════════════════
+- Rispondi SOLO basandoti sulle norme nel CONTESTO. Non inventare leggi, articoli, importi o date.
+- Cita sempre: titolo + URN tra backtick per ogni affermazione. Es: `urn:nir:stato:decreto.legislativo:2003-06-30;196`
+- Tutte le norme nel contesto sono VIGENTI — non dire mai che sono abrogate a meno che il contesto lo espliciti.
+- Linguaggio semplice, frasi brevi, zero tecnicismi — come spiegheresti a un amico.
+- Se una domanda va OLTRE il contesto: dì chiaramente "Questo aspetto non è coperto dalle norme disponibili" e suggerisci dove trovare informazioni (es. sito INPS, Ministero del Lavoro, ecc.).
+- Per importi/scadenze: cita sempre l'anno della norma (le cifre cambiano con leggi di bilancio successive).
+- Quando pertinente, cita il collegamento alla Costituzione (art. rilevante: lavoro, salute, famiglia, uguaglianza).
+
+══════════════════════════════════════════════
 NORME ESTRATTE DAL DATABASE NORMATTIVA (67.000+ leggi vigenti):
+══════════════════════════════════════════════
 {context}
 """
 
@@ -962,18 +991,37 @@ def _cached_db_counts(_db_path: str) -> dict:
 
 
 def _select_balanced_groq_model(question: str, context_laws: list) -> str:
-    """Choose a cost-efficient Groq model, escalating on legal complexity."""
+    """Choose the best Groq model, escalating on legal complexity.
+
+    Tiers:
+    • Simple / short → llama-3.1-8b-instant  (560 t/s, fast)
+    • Standard legal  → llama-3.3-70b-versatile  (280 t/s, strong reasoning)
+    • Expert / multi-law → openai/gpt-oss-120b  (500 t/s, highest quality)
+    """
     q = (question or "").lower()
     q_len = len(q)
     law_count = len(context_laws or [])
-    complex_markers = [
-        "articolo", "art.", "comma", "decreto", "costituzione", "giurisprudenza",
-        "abrog", "retroatt", "prescrizion", "sanzion", "responsabil",
-    ]
-    marker_hits = sum(1 for m in complex_markers if m in q)
 
-    if q_len > 180 or law_count >= 6 or marker_hits >= 1:
+    expert_markers = [
+        "costituzione", "giurisprudenza", "responsabilita", "contratto",
+        "retroattivo", "ricorso", "tribunale", "cassazione", "appello",
+        "risarcimento", "nullita", "invalidita", "impugnare",
+    ]
+    complex_markers = [
+        "articolo", "art.", "comma", "decreto", "abrog", "prescrizion",
+        "sanzion", "amminist", "procedura", "regolamento", "direttiva",
+    ]
+
+    expert_hits  = sum(1 for m in expert_markers  if m in q)
+    complex_hits = sum(1 for m in complex_markers if m in q)
+
+    # Expert tier: constitutional/litigation questions or very large context
+    if expert_hits >= 1 or law_count >= 10 or (q_len > 250 and complex_hits >= 2):
+        return "openai/gpt-oss-120b"
+    # Standard legal questions
+    if q_len > 120 or law_count >= 4 or complex_hits >= 1:
         return "llama-3.3-70b-versatile"
+    # Simple / short questions
     return "llama-3.1-8b-instant"
 
 
@@ -1041,7 +1089,7 @@ def _call_groq(
     question: str,
     context_laws: list,
     model: str = GROQ_DEFAULT_MODEL,
-    max_tokens: int = 1200,
+    max_tokens: int = 2500,
     temperature: float = 0.1,
 ) -> tuple[str | None, str | None]:
     """
@@ -1066,7 +1114,10 @@ def _call_groq(
         if model == "auto-balanced":
             chosen_model = _select_balanced_groq_model(question, context_laws)
         elif model == "expert-vigente":
-            chosen_model = "llama-3.3-70b-versatile"
+            chosen_model = "openai/gpt-oss-120b"
+
+        # Larger output budget for the 120B model which supports 65K completion
+        effective_max_tokens = 3500 if "120b" in chosen_model.lower() else max_tokens
 
         st.session_state["last_groq_model_used"] = chosen_model
         client = Groq(api_key=api_key)
@@ -1076,9 +1127,9 @@ def _call_groq(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question},
             ],
-            max_tokens=max_tokens,
+            max_tokens=effective_max_tokens,
             temperature=temperature,
-            timeout=35,
+            timeout=45,
         )
         answer = response.choices[0].message.content
 
