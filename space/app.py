@@ -855,13 +855,12 @@ REGOLE FONDAMENTALI:
 1. Rispondi ESCLUSIVAMENTE basandoti sui testi normativi forniti nel CONTESTO qui sotto.
 2. Non inventare leggi, articoli, importi o scadenze non presenti nel contesto.
 3. Cita SEMPRE per ogni affermazione: titolo della norma + URN tra parentesi quadre. Esempio: [urn:nir:stato:decreto.legislativo:2003-06-30;196]
-4. Cita SEMPRE per ogni affermazione: titolo della norma + URN tra parentesi quadre. Esempio: [urn:nir:stato:decreto.legislativo:2003-06-30;196]
-5. Tutte le norme nel contesto sono VIGENTI (in forza) — usa sempre questo stato quando citi.
+4. Tutte le norme nel contesto sono VIGENTI (in forza) — usa sempre questo stato quando citi.
 5. Usa linguaggio semplice, frasi brevi, paragrafi chiari — scrivi come se spiegassi a un amico.
 6. Struttura la risposta con:
    - **Risposta breve** (1-2 frasi che rispondono direttamente alla domanda)
    - **In dettaglio** (spiegazione con citazioni)
-    - **Prove normative** (almeno 2 punti, ognuno con URN e una breve citazione testuale dal contesto tra virgolette)
+   - **Prove normative** (almeno 2 punti, ognuno con URN e una breve citazione testuale dal contesto tra virgolette)
    - **Cosa significa per te** (impatto pratico concreto, se rilevante)
    - **⚠️ Nota legale** (questa è un'analisi basata su dati pubblici Normattiva — per decisioni importanti consulta un avvocato o un CAF)
 7. Se la risposta NON è ricavabile dal contesto, dì esplicitamente: "Le norme disponibili nel dataset non coprono direttamente questo aspetto. Ti consiglio di [azione pratica]."
@@ -869,7 +868,7 @@ REGOLE FONDAMENTALI:
 9. Quando pertinente, evidenzia il collegamento ai principi costituzionali della Repubblica (uguaglianza, tutela del lavoro, salute, famiglia, istruzione, libertà).
 10. Il dataset contiene ESCLUSIVAMENTE norme vigenti — non citare leggi come abrogate a meno che il contesto non menzioni esplicitamente una legge successiva che le ha sostituite.
 
-NORME ESTRATTE DAL DATABASE NORMATTIVA (190.000+ leggi vigenti):
+NORME ESTRATTE DAL DATABASE NORMATTIVA (67.000+ leggi vigenti):
 {context}
 """
 
@@ -1064,7 +1063,7 @@ def _call_groq(
                         return ans_hf, None
                 except Exception:
                     pass
-            return None, "VALIDATION_FAILED: risposta senza citazioni URN sufficienti dal contesto"
+            return None, "Non riesco a fornire una risposta verificata per questa domanda. Prova a riformulare con termini giuridici più specifici (es. 'congedo parentale', 'locazione', 'licenziamento') oppure consulta direttamente Normattiva.it o un CAF."
         return answer, None
     except Exception as e:
         _record_ai_telemetry({
@@ -1149,7 +1148,7 @@ def _call_hf_model(
                 "citations_ok": False,
                 "error": "VALIDATION_FAILED: risposta senza citazioni URN sufficienti",
             })
-            return None, "VALIDATION_FAILED: risposta senza citazioni URN sufficienti dal contesto"
+            return None, "VALIDATION_FAILED (HF): risposta senza citazioni URN sufficienti dal contesto"
 
         _record_ai_telemetry({
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -4467,7 +4466,26 @@ def page_groq_assistant():
         st.session_state["groq_prefill"] = ""
         with st.spinner("🔍 Cercando norme rilevanti nel dataset…"):
             try:
-                results = db.search_fts(question.strip(), limit=100)
+                # Strip common stopwords from query so FTS works on meaningful terms
+                _groq_sw = {
+                    "il","lo","la","le","i","gli","un","una","uno","di","da","in",
+                    "con","su","per","tra","fra","che","non","è","si","ha","ho","hai",
+                    "del","della","dello","degli","delle","al","alla","allo","agli",
+                    "alle","dal","dalla","dallo","dagli","dalle","nel","nella","nello",
+                    "negli","nelle","sul","sulla","sullo","sugli","sulle","questo",
+                    "questa","questi","queste","qual","quale","come","quando","dove",
+                    "chi","cosa","posso","devo","voglio","sapere","avere","essere",
+                }
+                raw_words = question.strip().split()
+                meaningful = [w for w in raw_words if w.lower() not in _groq_sw and len(w) > 2]
+                search_q = " ".join(meaningful) if meaningful else question.strip()
+                # Primary FTS search on cleaned terms
+                results = db.search_fts(search_q, limit=100)
+                # If too few results, fall back to full original query
+                if len(results) < 5:
+                    fallback = db.search_fts(question.strip(), limit=100)
+                    seen = {r.get("urn") for r in results}
+                    results += [r for r in fallback if r.get("urn") not in seen]
                 if only_vigenti:
                     results = [r for r in results if _normalize_status(r.get("status")) == "in_force"]
                 evidence = results[:top_k]
@@ -5975,7 +5993,6 @@ def _citizen_mvp(db):
         "oggi","ieri","domani","adesso","presto","tardi","subito","molto","poco","tanto",
         "troppo","abbastanza","sempre","mai","forse","magari","certamente","ovviamente",
         "vinto","capito","trovato","fatto","detto","letto","scritto","messo","dati",
-        "diritto","diritti","legge","leggi","norma","norme","articolo","articoli",
     }
 
     def _keywords(text: str) -> str:
@@ -6359,7 +6376,7 @@ def _citizen_mvp(db):
         sentences = _re.split(r"(?<=[.!?])\s+", _re.sub(r"\n+", " ", answer))
 
         _STOP = {"della", "dello", "degli", "delle", "nella", "negli", "dalle",
-                 "negli", "sulle", "sulla", "sullo", "negli", "negli"}
+                 "sulle", "sulla", "sullo"}
 
         result = []
         for law in laws:
@@ -6416,7 +6433,7 @@ def _citizen_mvp(db):
                 # Build overlapping windows of ~240 chars
                 window, step = 280, 140
                 best_exc, best_exc_score = "", 0
-                for start in range(0, min(len(raw_text), 4000), step):
+                for start in range(0, min(len(raw_text), 8000), step):
                     chunk = raw_text[start: start + window]
                     chunk_l = chunk.lower()
                     sc = 0
@@ -6473,7 +6490,7 @@ def _citizen_mvp(db):
                 f"**Ultima legge:** *{latest_title}{'…' if len(latest_title)==60 else ''}*\n\n"
                 f"\U0001f7e2 **Stato sincronizzazione:** Il dataset viene aggiornato ogni notte "
                 f"in automatico dalla pipeline GitHub Actions (collezione VIGENTE Normattiva). "
-                f"L\u2019API ufficiale Normattiva.it era aggiornata al 2026-05-20. "
+                f"Ultima norma registrata: {latest_date}. "
                 f"Il dataset \u00e8 allineato con lo stato vigente attuale.\n\n"
                 f"Il corpus copre {anno_max - anno_min} anni di legislazione italiana. "
                 f"Fonte: [Normattiva.it](https://www.normattiva.it) \u00b7 "
@@ -6658,8 +6675,6 @@ def _citizen_mvp(db):
         st.session_state["citizen_chat"].append(new_msg)
 
     # ── EU laws tab is now a module-level function: _eu_laws_tab_render() ──
-
-    # ── Render chat history ────────────────────────────────────────
 
     # ── Render chat history ────────────────────────────────────────
     for idx, msg in enumerate(st.session_state["citizen_chat"]):
