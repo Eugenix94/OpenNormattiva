@@ -39,6 +39,11 @@ class LawDatabase:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # Performance tuning for read-heavy workload
+        self.conn.execute("PRAGMA synchronous=NORMAL")       # safe with WAL; much faster
+        self.conn.execute("PRAGMA cache_size=-65536")        # 64 MB page cache
+        self.conn.execute("PRAGMA mmap_size=268435456")      # 256 MB memory-mapped I/O
+        self.conn.execute("PRAGMA temp_store=MEMORY")        # temp tables/indexes in RAM
         self._fts_available = True
         self.init_schema()
         self._check_fts_health()
@@ -189,7 +194,13 @@ class LawDatabase:
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_api_changes_status ON api_changes(status)')
         self.conn.execute('CREATE INDEX IF NOT EXISTS idx_api_changes_collection ON api_changes(collection)')
         
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_metadata_domain ON law_metadata(domain_cluster)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_source ON laws(source_collection)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_laws_status_year ON laws(status, year)')
+        
         self.conn.commit()
+        # Let SQLite auto-tune its query planner statistics after schema setup
+        self.conn.execute("PRAGMA optimize")
         logger.info("Schema initialized")
 
     def _check_fts_health(self):

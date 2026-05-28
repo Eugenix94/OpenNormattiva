@@ -327,10 +327,12 @@ def _find_multivigente_db_path() -> Path | None:
 
 
 def _full_laws_query() -> str:
-    # No hard cap by default: load full dataset for complete visualization.
+    # Only load vigenti — the app is vigente-only; abrogated laws are not shown.
+    # This cuts the dataset from ~190K → ~67K rows (65% memory reduction).
     return (
         "SELECT urn, title, type, date, year, status, article_count, "
-        "text_length, importance_score FROM laws ORDER BY year DESC"
+        "text_length, importance_score FROM laws "
+        "WHERE status = 'in_force' ORDER BY year DESC"
     )
 
 
@@ -909,9 +911,11 @@ def _live_citation_counts():
     try:
         def _canon(urn):
             return _re_cit.sub(r':(\d{4})-\d{2}-\d{2};', r':\1;', urn or '')
-        # Canonical map: year-only URN → full laws.urn
+        # Build canonical map from vigenti only (65% fewer URNs to process)
         canon_map = {}
-        for (urn,) in db.conn.execute("SELECT urn FROM laws WHERE urn IS NOT NULL"):
+        for (urn,) in db.conn.execute(
+            "SELECT urn FROM laws WHERE urn IS NOT NULL AND status = 'in_force'"
+        ):
             c = _canon(urn)
             if c and c not in canon_map:
                 canon_map[c] = urn
@@ -3231,8 +3235,10 @@ def page_law_detail():
                     related = db.find_related_laws(urn, limit=15)
                     if related:
                         st.subheader("Norme correlate")
+                        _cit = _live_citation_counts()
                         for r in related[:10]:
-                            _render_law_card(r, db, key_prefix="detail-related-search")
+                            _render_law_card(r, db, key_prefix="detail-related-search",
+                                             _cit_cache=_cit)
                 except Exception:
                     pass
     with top_timeline if not IS_SEARCH else st.container():
@@ -3355,8 +3361,10 @@ def page_law_detail():
                     related = db.find_related_laws(urn, limit=15)
                     if related:
                         st.subheader("Related laws")
+                        _cit = _live_citation_counts()
                         for r in related[:10]:
-                            _render_law_card(r, db, key_prefix="detail-related")
+                            _render_law_card(r, db, key_prefix="detail-related",
+                                             _cit_cache=_cit)
                 except Exception:
                     pass
 
@@ -4146,20 +4154,24 @@ def _find_constitution_urn(_db_path: str) -> str | None:
     return row[0] if row else None
 
 
-def _render_law_card(law: dict, db, key_prefix: str = ""):
+def _render_law_card(law: dict, db, key_prefix: str = "",
+                     _cit_cache: dict | None = None):
     """Render a compact law card with nav button and citation count."""
     urn = law.get("urn", "")
     title = law.get("title", "N/A")
     year = law.get("year", "")
     law_type = law.get("type", "")
-    importance = law.get("importance_score", 0) or 0
 
-    try:
-        incoming = db.conn.execute(
-            "SELECT COUNT(*) FROM citations WHERE cited_urn = ?", (urn,)
-        ).fetchone()[0]
-    except Exception:
-        incoming = 0
+    # Use pre-computed citation dict when available to avoid per-card DB query
+    if _cit_cache is not None:
+        incoming = _cit_cache.get(urn, 0)
+    else:
+        try:
+            incoming = db.conn.execute(
+                "SELECT COUNT(*) FROM citations WHERE cited_urn = ?", (urn,)
+            ).fetchone()[0]
+        except Exception:
+            incoming = 0
 
     with st.container(border=True):
         c1, c2 = st.columns([4, 1])
@@ -4312,8 +4324,9 @@ def page_costituzione():
                 (const_urn,)
             ).fetchall()
             if cited_by:
+                _cit = _live_citation_counts()
                 for row in cited_by:
-                    _render_law_card(dict(row), db, key_prefix="const-cited")
+                    _render_law_card(dict(row), db, key_prefix="const-cited", _cit_cache=_cit)
             else:
                 st.info("Nessuna citazione diretta trovata per la Costituzione.")
 
@@ -4447,8 +4460,10 @@ Le fonti di rango superiore prevalgono su quelle di rango inferiore.
                         (f"%{law_type}%", year_from, year_to)
                     ).fetchall()
                     if rows:
+                        _cit = _live_citation_counts()
                         for r in rows:
-                            _render_law_card(dict(r), db, key_prefix=f"impl-{year_from}")
+                            _render_law_card(dict(r), db, key_prefix=f"impl-{year_from}",
+                                             _cit_cache=_cit)
                     else:
                         st.info("Nessuna legge trovata con questi criteri.")
                 except Exception as e:
