@@ -894,6 +894,40 @@ def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+@st.cache_data(ttl=7200, show_spinner=False)
+def _live_citation_counts():
+    """
+    Compute incoming-citation counts by matching citations.cited_urn
+    (year-only format: YYYY;N) against laws.urn (full-date: YYYY-MM-DD;N).
+    Cached for 2 h so it doesn't slow down every page load.
+    """
+    import re as _re_cit
+    from collections import Counter
+    db = load_db()
+    if not db:
+        return {}
+    try:
+        def _canon(urn):
+            return _re_cit.sub(r':(\d{4})-\d{2}-\d{2};', r':\1;', urn or '')
+        # Canonical map: year-only URN → full laws.urn
+        canon_map = {}
+        for (urn,) in db.conn.execute("SELECT urn FROM laws WHERE urn IS NOT NULL"):
+            c = _canon(urn)
+            if c and c not in canon_map:
+                canon_map[c] = urn
+        # Count incoming citations per full URN
+        counts: Counter = Counter()
+        for cited_urn, cnt in db.conn.execute(
+            "SELECT cited_urn, count FROM citations WHERE cited_urn IS NOT NULL"
+        ):
+            full_urn = canon_map.get(cited_urn)
+            if full_urn:
+                counts[full_urn] += max(int(cnt or 0), 1)
+        return dict(counts)
+    except Exception:
+        return {}
+
+
 def _select_balanced_groq_model(question: str, context_laws: list) -> str:
     """Choose a cost-efficient Groq model, escalating on legal complexity."""
     q = (question or "").lower()
@@ -3331,7 +3365,7 @@ def page_citations():
     """Enhanced citation network explorer."""
     st.header("🔗 Rete Citazioni")
     st.caption(
-        "Analisi del grafo delle citazioni tra le 190.000+ norme del dataset. "
+        "Analisi del grafo delle citazioni tra le norme del dataset. "
         "Identifica le leggi-pilastro che strutturano l'intero ordinamento."
     )
     db = load_db()
@@ -3358,6 +3392,30 @@ def page_citations():
         except Exception as e:
             st.warning(f"Errore: {e}")
             top = []
+
+        # Fallback to live citation counts if precomputed values are all 0
+        if not top:
+            cit_counts_live = _live_citation_counts()
+            if cit_counts_live:
+                try:
+                    top_urns = sorted(cit_counts_live, key=lambda u: -cit_counts_live[u])[:30]
+                    raw = db.conn.execute(f"""
+                        SELECT l.urn, l.title, l.year, l.type, l.status, l.source_collection,
+                               m.domain_cluster
+                        FROM laws l LEFT JOIN law_metadata m ON l.urn = m.urn
+                        WHERE l.urn IN ({",".join("?"*len(top_urns))})
+                    """, top_urns).fetchall()
+                    urn_to_row = {dict(r)["urn"]: dict(r) for r in raw}
+                    top_live = []
+                    for urn in top_urns:
+                        r = urn_to_row.get(urn)
+                        if r:
+                            r["citation_count_incoming"] = cit_counts_live[urn]
+                            r["citation_count_outgoing"] = 0
+                            top_live.append(r)
+                    top = top_live
+                except Exception:
+                    pass
 
         if top:
             df_top = pd.DataFrame([dict(r) for r in top])
@@ -3543,10 +3601,12 @@ def page_domains():
 
     if selected_domain:
         status_where = "AND l.status = 'in_force'"  # Always vigente only
+        cit_counts_live = _live_citation_counts()
         try:
             laws_in_domain = db.conn.execute(f"""
                 SELECT l.urn, l.title, l.year, l.type, l.status, l.source_collection,
-                       m.citation_count_incoming, m.citation_count_outgoing
+                       COALESCE(m.citation_count_incoming, 0) as citation_count_incoming,
+                       COALESCE(m.citation_count_outgoing, 0) as citation_count_outgoing
                 FROM laws l JOIN law_metadata m ON l.urn = m.urn
                 WHERE m.domain_cluster = ? {status_where}
                 ORDER BY m.citation_count_incoming DESC NULLS LAST
@@ -3555,6 +3615,15 @@ def page_domains():
         except Exception as e:
             st.error(f"Errore: {e}")
             return
+
+        # Re-sort by live citation counts if precomputed values are 0
+        if laws_in_domain and cit_counts_live:
+            laws_in_domain = sorted(
+                [dict(r) for r in laws_in_domain],
+                key=lambda r: -cit_counts_live.get(r["urn"], 0)
+            )
+            for r in laws_in_domain:
+                r["citation_count_incoming"] = cit_counts_live.get(r["urn"], 0)
 
         if laws_in_domain:
             st.success(f"**{len(laws_in_domain)} norme** nell'area _{selected_domain}_ (ordinate per citazioni)")
@@ -3829,7 +3898,7 @@ def page_update_log():
                 "Note": entry.get("user_note") or "",
             })
         st.dataframe(
-            pd.DataFrame(rows), width='stretch', hide_index=True
+            pd.DataFrame(rows), use_container_width=True, hide_index=True
         )
 
         # Summary
@@ -3843,9 +3912,19 @@ def page_update_log():
         )
     else:
         st.info(
-            "No updates recorded yet. Use the form below to record "
-            "your first update."
+            "Nessun aggiornamento registrato manualmente. "
+            "Il dataset viene aggiornato ogni notte in automatico dalla pipeline GitHub Actions. "
+            "Usa il modulo qui sotto per registrare aggiornamenti manuali o note."
         )
+        # Show last indexed law as a proxy for last update
+        try:
+            latest = db.conn.execute(
+                "SELECT MAX(parsed_at) FROM laws WHERE parsed_at IS NOT NULL"
+            ).fetchone()[0]
+            if latest:
+                st.caption(f"🤖 Ultima indicizzazione automatica rilevata: `{latest[:19]}`")
+        except Exception:
+            pass
 
     # Record new update
     st.divider()
@@ -7083,7 +7162,8 @@ def page_authoritative_laws():
         rows = db.conn.execute("""
             SELECT l.urn, l.title, l.type, l.year, l.date, l.status,
                    l.article_count, l.source_collection,
-                   m.citation_count_incoming, m.citation_count_outgoing,
+                   COALESCE(m.citation_count_incoming, 0) as citation_count_incoming,
+                   COALESCE(m.citation_count_outgoing, 0) as citation_count_outgoing,
                    m.domain_cluster
             FROM law_metadata m
             JOIN laws l ON m.urn = l.urn
@@ -7094,6 +7174,33 @@ def page_authoritative_laws():
     except Exception as e:
         st.error(f"Errore nel caricare i dati: {e}")
         return
+
+    # Fallback: law_metadata.citation_count_incoming is 0 for all (URN format mismatch)
+    # Use live computation from citations table
+    cit_counts_live = _live_citation_counts()
+    if not rows and cit_counts_live:
+        try:
+            placeholders = ",".join("?" * min(len(cit_counts_live), 200))
+            top_urns = sorted(cit_counts_live, key=lambda u: -cit_counts_live[u])[:200]
+            raw = db.conn.execute(f"""
+                SELECT l.urn, l.title, l.type, l.year, l.date, l.status,
+                       l.article_count, l.source_collection, m.domain_cluster
+                FROM laws l
+                LEFT JOIN law_metadata m ON l.urn = m.urn
+                WHERE l.status = 'in_force' AND l.urn IN ({placeholders})
+            """, top_urns).fetchall()
+            # Re-sort by live count and add the live count field
+            urn_to_row = {dict(r)["urn"]: dict(r) for r in raw}
+            rows_live = []
+            for urn in top_urns:
+                r = urn_to_row.get(urn)
+                if r:
+                    r["citation_count_incoming"] = cit_counts_live[urn]
+                    r["citation_count_outgoing"] = 0
+                    rows_live.append(r)
+            rows = rows_live[:100]
+        except Exception:
+            pass
 
     if not rows:
         st.info("Dati di citazione non disponibili.")
@@ -7184,7 +7291,7 @@ def page_regional_gap():
     st.subheader("📐 Struttura del sistema normativo italiano")
     levels = [
         ("🏛️ Stato — IN QUESTO DATASET", "#0a7a5a",
-         "190.911 atti · Costituzione, leggi ordinarie, D.Lgs., DPR, DPCM e molto altro.\n"
+         "67.000+ atti vigenti · Costituzione, leggi ordinarie, D.Lgs., DPR, DPCM e molto altro.\n"
          "Fonte: Normattiva.it (portale ufficiale dello Stato).\n"
          "Il dataset copre il 100% della normativa primaria statale vigente."),
         ("🏘️ Regioni — NON in questo dataset", "#dc2626",
