@@ -745,7 +745,7 @@ if APP_PROFILE == "italianlab":
     st.markdown("Full-spectrum Italian law intelligence: Normattiva datasets, SIOPE+ finance APIs, and institutional data sources.")
 elif APP_PROFILE == "lab":
     st.title("\u2696\ufe0f OpenNormattiva Lab")
-    st.markdown("VOOM corpus — **67,052 vigenti** + **123,859 abrogati** = **190,911 laws** total. Full-text search, citations, legislative history.")
+    st.markdown("VOOM corpus — **~67K vigenti** + **~123K abrogati** nel corpus totale. Full-text search, citations, legislative history.")
 # IS_SEARCH (citizen) — hero is rendered inside _citizen_mvp, skip module-level title
 
 IS_SEARCH = APP_PROFILE == "search"
@@ -877,6 +877,12 @@ NORME ESTRATTE DAL DATABASE NORMATTIVA (67.000+ leggi vigenti):
 
 def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
     """Build a structured context string from retrieved vigente law records."""
+    # Use live citation counts (cached 2h) to show law importance in context
+    try:
+        cit_cache = _live_citation_counts()
+    except Exception:
+        cit_cache = {}
+
     parts = []
     for i, law in enumerate(laws, 1):
         # Only include vigente laws in the Groq context
@@ -884,12 +890,16 @@ def _build_groq_context(laws: list, max_chars_per_law: int = 1800) -> str:
             continue
         text = (law.get("text") or law.get("snippet") or "").strip()
         excerpt = text[:max_chars_per_law] + ("…" if len(text) > max_chars_per_law else "")
-        cit_n = int(law.get("citation_count_incoming") or 0)
-        cit_str = f" | Citata da: {cit_n} norme" if cit_n > 0 else ""
+        # Prefer live citation count over precomputed (always 0 in current DB)
+        urn = law.get("urn", "")
+        cit_n = cit_cache.get(urn, 0) or int(law.get("citation_count_incoming") or 0)
+        cit_str = f" | Citata da: {cit_n} norme (importanza alta)" if cit_n >= 10 else (
+            f" | Citata da: {cit_n} norme" if cit_n > 0 else ""
+        )
         parts.append(
             f"[NORMA {i}]\n"
             f"Titolo: {law.get('title', 'N/A')}\n"
-            f"URN: {law.get('urn', 'N/A')}\n"
+            f"URN: {urn}\n"
             f"Tipo: {law.get('type', 'N/A')} | Anno: {law.get('year', 'N/A')} | Stato: VIGENTE ✓{cit_str}\n"
             f"Testo:\n{excerpt}"
         )
@@ -4007,7 +4017,7 @@ def page_update_log():
     else:
         st.info(
             "Nessun aggiornamento registrato manualmente. "
-            "Il dataset viene aggiornato ogni notte in automatico dalla pipeline GitHub Actions. "
+            "Il database è incluso staticamente nello Space e riflette l'ultimo build della pipeline. "
             "Usa il modulo qui sotto per registrare aggiornamenti manuali o note."
         )
         # Show last indexed law as a proxy for last update
@@ -5708,7 +5718,7 @@ def _mvp_d_conversational(db):
                 "content": (
                     "🇮🇹 **Ciao! Sono il tuo assistente giuridico.**\n\n"
                     "Scrivi qualsiasi domanda in linguaggio naturale — capisco cosa cerchi:\n"
-                    "- 🔍 Cerco norme rilevanti nel dataset (190.000+ leggi)\n"
+                    "- 🔍 Cerco norme rilevanti nel dataset (67.000+ leggi vigenti)\n"
                     "- 📖 Ti mostro i testi completi\n"
                     "- 🤖 Spiego ogni norma in modo semplice\n\n"
                     "**Prova:** *Cosa prevede la legge sul telelavoro?*"
@@ -6666,10 +6676,10 @@ def _citizen_mvp(db):
                 f"| \U0001f4c6 Norme 2026 nel dataset | **{n_2026:,}** |\n"
                 f"| \U0001f504 Ultima norma indicizzata | **{latest_date}** |\n\n"
                 f"**Ultima legge:** *{latest_title}{'…' if len(latest_title)==60 else ''}*\n\n"
-                f"\U0001f7e2 **Stato sincronizzazione:** Il dataset viene aggiornato ogni notte "
-                f"in automatico dalla pipeline GitHub Actions (collezione VIGENTE Normattiva). "
+                f"🟢 **Stato sincronizzazione:** Il database è incluso staticamente nello Space "
+                f"e riflette l'ultimo build della pipeline (collezione VIGENTE Normattiva). "
                 f"Ultima norma registrata: {latest_date}. "
-                f"Il dataset \u00e8 allineato con lo stato vigente attuale.\n\n"
+                f"Il dataset è allineato con lo stato vigente alla data di build.\n\n"
                 f"Il corpus copre {anno_max - anno_min} anni di legislazione italiana. "
                 f"Fonte: [Normattiva.it](https://www.normattiva.it) \u00b7 "
                 f"Dataset: [HuggingFace](https://huggingface.co/datasets/diatribe00/normattivavigente-data)\n\n"
@@ -6750,7 +6760,7 @@ def _citizen_mvp(db):
                 "content": (
                     "\U0001f1ee\U0001f1f9 **Ciao! Sono il tuo assistente giuridico.**\n\n"
                     "Scrivi qualsiasi domanda in italiano \u2014 capisco il linguaggio naturale:\n"
-                    "- \U0001f50d Cerco norme nel dataset (190.000+ leggi italiane)\n"
+                    "- 🔍 Cerco norme nel dataset (67.000+ leggi vigenti italiane)\n"
                     "- \U0001f4d6 Mostro i testi integrali direttamente\n"
                     "- \U0001f916 Spiego in modo semplice cosa dice la legge\n"
                     "- \U0001f4ca Analizzo le statistiche del corpus legislativo\n\n"
@@ -7688,13 +7698,13 @@ def main():
     st.sidebar.divider()
     if IS_ITALIAN_LAB:
         st.sidebar.markdown(
-            "\U0001f1ee\U0001f1f9 **Italian Legal Lab** — Ricerca giuridica italiana\n\n"
-            "190.000+ leggi | FTS5 | Citazioni | Storia normativa"
+            "🇮🇹 **Italian Legal Lab** — Ricerca giuridica italiana\n\n"
+            "67.000+ vigenti | FTS5 | Citazioni | Storia normativa"
         )
     elif IS_LAB:
         st.sidebar.markdown(
-            "\u2696\ufe0f **OpenNormattiva Lab** — Italian Legal Research\n\n"
-            "VOOM: 67,052 in force + 123,859 abrogated = 190,911 laws\n\n"
+            "⚖️ **OpenNormattiva Lab** — Italian Legal Research\n\n"
+            "VOOM: ~67K vigenti + ~123K abrogati nel corpus\n\n"
             "Full-text search | Citation graphs | Legislative history"
         )
     else:
