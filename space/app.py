@@ -1044,10 +1044,10 @@ def _select_balanced_groq_model(question: str, context_laws: list) -> str:
     complex_hits = sum(1 for m in complex_markers if m in q)
 
     # Expert tier: constitutional/litigation questions or very large context
-    if expert_hits >= 1 or law_count >= 10 or (q_len > 250 and complex_hits >= 2):
+    if expert_hits >= 1 or law_count >= 14 or (q_len > 250 and complex_hits >= 2):
         return "openai/gpt-oss-120b"
     # Standard legal questions
-    if q_len > 120 or law_count >= 4 or complex_hits >= 1:
+    if q_len > 120 or law_count >= 5 or complex_hits >= 1:
         return "llama-3.3-70b-versatile"
     # Simple / short questions
     return "llama-3.1-8b-instant"
@@ -1060,13 +1060,19 @@ def _extract_urns_from_text(text: str) -> set:
     return set(re.findall(r"urn:nir:[a-zA-Z0-9.:;\-]+", text, flags=re.IGNORECASE))
 
 
-def _has_strong_citations(answer: str, context_laws: list, min_count: int = 2) -> bool:
-    """Answer is valid only if it cites at least min_count URNs from retrieved context."""
-    cited = _extract_urns_from_text(answer or "")
-    if len(cited) < min_count:
+def _has_legal_references(answer: str) -> bool:
+    """Check if answer contains any meaningful legal references (URN, law number, article)."""
+    if not answer:
         return False
-    ctx = {str(l.get("urn", "")).lower() for l in (context_laws or []) if l.get("urn")}
-    return sum(1 for u in cited if u.lower() in ctx) >= min_count
+    urns = _extract_urns_from_text(answer)
+    if urns:
+        return True
+    # Also accept encyclopedic references: D.Lgs., Art., L., DPR, D.M., Testo Unico, etc.
+    return bool(re.search(
+        r'(D\.Lgs\.|D\.P\.R\.|D\.M\.|D\.L\.|Art\.|Legge\s+n\.|Testo\s+Unico|DPCM|Cost\.|'
+        r'urn:|art\.\s*\d+|\d+/\d{4})',
+        answer, flags=re.IGNORECASE
+    ))
 
 
 def _record_ai_telemetry(event: dict) -> None:
@@ -1081,52 +1087,21 @@ def _record_ai_telemetry(event: dict) -> None:
         pass
 
 
-def _build_accountable_fallback(question: str, context_laws: list, reason: str) -> str:
-    """Deterministic fallback answer anchored to retrieved laws and excerpts."""
-    if not context_laws:
-        return (
-            "Le norme disponibili nel dataset non coprono direttamente questo aspetto. "
-            "Riformula indicando area giuridica, soggetto e periodo (es. 'congedo parentale dipendente privato 2024')."
-        )
-
-    lines = [
-        "**Risposta breve**",
-        "In base al dataset, non posso fornire una sintesi AI pienamente validata in questo momento.",
-        "",
-        "**Prove normative minime (dataset)**",
-    ]
-    for law in context_laws[:4]:
-        urn = law.get("urn") or "N/A"
-        title = law.get("title") or "N/A"
-        status = "VIGENTE ✓" if _normalize_status(law.get("status")) == "in_force" else "ABROGATA ✗"
-        text = (law.get("snippet") or law.get("text") or "").strip()
-        text = re.sub(r"\s+", " ", text)
-        excerpt = text[:220] + ("…" if len(text) > 220 else "") if text else "Estratto non disponibile nel dataset."
-        lines.append(f"- **{title}** [{urn}] — {status}")
-        lines.append(f"  \"{excerpt}\"")
-
-    lines.extend([
-        "",
-        "**Nota**",
-        f"Fallback attivato per: {reason}.",
-    ])
-    return "\n".join(lines)
-
-
 def _call_groq(
     question: str,
     context_laws: list,
     model: str = GROQ_DEFAULT_MODEL,
     max_tokens: int = 2500,
     temperature: float = 0.1,
+    chat_history: list | None = None,
 ) -> tuple[str | None, str | None]:
     """
-    Call Groq API with the retrieved law context (RAG pattern).
+    Call Groq API with the retrieved law context (RAG pattern) and optional conversation history.
     Returns (answer_text, error_message). One of them will be None.
     """
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
-        return None, "GROQ_API_KEY non configurata. Imposta la variabile d'ambiente GROQ_API_KEY nelle impostazioni dello Space."
+        return None, "GROQ_API_KEY non configurata. Imposta il secret `GROQ_API_KEY` nelle impostazioni dello Space."
 
     try:
         from groq import Groq
@@ -1144,82 +1119,69 @@ def _call_groq(
         elif model == "expert-vigente":
             chosen_model = "openai/gpt-oss-120b"
 
-        # Larger output budget for the 120B model which supports 65K completion
+        # Larger output budget for 120B (supports 65K completion)
         effective_max_tokens = 3500 if "120b" in chosen_model.lower() else max_tokens
 
         st.session_state["last_groq_model_used"] = chosen_model
+
+        # Build messages: system + optional conversation history + current question
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        for turn in (chat_history or []):
+            if turn.get("q") and turn.get("a"):
+                messages.append({"role": "user", "content": turn["q"]})
+                messages.append({"role": "assistant", "content": turn["a"]})
+        messages.append({"role": "user", "content": question})
+
         client = Groq(api_key=api_key)
         response = client.chat.completions.create(
             model=chosen_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
+            messages=messages,
             max_tokens=effective_max_tokens,
             temperature=temperature,
-            timeout=45,
+            timeout=55,
         )
-        answer = response.choices[0].message.content
+        answer = (response.choices[0].message.content or "").strip()
 
-        # Expert safeguard: if citations are weak, force one regeneration on 70B with strict citation instruction.
-        if not _has_strong_citations(answer, context_laws, min_count=2):
-            retry_messages = [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"{question}\n\n"
-                        "Rispondi di nuovo includendo almeno 2 citazioni URN presenti nel contesto, "
-                        "con breve estratto testuale per ciascuna prova normativa."
-                    ),
-                },
-            ]
-            retry = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=retry_messages,
-                max_tokens=max_tokens,
-                temperature=0.05,
-                timeout=35,
-            )
-            retry_answer = retry.choices[0].message.content
-            if retry_answer:
-                answer = retry_answer
-                st.session_state["last_groq_model_used"] = "llama-3.3-70b-versatile"
-        citation_ok = _has_strong_citations(answer, context_laws, min_count=2)
+        has_refs = _has_legal_references(answer)
         _record_ai_telemetry({
             "ts": datetime.now(timezone.utc).isoformat(),
-            "model": st.session_state.get("last_groq_model_used", chosen_model),
+            "model": chosen_model,
             "elapsed_s": round(time.time() - started, 3),
             "ok": bool(answer),
-            "citations_ok": citation_ok,
+            "has_refs": has_refs,
             "error": None,
         })
-        if not citation_ok:
-            # If Groq answer lacks required citations, attempt HF Inference fallback (Mistral) if configured.
-            hf_key = (
-                os.environ.get("HUGGINGFACEHUB_API_TOKEN")
-                or os.environ.get("HF_API_KEY")
-                or os.environ.get("HUGGINGFACE_TOKEN")
-            )
-            if hf_key:
-                try:
-                    ans_hf, err_hf = _call_hf_model(question, context_laws, model="mistralai/Mistral-7B-Instruct-v0.1", max_tokens=max_tokens, temperature=temperature)
-                    if ans_hf:
-                        st.session_state["last_groq_model_used"] = "mistralai/Mistral-7B-Instruct-v0.1"
-                        return ans_hf, None
-                except Exception:
-                    pass
-            return None, "Non riesco a fornire una risposta verificata per questa domanda. Prova a riformulare con termini giuridici più specifici (es. 'congedo parentale', 'locazione', 'licenziamento') oppure consulta direttamente Normattiva.it o un CAF."
+
+        if not answer:
+            return None, "Il modello non ha restituito una risposta. Prova a riformulare la domanda."
         return answer, None
+
     except Exception as e:
         _record_ai_telemetry({
             "ts": datetime.now(timezone.utc).isoformat(),
             "model": st.session_state.get("last_groq_model_used", model),
             "elapsed_s": round(time.time() - started, 3),
             "ok": False,
-            "citations_ok": False,
+            "has_refs": False,
             "error": str(e),
         })
+        err_str = str(e)
+        if "model_not_found" in err_str or "does not exist" in err_str.lower():
+            # Graceful fallback if gpt-oss-120b is unavailable
+            try:
+                fb = Groq(api_key=api_key)
+                fb_resp = fb.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=45,
+                )
+                answer = (fb_resp.choices[0].message.content or "").strip()
+                st.session_state["last_groq_model_used"] = "llama-3.3-70b-versatile"
+                return answer, None
+            except Exception as e2:
+                return None, f"Errore Groq API: {e2}"
         return None, f"Errore Groq API: {e}"
 
 
@@ -4796,23 +4758,30 @@ def page_groq_assistant():
                 evidence = []
 
         if not evidence:
-            st.warning("Nessuna norma rilevante trovata nel dataset con i filtri attuali. Prova a rimuovere il filtro 'Solo vigenti'.")
+            st.warning("Nessuna norma rilevante trovata nel dataset. Prova termini più specifici (es. 'licenziamento', 'affitto', 'scuola').")
         else:
             answer_text = None
             error_msg = None
             if has_groq:
+                # Pass last 2 turns as conversation memory (only turns with a valid AI answer)
+                history_turns = [
+                    t for t in st.session_state.get("groq_chat", []) if t.get("a")
+                ][:2]
                 with st.spinner("🤖 Analizzando le norme con Groq AI…"):
                     answer_text, error_msg = _call_groq(
                         question=question.strip(),
                         context_laws=evidence,
                         model=model,
                         temperature=temperature,
+                        chat_history=history_turns,
                     )
+            chosen_model_display = st.session_state.get("last_groq_model_used", model)
             st.session_state["groq_chat"].insert(0, {
                 "q": question.strip(),
                 "a": answer_text,
                 "err": error_msg,
                 "evidence": evidence,
+                "model_used": chosen_model_display,
             })
 
     # ── Chat history ─────────────────────────────────────────────
@@ -4822,24 +4791,38 @@ def page_groq_assistant():
             with st.expander(f"{'🔵' if is_latest else '⚫'} Q: {item['q'][:100]}", expanded=is_latest):
                 # AI answer
                 if item.get("a"):
-                    st.markdown("### 🤖 Risposta AI")
+                    model_used = item.get("model_used", "")
+                    model_label = GROQ_MODELS.get(model_used, model_used.split("/")[-1] if model_used else "AI")
+                    st.caption(f"🤖 Risposta generata da: **{model_label}**")
                     st.markdown(item["a"])
-                    st.caption("⚠️ Le risposte si basano sul dataset Normattiva. Per decisioni legali consulta un professionista.")
+                    st.caption(
+                        "⚠️ Analisi basata su dataset Normattiva (67.000+ vigenti) + conoscenza giuridica enciclopedica. "
+                        "Per decisioni legali rilevanti consulta sempre un avvocato o un CAF."
+                    )
+                    # Follow-up suggestion
+                    if is_latest:
+                        followup_q = f"Approfondisci: {item['q'][:60]}... — altri aspetti pratici"
+                        if st.button("💬 Fai una domanda di approfondimento", key=f"followup-{idx}", use_container_width=False):
+                            st.session_state["groq_prefill"] = followup_q
+                            st.rerun()
                 elif item.get("err"):
                     st.error(f"AI non disponibile: {item['err']}")
-                    st.info("Di seguito le norme trovate nel dataset che puoi consultare direttamente.")
+                    st.info("Le norme trovate nel dataset sono elencate di seguito — consultale direttamente.")
 
                 # Evidence cards
                 st.markdown("---")
-                st.markdown(f"### 📚 Norme consultate ({len(item['evidence'])} trovate nel dataset)")
-                for ev_idx, ev in enumerate(item["evidence"]):
+                ev_list = item.get("evidence", [])
+                st.markdown(f"### 📚 Norme nel dataset consultate ({len(ev_list)})")
+                for ev_idx, ev in enumerate(ev_list):
                     status_chip = _status_chip(ev.get("status"))
+                    imp = float(ev.get("importance_score") or 0)
+                    imp_badge = " ⭐" if imp >= 0.7 else ""
                     with st.container(border=True):
                         c1, c3 = st.columns([6, 1])
                         with c1:
-                            st.markdown(f"**{ev.get('title', 'N/A')}**")
+                            st.markdown(f"**{ev.get('title', 'N/A')}**{imp_badge}")
                             st.caption(f"`{ev.get('urn', 'N/A')}` | {ev.get('type', '')} | {ev.get('year', 'N/A')} | {status_chip}")
-                            snippet = (ev.get("snippet") or ev.get("text") or "")[:300].strip()
+                            snippet = (ev.get("snippet") or ev.get("text") or "")[:350].strip()
                             if snippet:
                                 st.caption(f"…{snippet}…")
                         with c3:
