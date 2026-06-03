@@ -10,20 +10,63 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
+
+
+def get_current_branch() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def enforce_branch_targets(branch: str, space_name: str, dataset_name: str, allow_unsafe: bool) -> None:
+    expected = {
+        "normattivavigente": ("normattivavigente", "normattivavigente-data"),
+        "master": ("normattivavigente", "normattivavigente-data"),
+        "italian-legal-lab": ("italian-legal-lab", "italian-legal-lab-data"),
+        "normattiva-lab": ("opennormattiva-lab", "normattiva-lab-data"),
+        "lab-space": ("opennormattiva-lab", "normattiva-lab-data"),
+    }
+    if branch not in expected or allow_unsafe:
+        return
+
+    exp_space, exp_dataset = expected[branch]
+    if space_name != exp_space or dataset_name != exp_dataset:
+        print("ERROR: Deploy target mismatch for current branch")
+        print(f"  Branch:          {branch}")
+        print(f"  Expected Space:  {exp_space}")
+        print(f"  Expected Dataset:{exp_dataset}")
+        print(f"  Requested Space: {space_name}")
+        print(f"  Requested Dataset:{dataset_name}")
+        print("Use --allow-unsafe-targets only if you intentionally need cross-target deploy.")
+        sys.exit(2)
 
 def main():
     parser = argparse.ArgumentParser(description="Deploy to HuggingFace")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN", ""))
-    parser.add_argument("--space-name", default="opennormattiva-search",
-                        help="HF Space repo name (default: opennormattiva-search)")
-    parser.add_argument("--dataset-name", default="normattiva-data",
-                        help="HF Dataset repo name (default: normattiva-data)")
+    parser.add_argument("--space-name", default="normattivavigente",
+                        help="HF Space repo name (default: normattivavigente)")
+    parser.add_argument("--dataset-name", default="normattivavigente-data",
+                        help="HF Dataset repo name (default: normattivavigente-data)")
     parser.add_argument("--skip-space", action="store_true")
     parser.add_argument("--skip-dataset", action="store_true")
+    parser.add_argument("--allow-unsafe-targets", action="store_true",
+                        help="Allow deploying to non-standard space/dataset for the current branch")
     args = parser.parse_args()
+
+    branch = get_current_branch()
+    print(f"Current git branch: {branch}")
+    enforce_branch_targets(branch, args.space_name, args.dataset_name, args.allow_unsafe_targets)
 
     if not args.token:
         print("ERROR: No HF token. Set HF_TOKEN or use --token")
@@ -44,7 +87,7 @@ def main():
 
         # Determine per-space profile and default dataset to inject into the container
         profile_defaults = {
-            "opennormattiva-search": ("search", "diatribe00/normattiva-data"),
+            "normattivavigente": ("search", "diatribe00/normattivavigente-data"),
             "opennormattiva-lab": ("lab", "diatribe00/normattiva-lab-data"),
             "italian-legal-lab": ("italianlab", "diatribe00/italian-legal-lab-data"),
             "openitalaw": ("models", "diatribe00/openitalaw-data"),
@@ -91,13 +134,13 @@ def main():
                     "Subsequent restarts use the cached copy.\n\n"
                     "### Environment Variables\n\n"
                     "- `HF_DATASET_OWNER`: Owner of the dataset repo (default: `diatribe00`)\n"
-                    "- `HF_DATASET_NAME`: Name of the dataset repo (default: `normattiva-data`)\n"
+                    "- `HF_DATASET_NAME`: Name of the dataset repo (default: `normattivavigente-data`)\n"
                     "- `HF_TOKEN`: HuggingFace API token (auto-set if deploying to your Space)\n\n"
                     "### Logs\n\n"
                     "Check container logs for startup progress:\n"
                     "```\n"
                     "[startup] Downloading database (attempt 1/3, ~970MB)...\n"
-                    "[download_db] Fetching diatribe00/normattiva-data/data/laws.db...\n"
+                    "[download_db] Fetching diatribe00/normattivavigente-data/data/laws.db...\n"
                     "[startup] Database ready: 969MB\n"
                     "[startup] Starting Streamlit...\n"
                     "```\n",
@@ -133,6 +176,8 @@ def main():
                 "# Injected environment for Space profile (set by deploy_hf.py)\n"
                 f"export APP_PROFILE=\"{profile}\"\n"
                 f"export HF_DATASET_NAME=\"{ds}\"\n"
+                f"export HF_DATASET_OWNER=\"{ds.split('/')[0]}\"\n"
+                f"export HF_DATASET_NAME=\"{ds.split('/')[-1]}\"\n"
                 "DB_PATH=\"/app/data/laws.db\"\n"
                 "MIN_DB_SIZE=100000000  # 100MB threshold\n"
                 "MAX_RETRIES=3\n"
@@ -187,6 +232,27 @@ def main():
                 "  fi\n"
                 "fi\n"
                 "\n"
+                + (
+                # For lab profile, also download multivigente.db at startup
+                "# Download multivigente DB (Lab profile — VOOM amendment history)\n"
+                "MV_PATH=\"/app/data/multivigente.db\"\n"
+                "MV_MIN_SIZE=50000000  # 50MB threshold\n"
+                "check_mv_db() {\n"
+                "  [ -f \"$MV_PATH\" ] && [ $(stat -c%s \"$MV_PATH\" 2>/dev/null || echo 0) -ge $MV_MIN_SIZE ]\n"
+                "}\n"
+                "if check_mv_db; then\n"
+                "  echo \"[startup] Multivigente DB already present, skipping download\"\n"
+                "else\n"
+                "  echo \"[startup] Downloading multivigente DB (~560MB)...\"\n"
+                "  if python3 /app/download_db.py \"$MV_PATH\" multivigente; then\n"
+                "    echo \"[startup] Multivigente DB ready\"\n"
+                "  else\n"
+                "    echo \"[startup] WARNING: Multivigente DB download failed (Storia Normativa will show download button)\" >&2\n"
+                "  fi\n"
+                "fi\n"
+                "\n"
+                if profile == "lab" else ""
+                ) +
                 "# Start Streamlit\n"
                 "echo \"[startup] Starting Streamlit...\"\n"
                 "exec streamlit run app.py \\\n"
@@ -280,60 +346,188 @@ def main():
             private=False, exist_ok=True,
         )
 
-        jsonl_path = Path("data/processed/laws_vigente.jsonl")
+        is_vigente_target = args.space_name == "normattivavigente" or args.dataset_name == "normattivavigente-data"
+
         db_path = Path("data/laws.db")
+        mv_db_path = Path("data/multivigente.db")
+        jsonl_path = Path("data/processed/laws_vigente.jsonl")
+        abr_jsonl_path = Path("data/processed/laws_abrogati.jsonl")
+        mv_jsonl_path = Path("data/processed/laws_multivigente.jsonl")
 
-        # Dataset card
-        card = (
-            "---\n"
-            "license: mit\n"
-            "language:\n  - it\n"
-            "tags:\n  - legal\n  - italian-law\n  - normattiva\n"
-            "size_categories:\n  - 100K<n<1M\n"
-            "---\n\n"
-            "# OpenNormattiva Dataset\n\n"
-            "160,000+ Italian laws from [Normattiva](https://www.normattiva.it/) "
-            "with full-text, structured citations (URN), amendment tracking, "
-            "and domain classification.\n\n"
-            "## Files\n\n"
-            "- `data/processed/laws_vigente.jsonl` — All laws as JSONL (one per line)\n"
-            "- `data/laws.db` — Pre-built SQLite database with FTS5, PageRank, domains\n\n"
-            "## Schema (per law)\n\n"
-            "```json\n"
-            "{\n"
-            '  "urn": "urn:nir:stato:legge:2006;290",\n'
-            '  "title": "...",\n'
-            '  "type": "legge",\n'
-            '  "date": "2006-12-27",\n'
-            '  "year": "2006",\n'
-            '  "text": "...",\n'
-            '  "citations": [\n'
-            '    {"target_urn": "urn:nir:stato:decreto.legislativo:2016;50", "ref": "d.lgs. 50/2016"}\n'
-            "  ]\n"
-            "}\n"
-            "```\n"
-        )
+        # Count stats for the card
+        vigente_count = 0
+        abrogati_count = 0
+        mv_count = 0
+        if db_path.exists():
+            import sqlite3 as _sq
+            _c = _sq.connect(str(db_path))
+            vigente_count = _c.execute("SELECT COUNT(*) FROM laws WHERE status='in_force'").fetchone()[0]
+            abrogati_count = _c.execute("SELECT COUNT(*) FROM laws WHERE status='abrogated'").fetchone()[0]
+            _c.close()
+        if mv_db_path.exists():
+            import sqlite3 as _sq
+            _c = _sq.connect(str(mv_db_path))
+            mv_count = _c.execute("SELECT COUNT(*) FROM law_versions").fetchone()[0]
+            _c.close()
 
-        # Upload files
+        total_laws = vigente_count + abrogati_count
+        build_date = datetime.now().strftime("%Y-%m-%d")
+
+        if is_vigente_target:
+            card = (
+                "---\n"
+                "license: mit\n"
+                "language:\n  - it\n"
+                "tags:\n  - legal\n  - italian-law\n  - normattiva\n  - vigente\n"
+                "size_categories:\n  - 100K<n<1M\n"
+                "---\n\n"
+                "# NormattivaVigente Dataset\n\n"
+                f"Vigente-focused Italian law dataset, built {build_date}.\n\n"
+                "## Contents\n\n"
+                f"| Track | Laws | Description |\n"
+                f"|-------|------|-------------|\n"
+                f"| **Vigente** | {vigente_count:,} | Currently in-force laws (V track) |\n\n"
+                "## Files\n\n"
+                "| File | Description | Size |\n"
+                "|------|-------------|------|\n"
+                "| `data/laws.db` | Primary SQLite DB for search profile | ~1.15 GB |\n"
+                "| `data/processed/laws_vigente.jsonl` | In-force laws as JSONL | ~935 MB |\n\n"
+                "## Source\n\n"
+                "Data sourced from the [Normattiva Open Data API](https://dati.normattiva.it/) "
+                "under the Italian Open Government License (IODL 2.0).\n"
+            )
+        else:
+            card = (
+                "---\n"
+                "license: mit\n"
+                "language:\n  - it\n"
+                "tags:\n  - legal\n  - italian-law\n  - normattiva\n  - voom\n"
+                "size_categories:\n  - 100K<n<1M\n"
+                "---\n\n"
+                "# OpenNormattiva VOOM Dataset\n\n"
+                f"**VOOM = Vigente + Originale (abrogati) + Multivigente**\n\n"
+                f"Complete Italian law corpus from [Normattiva](https://www.normattiva.it/), "
+                f"built {build_date}.\n\n"
+                "## Contents\n\n"
+                f"| Track | Laws | Description |\n"
+                f"|-------|------|-------------|\n"
+                f"| **Vigente** | {vigente_count:,} | Currently in-force laws (V track) |\n"
+                f"| **Abrogati** | {abrogati_count:,} | Repealed/abrogated laws (O track) |\n"
+                f"| **Total (laws.db)** | {total_laws:,} | Primary database |\n"
+                f"| **Multivigente** | {mv_count:,} | Amendment versions (M track, separate DB) |\n\n"
+                "## Files\n\n"
+                "| File | Description | Size |\n"
+                "|------|-------------|------|\n"
+                "| `data/laws.db` | Primary SQLite DB (FTS5, vigente + abrogati) | ~1.15 GB |\n"
+                "| `data/multivigente.db` | Amendment history SQLite DB (on-demand) | ~2.0 GB |\n"
+                "| `data/processed/laws_vigente.jsonl` | In-force laws as JSONL | ~935 MB |\n"
+                "| `data/processed/laws_abrogati.jsonl` | Abrogated laws as JSONL | ~713 MB |\n"
+                "| `data/processed/laws_multivigente.jsonl` | Amendment versions as JSONL | ~2.5 GB |\n\n"
+                "## Schema (laws.db — `laws` table)\n\n"
+                "```\n"
+                "urn TEXT PRIMARY KEY\n"
+                "title TEXT\n"
+                "type TEXT          -- legge / decreto.legge / etc.\n"
+                "date TEXT          -- ISO date of enactment\n"
+                "year INTEGER\n"
+                "text TEXT          -- full body text (capped at 150KB)\n"
+                "text_length INTEGER\n"
+                "article_count INTEGER\n"
+                "status TEXT        -- 'in_force' | 'abrogated'\n"
+                "source_collection TEXT\n"
+                "importance_score REAL  -- PageRank score\n"
+                "```\n\n"
+                "## Schema (multivigente.db — `law_versions` table)\n\n"
+                "```\n"
+                "law_urn TEXT       -- FK to laws.urn\n"
+                "version_date TEXT  -- date of this amendment snapshot\n"
+                "title TEXT\n"
+                "type TEXT\n"
+                "year INTEGER\n"
+                "text TEXT          -- full text of this version\n"
+                "text_length INTEGER\n"
+                "article_count INTEGER\n"
+                "```\n\n"
+                "## Source\n\n"
+                "Data sourced from the [Normattiva Open Data API](https://dati.normattiva.it/) "
+                "under the Italian Open Government License (IODL 2.0).\n"
+            )
+
+        # Upload files — large files uploaded individually for better error handling
         staging = Path(tempfile.mkdtemp(prefix="normattiva_dataset_"))
         try:
             # Write dataset card
             (staging / "README.md").write_text(card, encoding="utf-8")
 
-            # Copy data files
-            data_dir = staging / "data" / "processed"
-            data_dir.mkdir(parents=True)
-            if jsonl_path.exists():
-                shutil.copy(jsonl_path, data_dir / "laws_vigente.jsonl")
-            if db_path.exists():
-                shutil.copy(db_path, staging / "data" / "laws.db")
+            data_dir = staging / "data"
+            processed_dir = data_dir / "processed"
+            processed_dir.mkdir(parents=True)
 
-            print(f"  Uploading {sum(1 for _ in staging.rglob('*') if _.is_file())} files...")
+            # Primary DB (vigente + abrogati) — always upload
+            if db_path.exists():
+                size_mb = db_path.stat().st_size / 1e6
+                print(f"  Including laws.db ({size_mb:.0f} MB)...")
+                dst_db_path = data_dir / "laws.db"
+                if is_vigente_target:
+                    import sqlite3 as _sq
+                    src_conn = _sq.connect(str(db_path))
+                    dst_conn = _sq.connect(str(dst_db_path))
+                    try:
+                        src_conn.backup(dst_conn)
+                    finally:
+                        src_conn.close()
+                    removed = dst_conn.execute(
+                        "SELECT COUNT(*) FROM laws WHERE status IS NOT 'in_force'"
+                    ).fetchone()[0]
+                    dst_conn.execute("DELETE FROM laws WHERE status IS NOT 'in_force'")
+                    dst_conn.commit()
+                    kept = dst_conn.execute(
+                        "SELECT COUNT(*) FROM laws WHERE status='in_force'"
+                    ).fetchone()[0]
+                    dst_conn.close()
+                    print(f"  Prepared vigente-only laws.db ({kept:,} in_force rows, removed {removed:,})")
+                else:
+                    shutil.copy(db_path, dst_db_path)
+            else:
+                print("  WARNING: data/laws.db not found — run build_voom.py first")
+
+            # Multivigente DB — upload only for non-vigente targets
+            if (not is_vigente_target) and mv_db_path.exists():
+                size_mb = mv_db_path.stat().st_size / 1e6
+                print(f"  Including multivigente.db ({size_mb:.0f} MB)...")
+                shutil.copy(mv_db_path, data_dir / "multivigente.db")
+            elif not is_vigente_target:
+                print("  Note: multivigente.db not built; run: py build_voom.py --steps multivigente")
+
+            # JSONL files — include if present
+            jsonl_files = [
+                (jsonl_path, "laws_vigente.jsonl"),
+            ]
+            if not is_vigente_target:
+                jsonl_files.extend([
+                    (abr_jsonl_path, "laws_abrogati.jsonl"),
+                    (mv_jsonl_path, "laws_multivigente.jsonl"),
+                ])
+            for src, dst_name in jsonl_files:
+                if src.exists():
+                    size_mb = src.stat().st_size / 1e6
+                    print(f"  Including {dst_name} ({size_mb:.0f} MB)...")
+                    shutil.copy(src, processed_dir / dst_name)
+
+            n_files = sum(1 for _ in staging.rglob("*") if _.is_file())
+            total_size_mb = sum(
+                p.stat().st_size for p in staging.rglob("*") if p.is_file()
+            ) / 1e6
+            print(f"  Uploading {n_files} files ({total_size_mb:.0f} MB total)...")
 
             api.upload_folder(
                 repo_id=dataset_id, repo_type="dataset",
                 folder_path=str(staging),
-                commit_message=f"Dataset update: 164K laws, 253K citations with full URNs",
+                commit_message=(
+                    f"VOOM dataset: {vigente_count:,} vigente + {abrogati_count:,} abrogati"
+                    + (f" + {mv_count:,} multivigente versions" if mv_count else "")
+                    + f" — built {build_date}"
+                ),
             )
             print(f"  Dataset uploaded: https://huggingface.co/datasets/{dataset_id}")
         finally:

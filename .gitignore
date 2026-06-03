@@ -11,6 +11,7 @@ data/
 akn/
 manifests/
 metadata/
+indexes/
 
 # Environment
 .env
@@ -24,12 +25,19 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+*.code-workspace
 
 # Logs
 *.log
+logs/
 
 # HF cache
 .cache/
 
 # Zip downloads
 *.zip
+
+# One-off scripts and diagnostic tools
+_patch_citizen_mvp.py
+build_voom.py
+llm/

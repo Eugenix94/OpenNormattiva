@@ -839,11 +839,13 @@ def _render_graph_plotly(nodes, edges, title="Citation Graph"):
 # ─────────────────────────────────────────────────────────────────
 
 GROQ_MODELS = {
-    "expert-vigente":             "Expert Vigente — GPT OSS 120B (migliore qualità + velocità)",
-    "auto-balanced":              "Auto bilanciato (economico → potente se necessario)",
-    "openai/gpt-oss-120b":        "GPT OSS 120B (massima qualità, 500 t/s)",
-    "llama-3.3-70b-versatile":    "Llama 3.3 70B (ottimo, 280 t/s)",
-    "llama-3.1-8b-instant":       "Llama 3.1 8B Instant (veloce, domande semplici)",
+    "expert-vigente":                           "Expert Vigente — GPT OSS 120B (migliore qualità)",
+    "auto-balanced":                            "Auto bilanciato (sceglie il modello ottimale)",
+    "openai/gpt-oss-120b":                      "GPT OSS 120B (massima qualità, 500 t/s)",
+    "qwen/qwen3-32b":                           "Qwen3 32B (ottimo per analisi giuridica)",
+    "meta-llama/llama-4-scout-17b-16e-instruct":"Llama 4 Scout 17B (veloce e preciso)",
+    "llama-3.3-70b-versatile":                  "Llama 3.3 70B Versatile (ottimo equilibrio)",
+    "llama-3.1-8b-instant":                     "Llama 3.1 8B Instant (veloce, domande semplici)",
 }
 GROQ_DEFAULT_MODEL = "expert-vigente"
 
@@ -1066,9 +1068,9 @@ def _select_balanced_groq_model(question: str, context_laws: list) -> str:
     """Choose the best Groq model, escalating on legal complexity.
 
     Tiers:
-    • Simple / short → llama-3.1-8b-instant  (560 t/s, fast)
-    • Standard legal  → llama-3.3-70b-versatile  (280 t/s, strong reasoning)
-    • Expert / multi-law → openai/gpt-oss-120b  (500 t/s, highest quality)
+    • Simple / short → meta-llama/llama-4-scout-17b-16e-instruct (fast, precise)
+    • Standard legal  → qwen/qwen3-32b (excellent legal reasoning)
+    • Expert / multi-law → openai/gpt-oss-120b (highest quality, 500 t/s)
     """
     q = (question or "").lower()
     q_len = len(q)
@@ -1077,7 +1079,8 @@ def _select_balanced_groq_model(question: str, context_laws: list) -> str:
     expert_markers = [
         "costituzione", "giurisprudenza", "responsabilita", "contratto",
         "retroattivo", "ricorso", "tribunale", "cassazione", "appello",
-        "risarcimento", "nullita", "invalidita", "impugnare",
+        "risarcimento", "nullita", "invalidita", "impugnare", "referendum",
+        "spiega", "analizza", "illustra", "diritti", "obblighi",
     ]
     complex_markers = [
         "articolo", "art.", "comma", "decreto", "abrog", "prescrizion",
@@ -1087,14 +1090,14 @@ def _select_balanced_groq_model(question: str, context_laws: list) -> str:
     expert_hits  = sum(1 for m in expert_markers  if m in q)
     complex_hits = sum(1 for m in complex_markers if m in q)
 
-    # Expert tier: constitutional/litigation questions or very large context
-    if expert_hits >= 1 or law_count >= 14 or (q_len > 250 and complex_hits >= 2):
+    # Expert tier: explanatory/constitutional/litigation questions or large context
+    if expert_hits >= 1 or law_count >= 10 or q_len > 200:
         return "openai/gpt-oss-120b"
     # Standard legal questions
-    if q_len > 120 or law_count >= 5 or complex_hits >= 1:
-        return "llama-3.3-70b-versatile"
+    if q_len > 80 or law_count >= 4 or complex_hits >= 1:
+        return "qwen/qwen3-32b"
     # Simple / short questions
-    return "llama-3.1-8b-instant"
+    return "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 def _extract_urns_from_text(text: str) -> set:
@@ -1164,7 +1167,7 @@ def _call_groq(
             chosen_model = "openai/gpt-oss-120b"
 
         # Larger output budget for 120B (supports 65K completion) — increased to 4500 to avoid truncation
-        effective_max_tokens = 4500 if "120b" in chosen_model.lower() else max_tokens
+        effective_max_tokens = 4500 if "120b" in chosen_model.lower() else max(max_tokens, 2000)
 
         st.session_state["last_groq_model_used"] = chosen_model
 
@@ -1214,22 +1217,25 @@ def _call_groq(
             "error": str(e),
         })
         err_str = str(e)
-        if "model_not_found" in err_str or "does not exist" in err_str.lower():
-            # Graceful fallback if gpt-oss-120b is unavailable
-            try:
-                fb = Groq(api_key=api_key)
-                fb_resp = fb.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=70,
-                )
-                answer = (fb_resp.choices[0].message.content or "").strip()
-                st.session_state["last_groq_model_used"] = "llama-3.3-70b-versatile"
-                return answer, None
-            except Exception as e2:
-                return None, f"Errore Groq API: {e2}"
+        if "model_not_found" in err_str or "does not exist" in err_str.lower() or "invalid_model" in err_str.lower():
+            # Graceful fallback chain: qwen3-32b → llama-3.3-70b-versatile
+            for fb_model in ("qwen/qwen3-32b", "llama-3.3-70b-versatile"):
+                try:
+                    fb = Groq(api_key=api_key)
+                    fb_resp = fb.chat.completions.create(
+                        model=fb_model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        timeout=70,
+                    )
+                    answer = (fb_resp.choices[0].message.content or "").strip()
+                    st.session_state["last_groq_model_used"] = fb_model
+                    if answer:
+                        return answer, None
+                except Exception:
+                    continue
+            return None, f"Errore Groq API: {e}"
         return None, f"Errore Groq API: {e}"
 
 
@@ -6971,18 +6977,18 @@ def _citizen_mvp(db):
             new_msg["laws"] = laws
 
         else:  # groq_rag — general question with FTS + Groq
-            context_laws = _retrieve_context(pending, limit=12)
+            context_laws = _retrieve_context(pending, limit=15)
             if has_groq and context_laws:
                 with st.spinner("\U0001f50d Ricerca nel dataset Normattiva\u2026"):
                     answer, err = _call_groq(
                         pending, context_laws,
-                        model=GROQ_DEFAULT_MODEL, max_tokens=1200, temperature=0.1,
+                        model=GROQ_DEFAULT_MODEL, max_tokens=2500, temperature=0.05,
                     )
                 used_model = st.session_state.get("last_groq_model_used")
                 if answer:
                     reply = answer
                     if used_model:
-                        reply += f"\n\n*Modello: {GROQ_MODELS.get(used_model, used_model)} ({used_model})*"
+                        reply += f"\n\n*Modello: {GROQ_MODELS.get(used_model, used_model)}*"
                     # Annotate each law with AI context + best text excerpt
                     context_laws = _annotate_relevance(answer, context_laws, query=pending)
                 else:

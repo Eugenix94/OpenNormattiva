@@ -13,8 +13,8 @@ on:
         type: boolean
 
 env:
-  HF_DATASET_REPO: diatribe00/normattiva-data
-  HF_SPACE_REPO: diatribe00/normattiva-search
+  HF_DATASET_REPO: diatribe00/normattivavigente-data
+  HF_SPACE_REPO: diatribe00/normattivavigente
   PYTHON_VERSION: '3.11'
 
 jobs:
