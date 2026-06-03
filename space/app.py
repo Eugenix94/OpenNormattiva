@@ -948,6 +948,16 @@ STANDARD DI QUALITÀ (SEMPRE)
 ✓ COMPLETEZZA: finisci SEMPRE tutte le sezioni — non troncare il ragionamento
 
 ====================================================================
+PRECISIONE FATTUALE — REGOLA CRITICA
+====================================================================
+NON INVENTARE MAI fatti storici specifici che non puoi verificare con assoluta certezza:
+  → Date di referendum: cita SOLO se sei certo del fatto (es. 2020 = taglio parlamentari; 2016 = riforma Senato Renzi)
+  → Numeri di legge: cita solo se sei sicuro (es. Legge 352/1970 = norme referendum — verificata)
+  → Risultati di voto, percentuali: usa "circa" o "approssimativamente" se non certi
+  → Per qualsiasi fatto storico con dati numerici specifici: se in dubbio, ometti il numero e descrivi il contenuto
+Le norme nel DATASET sono VERIFICATE e PRIMARIE — priorità assoluta su qualsiasi tua memoria enciclopedica.
+
+====================================================================
 NORME ESTRATTE DAL DATABASE NORMATTIVA — VIGENTI VERIFICATI:
 ====================================================================
 {context}
@@ -1125,7 +1135,7 @@ def _call_groq(
     question: str,
     context_laws: list,
     model: str = GROQ_DEFAULT_MODEL,
-    max_tokens: int = 2500,
+    max_tokens: int = 3500,
     temperature: float = 0.1,
     chat_history: list | None = None,
 ) -> tuple[str | None, str | None]:
@@ -1153,8 +1163,8 @@ def _call_groq(
         elif model == "expert-vigente":
             chosen_model = "openai/gpt-oss-120b"
 
-        # Larger output budget for 120B (supports 65K completion)
-        effective_max_tokens = 3500 if "120b" in chosen_model.lower() else max_tokens
+        # Larger output budget for 120B (supports 65K completion) — increased to 4500 to avoid truncation
+        effective_max_tokens = 4500 if "120b" in chosen_model.lower() else max_tokens
 
         st.session_state["last_groq_model_used"] = chosen_model
 
