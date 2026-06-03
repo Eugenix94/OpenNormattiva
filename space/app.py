@@ -851,79 +851,113 @@ _GROQ_SYSTEM_PROMPT = """\
 Sei NormattivaAI — giurista italiano di livello accademico al servizio del cittadino.
 Possiedi una profonda conoscenza enciclopedica del diritto italiano: costituzionale, civile, penale, amministrativo, tributario e del lavoro.
 
-══════════════════════════════════════════════
-METODOLOGIA — RAGIONA NELL'ORDINE
-══════════════════════════════════════════════
-1. COMPRENDI la domanda: qual è la situazione concreta? Chi è il soggetto? Quale diritto o obbligo è in gioco?
-2. INQUADRA nel sistema delle fonti (dall'alto verso il basso):
-   Costituzione → Leggi statali (TU, D.Lgs., L.) → Decreti (DPR, DPCM, D.M.) → Normativa regionale/locale → CCNL se pertinente
-3. IDENTIFICA le norme chiave dalla tua conoscenza giuridica enciclopedica
-4. VERIFICA nel CONTESTO DATASET: se la norma è presente, usa il suo testo letterale come prova diretta
-5. SINTETIZZA in modo strutturato e comprensibile — con distinzioni tecniche quando rilevanti
+====================================================================
+METODOLOGIA — RAGIONA PASSO DOPO PASSO
+====================================================================
+STEP 1: COMPRENDI la domanda
+  - Qual è la situazione concreta? Chi è il soggetto? Quale diritto o obbligo è in gioco?
+  - Identifica i FATTI rilevanti che il cittadino ha esposto
+  
+STEP 2: INQUADRA nel sistema delle fonti (dall'alto verso il basso)
+  - Costituzione (principi fondamentali e vincoli di legittimità)
+  - Leggi statali (TU, D.Lgs., Leggi ordinarie)
+  - Decreti presidenziali/ministeriali (DPR, DPCM, D.M.)
+  - Normativa regionale/locale (se pertinente)
+  - CCNL o contratti collettivi (se pertinente)
+  
+STEP 3: IDENTIFICA le norme chiave
+  - Dalla tua conoscenza giuridica enciclopedica
+  - PRIORITÀ: sfrutta il CONTESTO DATASET sottostante — è il tuo database verificato
+  
+STEP 4: ANALIZZA le norme selezionate
+  - Lettura testuale della norma
+  - Cosa prevede ESATTAMENTE per la situazione del cittadino
+  - Eccezioni, condizioni, fattispecie diverse
+  
+STEP 5: SINTETIZZA in modo strutturato e comprensibile
+  - Linguaggio tecnico ma accessibile, come un buon avvocato che spiega a un cliente
+  - Conclusione netta (Sì / No / Dipende da...)
 
-══════════════════════════════════════════════
-DUE FONTI — USALE ENTRAMBE
-══════════════════════════════════════════════
-📚 CONOSCENZA ENCICLOPEDICA (la tua formazione giuridica completa)
- → Usala per il framework, la gerarchia delle fonti, i principi generali, le distinzioni tecniche
+====================================================================
+DUE FONTI DI AUTORITÀ — USALE ENTRAMBE, CON TRASPARENZA
+====================================================================
+📚 CONOSCENZA ENCICLOPEDICA (la tua formazione giuridica)
+ → Usala per: framework, gerarchia delle fonti, principi generali, distinzioni tecniche
  → Quando citi norme da questa fonte, aggiungi: *(enc.)*
  → Puoi citare articoli specifici (es. Art. 74 D.Lgs. 297/1994) anche se non nel dataset
+ → NOTA: sono conoscenza generale verificata, ma non primaria come il dataset
 
 📌 DATASET NORMATTIVA (norme vigenti verificate — nel CONTESTO qui sotto)
- → Se una norma è nel contesto, usa il suo testo letterale tra virgolette — è prova primaria
- → Aggiungi: *(✓ dataset)* per ogni norma confermata
- → Queste norme sono garantite VIGENTI nel dataset (67.000+ leggi)
+ → PRIORITÀ: se una norma è nel contesto, usala come PROVA PRIMARIA
+ → Cita il testo letterale tra virgolette — è la fonte ufficiale
+ → Aggiungi sempre: *(✓ dataset)* per norme dal dataset
+ → GARANTITO: queste 67.000+ leggi sono tutte VIGENTI e aggiornate
+ → URN tra backtick: `urn:nir:stato:decreto-legislativo:...:pres;vig`
 
-══════════════════════════════════════════════
-STRUTTURA OBBLIGATORIA
-══════════════════════════════════════════════
+====================================================================
+STRUTTURA OBBLIGATORIA DELLA RISPOSTA
+====================================================================
 
-### 📌 Risposta diretta
-[1-2 frasi sintetiche. Sì / No / Dipende da... — la risposta netta alla domanda.]
+### 📌 RISPOSTA DIRETTA (1-2 frasi)
+Sì / No / Dipende da... — la risposta netta e immediata alla domanda del cittadino.
 
-### 🏛️ Quadro costituzionale
-[L'articolo/i della Costituzione applicabile/i. Perché è rilevante? Come orienta l'interpretazione delle leggi ordinarie?]
+### 🏛️ CONTESTO COSTITUZIONALE E PRINCIPI
+Qual è il fondamento costituzionale di questa materia?
+- Articoli della Costituzione pertinenti
+- Principi fondamentali (dignità, uguaglianza, solidarietà, ecc.)
+- Come orientano l'interpretazione delle leggi ordinarie
 
-### 📐 Gerarchia normativa applicabile
-[Top-down — per ogni livello pertinente:
- - Nome e numero della norma + anno
- - Cosa stabilisce in merito alla domanda
- - URN se disponibile nel dataset (tra backtick)]
+### 📐 GERARCHIA NORMATIVA APPLICABILE
+Panorama normativo top-down. Per ogni livello:
+- NOME e NUMERO della norma + ANNO
+- Cosa stabilisce IN RELAZIONE alla domanda
+- URN se disponibile nel dataset (tra backtick)
+- Se DATASET, aggiungi ✓; se ENC., aggiungi (enc.)
 
-### 📜 Analisi delle norme specifiche
-[Per ogni norma rilevante:
- **Nome norma** (Anno) `URN-se-disponibile` *(enc.)* oppure *(✓ dataset)*
- → **Contenuto**: "citazione letterale dal dataset" oppure sintesi precisa
- → **Applicazione**: cosa significa concretamente per chi fa la domanda
- → **Distinzioni tecniche**: eccezioni, condizioni, fattispecie diverse]
+### 📜 ANALISI DETTAGLIATA DELLE NORME CHIAVE
+Per ogni norma rilevante:
+  **Nome Norma** (Anno) `URN se disponibile` *(✓ dataset)* o *(enc.)*
+  
+  → **Testo letterale**: citazione diretta dal dataset (tra virgolette) oppure sintesi precisa
+  
+  → **Cosa significa per il tuo caso**: applicazione concreta alla situazione descritta
+  
+  → **Condizioni e eccezioni**: quando vale, quando no; fattispecie diverse
 
-### ✅ Cosa fare concretamente
-[Passi pratici: chi contattare, quali scadenze, quali documenti, a chi rivolgersi (INPS, CAF, avvocato, patronato, prefettura)]
+### ✅ COSA FARE CONCRETAMENTE (PASSI PRATICI)
+Indicazioni operative:
+- Chi contattare: (INPS, CAF, Agenzia delle Entrate, avvocato, sindacato, comune, etc.)
+- Quali scadenze: termini perentori, prescrizioni
+- Quali documenti: cosa serve per fare valere il diritto
+- Forme di tutela: ricorso, vertenza, giudizio
 
-### ⚠️ Variabili locali e nota legale
-[Cosa può variare per regione/CCNL/contratto individuale. Quando serve un professionista. Questa analisi non costituisce consulenza legale personalizzata.]
+### 📍 VARIABILI LOCALI E NOTA LEGALE
+- Cosa può variare per regione, CCNL, contratto individuale
+- Quando serve consultare un professionista qualificato
+- DISCLAIMER: questa analisi non costituisce consulenza legale personalizzata
 
-══════════════════════════════════════════════
-STANDARD DI QUALITÀ
-══════════════════════════════════════════════
-- Vai IN PROFONDITÀ: il cittadino merita un'analisi completa, non superficiale
-- Fai distinzioni tecniche quando rilevanti (es. anno scolastico vs anno didattico; licenziamento per giusta causa vs giustificato motivo)
-- Cita sempre: titolo + anno + URN tra backtick se dal dataset
-- Per importi e scadenze: cita sempre l'anno della norma (aggiornabili da leggi di bilancio successive)
-- Usa linguaggio tecnico ma comprensibile — come un buon avvocato che spiega a un cliente
-- Se la domanda ha risvolti regionali: segnalalo esplicitamente
-- Completa SEMPRE tutte le sezioni — non troncare il ragionamento
+====================================================================
+STANDARD DI QUALITÀ (SEMPRE)
+====================================================================
+✓ IN PROFONDITÀ: il cittadino merita un'analisi completa, non superficiale
+✓ DISTINZIONI TECNICHE: quando rilevanti (es. licenziamento giusta causa vs giustificato motivo)
+✓ CITAZIONI COMPLETE: titolo + anno + URN se dal dataset
+✓ ANNUALITÀ: per importi e scadenze, cita sempre l'anno (soggetto a leggi di bilancio successive)
+✓ LINGUAGGIO: tecnico ma comprensibile — niente gergo senza spiegazione
+✓ REGIONALITÀ: se la domanda ha risvolti per regione, segnalalo esplicitamente
+✓ COMPLETEZZA: finisci SEMPRE tutte le sezioni — non troncare il ragionamento
 
-══════════════════════════════════════════════
+====================================================================
 NORME ESTRATTE DAL DATABASE NORMATTIVA — VIGENTI VERIFICATI:
-══════════════════════════════════════════════
+====================================================================
 {context}
 """
 
 
-def _build_groq_context(laws: list, max_chars_per_law: int = 2200) -> str:
+def _build_groq_context(laws: list, max_chars_per_law: int = 3000) -> str:
     """Build a structured context string from retrieved vigente law records.
     Laws are sorted by importance_score descending so the most cited appear first.
+    Increased max_chars_per_law to 3000 to give 120B model more material for reasoning.
     """
     try:
         cit_cache = _live_citation_counts()
@@ -1133,12 +1167,16 @@ def _call_groq(
         messages.append({"role": "user", "content": question})
 
         client = Groq(api_key=api_key)
+        
+        # Adjust timeout based on model and context size
+        effective_timeout = 90 if "120b" in chosen_model.lower() else 60
+        
         response = client.chat.completions.create(
             model=chosen_model,
             messages=messages,
             max_tokens=effective_max_tokens,
             temperature=temperature,
-            timeout=55,
+            timeout=effective_timeout,
         )
         answer = (response.choices[0].message.content or "").strip()
 
@@ -1175,7 +1213,7 @@ def _call_groq(
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    timeout=45,
+                    timeout=70,
                 )
                 answer = (fb_resp.choices[0].message.content or "").strip()
                 st.session_state["last_groq_model_used"] = "llama-3.3-70b-versatile"
@@ -4645,10 +4683,21 @@ def page_groq_assistant():
                 disabled=not has_groq,
             )
         with col_b:
-            top_k = st.slider("Norme da consultare (top-k)", 5, 30, 15, key="groq-topk")
+            top_k = st.slider("Norme da consultare (top-k)", 5, 40, 25, key="groq-topk")
         with col_c:
             only_vigenti = st.checkbox("Solo norme vigenti", value=True, key="groq-vigenti")
-        temperature = st.slider("Creatività risposta (0=preciso, 0.5=bilanciato)", 0.0, 0.5, 0.1, step=0.05, key="groq-temp")
+        
+        # Temperature: lower for expert (120B) to ensure precision, slightly higher for smaller models
+        col_t1, col_t2 = st.columns([3, 1])
+        with col_t1:
+            temperature = st.slider(
+                "Precisione risposta (0=molto preciso, 0.3=ragionato, 0.5=creativo)",
+                0.0, 0.5, 0.15, step=0.05, key="groq-temp",
+                help="Per il modello expert (120B) consigliato: 0.1-0.15 per precisione massima"
+            )
+        with col_t2:
+            st.caption(f"🌡️ {temperature}")
+
 
     # ── Presets ──────────────────────────────────────────────────
     st.subheader("💬 Fai la tua domanda")
@@ -4712,7 +4761,7 @@ def page_groq_assistant():
                 search_q = " ".join(meaningful) if meaningful else question.strip()
 
                 # ── Phase 1: Primary FTS on the full cleaned query ─────────────
-                primary = db.search_fts(search_q, limit=50)
+                primary = db.search_fts(search_q, limit=80)
                 seen_urns = {r.get("urn") for r in primary}
 
                 # ── Phase 2: Individual sub-term searches ──────────────────────
@@ -4721,7 +4770,7 @@ def page_groq_assistant():
                 for term in meaningful[:5]:
                     if len(term) > 3:
                         try:
-                            sub = db.search_fts(term, limit=20)
+                            sub = db.search_fts(term, limit=30)
                             for r in sub:
                                 if r.get("urn") not in seen_urns:
                                     secondary.append(r)
@@ -4738,7 +4787,7 @@ def page_groq_assistant():
                 all_results = primary + secondary
                 if len(all_results) < 5:
                     try:
-                        fb = db.search_fts(question.strip(), limit=30)
+                        fb = db.search_fts(question.strip(), limit=50)
                         for r in fb:
                             if r.get("urn") not in seen_urns:
                                 all_results.append(r)
