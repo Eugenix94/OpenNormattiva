@@ -1246,26 +1246,25 @@ def _call_hf_model(
         if not answer:
             return None, "Nessuna risposta dal modello HF."
 
-        # Validate citations
-        if not _has_strong_citations(answer, context_laws, min_count=2):
+        # Log telemetry (no hard gate — hybrid answers use encyclopedic refs too)
+        if not _has_legal_references(answer):
             _record_ai_telemetry({
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "model": model,
                 "elapsed_s": round(time.time() - started, 3),
-                "ok": False,
-                "citations_ok": False,
-                "error": "VALIDATION_FAILED: risposta senza citazioni URN sufficienti",
+                "ok": True,
+                "has_refs": False,
+                "error": None,
             })
-            return None, "VALIDATION_FAILED (HF): risposta senza citazioni URN sufficienti dal contesto"
-
-        _record_ai_telemetry({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "model": model,
-            "elapsed_s": round(time.time() - started, 3),
-            "ok": True,
-            "citations_ok": True,
-            "error": None,
-        })
+        else:
+            _record_ai_telemetry({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "model": model,
+                "elapsed_s": round(time.time() - started, 3),
+                "ok": True,
+                "has_refs": True,
+                "error": None,
+            })
         return answer, None
     except Exception as e:
         _record_ai_telemetry({
@@ -6928,7 +6927,16 @@ def _citizen_mvp(db):
                     # Annotate each law with AI context + best text excerpt
                     context_laws = _annotate_relevance(answer, context_laws, query=pending)
                 else:
-                    reply = _build_accountable_fallback(pending, context_laws, err or "Errore AI")
+                    reply = (
+                        f"⚠️ **Risposta AI non disponibile** ({err or 'Errore AI'})\n\n"
+                        + "\n".join(
+                            f"- **{l.get('title', 'N/A')[:80]}** ({l.get('year', '')}) — "
+                            f"`{l.get('urn', 'N/D')}`\n"
+                            f"  \"{(l.get('snippet') or l.get('text') or '')[:200].strip()}…\""
+                            for l in context_laws[:4]
+                        )
+                        + "\n\n*Consulta le norme sopra direttamente, oppure riformula la domanda.*"
+                    )
             elif has_groq and not context_laws:
                 reply = (
                     "\u26a0\ufe0f **Domanda fuori ambito legale italiano.**\n\n"
