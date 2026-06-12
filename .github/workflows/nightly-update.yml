@@ -13,8 +13,8 @@ on:
         type: boolean
 
 env:
-  HF_DATASET_REPO: diatribe00/normattiva-data
-  HF_SPACE_REPO: diatribe00/normattiva-search
+  HF_DATASET_REPO: diatribe00/italian-legal-lab-data
+  HF_SPACE_REPO: diatribe00/italian-legal-lab
   PYTHON_VERSION: '3.11'
 
 jobs:
@@ -147,6 +147,27 @@ jobs:
               sys.exit(1)
           print('Validation passed: DB is safe to upload')
           PYEOF
+
+      - name: AI smoke test on built dataset
+        if: steps.parse.outputs.parse_done == 'true'
+        run: |
+          python - <<'PYEOF'
+          import sys
+          sys.path.insert(0, '.')
+          from core.db import LawDatabase
+          import space.global_ai_copilot as gac
+
+          db = LawDatabase('data/laws.db')
+          stats = gac._get_dataset_statistics(db)
+          assert stats.get('total_laws', 0) > 10000, 'dataset stats missing or too small'
+          assert gac._detect_query_intent('Quante leggi ci sono?', stats) == 'meta'
+          assert gac._detect_query_intent('Norme sul lavoro', stats) in ('exploration', 'legal')
+          meta = gac._answer_meta_query('Quante leggi ci sono?', stats, db)
+          assert 'Totale norme' in meta
+          print('AI smoke test passed')
+          PYEOF
+        env:
+          PYTHONUNBUFFERED: '1'
 
       - name: Upload JSONL to HF Dataset
         if: steps.parse.outputs.parse_done == 'true' && env.HF_TOKEN != ''

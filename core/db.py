@@ -39,7 +39,121 @@ class LawDatabase:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.create_function("URN_NORM", 1, self._normalize_urn)
+        self._resolved_urn_cache: Dict[str, Optional[str]] = {}
+        self._normalized_law_index: Optional[Dict[str, str]] = None
+        self._citation_norm_index: Optional[Dict[str, set]] = None
         self.init_schema()
+
+    def _normalize_urn(self, urn_value: Optional[str]) -> str:
+        """Normalize URN for citation matching (year+number canonical shape)."""
+        if urn_value is None:
+            return ''
+
+        text = str(urn_value).strip().lower()
+        if not text:
+            return ''
+        if not text.startswith('urn:nir:'):
+            return text
+
+        match = re.match(r'^urn:nir:([^:]+):([^:]+):([^;]+);(.*)$', text)
+        if not match:
+            return text
+
+        authority, act_type, date_part, number_part = match.groups()
+        year_match = re.search(r'(\d{4})', date_part)
+        year = year_match.group(1) if year_match else date_part
+
+        number = (number_part or '').strip()
+        number = re.sub(r'[^0-9a-z\.\-]', '', number)
+        if number:
+            number = number.lstrip('0') or '0'
+
+        if number != '':
+            return f'urn:nir:{authority}:{act_type}:{year};{number}'
+        return f'urn:nir:{authority}:{act_type}:{year};'
+
+    def _build_normalized_law_index(self) -> Dict[str, str]:
+        """Build map normalized_urn -> canonical law URN."""
+        if self._normalized_law_index is not None:
+            return self._normalized_law_index
+
+        index: Dict[str, str] = {}
+        rows = self.conn.execute('SELECT urn FROM laws WHERE urn IS NOT NULL AND urn != ""').fetchall()
+        for row in rows:
+            urn = row['urn']
+            norm = self._normalize_urn(urn)
+            if not norm:
+                continue
+            prev = index.get(norm)
+            if prev is None or len(urn) > len(prev):
+                index[norm] = urn
+
+        self._normalized_law_index = index
+        return index
+
+    def _build_citation_norm_index(self) -> Dict[str, set]:
+        """Build map normalized_target -> raw cited_urn values found in citations."""
+        if self._citation_norm_index is not None:
+            return self._citation_norm_index
+
+        index: Dict[str, set] = {}
+        rows = self.conn.execute('SELECT DISTINCT cited_urn FROM citations').fetchall()
+        for row in rows:
+            cited_urn = row['cited_urn']
+            norm = self._normalize_urn(cited_urn)
+            if not norm:
+                continue
+            if norm not in index:
+                index[norm] = set()
+            index[norm].add(cited_urn)
+
+        self._citation_norm_index = index
+        return index
+
+    def resolve_law_urn(self, urn: str) -> Optional[str]:
+        """Resolve possibly non-canonical URN to canonical URN present in laws table."""
+        if not urn:
+            return None
+
+        if urn in self._resolved_urn_cache:
+            return self._resolved_urn_cache[urn]
+
+        row = self.conn.execute('SELECT urn FROM laws WHERE urn = ? LIMIT 1', (urn,)).fetchone()
+        if row:
+            resolved = row['urn']
+            self._resolved_urn_cache[urn] = resolved
+            return resolved
+
+        norm = self._normalize_urn(urn)
+        resolved = self._build_normalized_law_index().get(norm)
+        self._resolved_urn_cache[urn] = resolved
+        return resolved
+
+    def _candidate_cited_urns(self, target_urn: str) -> List[str]:
+        """All raw citation targets that normalize to target_urn."""
+        if not target_urn:
+            return []
+
+        norm = self._normalize_urn(target_urn)
+        citations_by_norm = self._build_citation_norm_index()
+        candidates = list(citations_by_norm.get(norm, set()))
+        if target_urn not in candidates:
+            candidates.append(target_urn)
+        return candidates
+
+    def count_incoming_citations(self, urn: str) -> int:
+        """Count incoming citations to a law with normalized URN matching."""
+        candidates = self._candidate_cited_urns(urn)
+        if not candidates:
+            return 0
+
+        placeholders = ','.join('?' * len(candidates))
+        row = self.conn.execute(
+            f'SELECT COUNT(*) FROM citations WHERE cited_urn IN ({placeholders})',
+            candidates
+        ).fetchone()
+        return int(row[0]) if row else 0
     
     def init_schema(self):
         """Create tables and indexes."""
@@ -256,8 +370,20 @@ class LawDatabase:
                             INSERT OR IGNORE INTO citations (citing_urn, cited_urn, count, context)
                             VALUES (?, ?, 1, ?)
                         ''', (law.get('urn'), citation_urn, context))
+                        if self._citation_norm_index is not None:
+                            norm = self._normalize_urn(citation_urn)
+                            if norm:
+                                self._citation_norm_index.setdefault(norm, set()).add(citation_urn)
                     except Exception:
                         pass  # FK violation when target law not in DB yet
+
+            inserted_urn = law.get('urn')
+            if inserted_urn and self._normalized_law_index is not None:
+                norm_urn = self._normalize_urn(inserted_urn)
+                prev = self._normalized_law_index.get(norm_urn)
+                if prev is None or len(inserted_urn) > len(prev):
+                    self._normalized_law_index[norm_urn] = inserted_urn
+            self._resolved_urn_cache.clear()
             
             self.conn.commit()
             return True
@@ -377,7 +503,11 @@ class LawDatabase:
                            rank * (-1) as relevance_score
                     FROM laws_fts f
                     JOIN laws l ON l.urn = f.urn
-                    LEFT JOIN (SELECT cited_urn, COUNT(*) cnt FROM citations GROUP BY cited_urn) ci ON ci.cited_urn = l.urn
+                    LEFT JOIN (
+                        SELECT URN_NORM(cited_urn) as cited_norm, COUNT(*) cnt
+                        FROM citations
+                        GROUP BY cited_norm
+                    ) ci ON ci.cited_norm = URN_NORM(l.urn)
                     LEFT JOIN (SELECT citing_urn, COUNT(*) cnt FROM citations GROUP BY citing_urn) co ON co.citing_urn = l.urn
                     WHERE laws_fts MATCH ?
                 '''
@@ -389,7 +519,11 @@ class LawDatabase:
                            COALESCE(co.cnt, 0) as citation_count_out,
                            0.0 as relevance_score
                     FROM laws l
-                    LEFT JOIN (SELECT cited_urn, COUNT(*) cnt FROM citations GROUP BY cited_urn) ci ON ci.cited_urn = l.urn
+                    LEFT JOIN (
+                        SELECT URN_NORM(cited_urn) as cited_norm, COUNT(*) cnt
+                        FROM citations
+                        GROUP BY cited_norm
+                    ) ci ON ci.cited_norm = URN_NORM(l.urn)
                     LEFT JOIN (SELECT citing_urn, COUNT(*) cnt FROM citations GROUP BY citing_urn) co ON co.citing_urn = l.urn
                     WHERE 1=1
                 '''
@@ -465,7 +599,11 @@ class LawDatabase:
                        COALESCE(co.cnt, 0) as citations_out,
                        COALESCE(am.cnt, 0) as amendment_count
                 FROM laws l
-                LEFT JOIN (SELECT cited_urn, COUNT(*) cnt FROM citations GROUP BY cited_urn) ci ON ci.cited_urn = l.urn
+                LEFT JOIN (
+                    SELECT URN_NORM(cited_urn) as cited_norm, COUNT(*) cnt
+                    FROM citations
+                    GROUP BY cited_norm
+                ) ci ON ci.cited_norm = URN_NORM(l.urn)
                 LEFT JOIN (SELECT citing_urn, COUNT(*) cnt FROM citations GROUP BY citing_urn) co ON co.citing_urn = l.urn
                 LEFT JOIN (SELECT urn, COUNT(*) cnt FROM amendments GROUP BY urn) am ON am.urn = l.urn
                 WHERE l.urn = ?
@@ -494,9 +632,8 @@ class LawDatabase:
         """Get laws that this law cites."""
         try:
             sql = '''
-                SELECT c.cited_urn as urn, l.title, l.year, l.type, c.count
+                SELECT c.cited_urn, c.count, c.context
                 FROM citations c
-                LEFT JOIN laws l ON c.cited_urn = l.urn
                 WHERE c.citing_urn = ?
                 ORDER BY c.count DESC
             '''
@@ -505,8 +642,30 @@ class LawDatabase:
                 sql += ' LIMIT ?'
                 params.append(limit)
             
-            results = self.conn.execute(sql, params).fetchall()
-            return [dict(r) for r in results]
+            rows = self.conn.execute(sql, params).fetchall()
+            results = []
+            for row in rows:
+                raw_target = row['cited_urn']
+                resolved_target = self.resolve_law_urn(raw_target)
+                law_info = None
+                if resolved_target:
+                    law_info = self.conn.execute(
+                        'SELECT urn, title, year, type FROM laws WHERE urn = ? LIMIT 1',
+                        (resolved_target,)
+                    ).fetchone()
+
+                results.append({
+                    'urn': resolved_target or raw_target,
+                    'cited_urn': raw_target,
+                    'resolved_urn': resolved_target,
+                    'title': law_info['title'] if law_info else None,
+                    'year': law_info['year'] if law_info else None,
+                    'type': law_info['type'] if law_info else None,
+                    'count': row['count'],
+                    'context': row['context'],
+                })
+
+            return results
         except Exception as e:
             logger.error(f"Error getting outgoing citations: {e}")
             return []
@@ -514,37 +673,73 @@ class LawDatabase:
     def get_citations_incoming(self, urn: str, limit: int = None) -> List[Dict]:
         """Get laws that cite this law."""
         try:
-            sql = '''
-                SELECT c.citing_urn as urn, l.title, l.year, l.type, c.count
+            candidates = self._candidate_cited_urns(urn)
+            if not candidates:
+                return []
+
+            placeholders = ','.join('?' * len(candidates))
+            sql = f'''
+                SELECT c.citing_urn, c.cited_urn, c.count, c.context,
+                       l.title, l.year, l.type
                 FROM citations c
                 LEFT JOIN laws l ON c.citing_urn = l.urn
-                WHERE c.cited_urn = ?
+                WHERE c.cited_urn IN ({placeholders})
                 ORDER BY c.count DESC
             '''
-            params = [urn]
+            params = list(candidates)
             if limit:
                 sql += ' LIMIT ?'
                 params.append(limit)
-            
-            results = self.conn.execute(sql, params).fetchall()
-            return [dict(r) for r in results]
+
+            rows = self.conn.execute(sql, params).fetchall()
+            return [
+                {
+                    'urn': row['citing_urn'],
+                    'citing_urn': row['citing_urn'],
+                    'cited_urn': row['cited_urn'],
+                    'title': row['title'],
+                    'year': row['year'],
+                    'type': row['type'],
+                    'count': row['count'],
+                    'context': row['context'],
+                }
+                for row in rows
+            ]
         except Exception as e:
             logger.error(f"Error getting incoming citations: {e}")
             return []
     
     def get_most_cited_laws(self, limit: int = 50) -> List[Dict]:
         """Get the most influential laws by incoming citation count."""
-        results = self.conn.execute('''
-            SELECT l.urn, l.title, l.type, l.year, l.date,
-                   COUNT(c.citing_urn) as citation_count,
-                   l.importance_score
-            FROM laws l
-            JOIN citations c ON c.cited_urn = l.urn
-            GROUP BY l.urn
+        raw = self.conn.execute('''
+            SELECT cited_urn, SUM(count) as citation_count
+            FROM citations
+            GROUP BY cited_urn
             ORDER BY citation_count DESC
             LIMIT ?
-        ''', (limit,)).fetchall()
-        return [dict(r) for r in results]
+        ''', (max(limit * 8, limit),)).fetchall()
+
+        aggregated: Dict[str, int] = {}
+        for row in raw:
+            resolved = self.resolve_law_urn(row['cited_urn'])
+            if not resolved:
+                continue
+            aggregated[resolved] = aggregated.get(resolved, 0) + int(row['citation_count'] or 0)
+
+        top_pairs = sorted(aggregated.items(), key=lambda x: x[1], reverse=True)[:limit]
+        results = []
+        for law_urn, citation_count in top_pairs:
+            law = self.conn.execute(
+                'SELECT urn, title, type, year, date, importance_score FROM laws WHERE urn = ? LIMIT 1',
+                (law_urn,)
+            ).fetchone()
+            if not law:
+                continue
+            law_dict = dict(law)
+            law_dict['citation_count'] = citation_count
+            results.append(law_dict)
+
+        return results
     
     def get_citation_neighborhood(self, urn: str, depth: int = 1, max_nodes: int = 100) -> Dict:
         """Get the citation graph neighborhood around a law.
@@ -583,14 +778,20 @@ class LawDatabase:
                     (current_urn,)
                 ).fetchall()
                 for r in outgoing:
-                    edges.append({'source': current_urn, 'target': r['cited_urn'], 'type': 'cites'})
-                    queue.append((r['cited_urn'], current_depth + 1))
+                    target_urn = self.resolve_law_urn(r['cited_urn']) or r['cited_urn']
+                    edges.append({'source': current_urn, 'target': target_urn, 'type': 'cites'})
+                    queue.append((target_urn, current_depth + 1))
                 
                 # Incoming
-                incoming = self.conn.execute(
-                    'SELECT citing_urn FROM citations WHERE cited_urn = ? LIMIT 20',
-                    (current_urn,)
-                ).fetchall()
+                incoming_candidates = self._candidate_cited_urns(current_urn)
+                if incoming_candidates:
+                    placeholders = ','.join('?' * len(incoming_candidates))
+                    incoming = self.conn.execute(
+                        f'SELECT citing_urn FROM citations WHERE cited_urn IN ({placeholders}) LIMIT 20',
+                        incoming_candidates,
+                    ).fetchall()
+                else:
+                    incoming = []
                 for r in incoming:
                     edges.append({'source': r['citing_urn'], 'target': current_urn, 'type': 'cites'})
                     queue.append((r['citing_urn'], current_depth + 1))
@@ -669,10 +870,12 @@ class LawDatabase:
         all_urns = set()
         
         for e in edges:
-            outgoing[e['citing_urn']].append(e['cited_urn'])
-            incoming[e['cited_urn']].append(e['citing_urn'])
+            citing_urn = e['citing_urn']
+            cited_urn = self.resolve_law_urn(e['cited_urn']) or e['cited_urn']
+            outgoing[citing_urn].append(cited_urn)
+            incoming[cited_urn].append(citing_urn)
             all_urns.add(e['citing_urn'])
-            all_urns.add(e['cited_urn'])
+            all_urns.add(cited_urn)
         
         if not all_urns:
             logger.info("No citations found, skipping PageRank")
@@ -725,16 +928,38 @@ class LawDatabase:
     def compute_citation_counts(self):
         """Update citation counts in law_metadata."""
         logger.info("Computing citation counts...")
-        
-        self.conn.execute('''
-            INSERT OR REPLACE INTO law_metadata (urn, citation_count_incoming, citation_count_outgoing)
-            SELECT l.urn,
-                   COALESCE(ci.cnt, 0),
-                   COALESCE(co.cnt, 0)
-            FROM laws l
-            LEFT JOIN (SELECT cited_urn, COUNT(*) cnt FROM citations GROUP BY cited_urn) ci ON ci.cited_urn = l.urn
-            LEFT JOIN (SELECT citing_urn, COUNT(*) cnt FROM citations GROUP BY citing_urn) co ON co.citing_urn = l.urn
-        ''')
+
+        incoming_counts: Dict[str, int] = {}
+        outgoing_counts: Dict[str, int] = {}
+
+        rows = self.conn.execute(
+            'SELECT citing_urn, cited_urn, count FROM citations'
+        ).fetchall()
+
+        for row in rows:
+            citing_urn = row['citing_urn']
+            cited_urn = row['cited_urn']
+            count = int(row['count'] or 0)
+
+            outgoing_counts[citing_urn] = outgoing_counts.get(citing_urn, 0) + count
+            resolved_target = self.resolve_law_urn(cited_urn)
+            if resolved_target:
+                incoming_counts[resolved_target] = incoming_counts.get(resolved_target, 0) + count
+
+        all_urns = set(incoming_counts.keys()) | set(outgoing_counts.keys())
+        for law_urn in all_urns:
+            self.conn.execute('''
+                INSERT INTO law_metadata (urn, citation_count_incoming, citation_count_outgoing)
+                VALUES (?, ?, ?)
+                ON CONFLICT(urn) DO UPDATE SET
+                    citation_count_incoming=excluded.citation_count_incoming,
+                    citation_count_outgoing=excluded.citation_count_outgoing
+            ''', (
+                law_urn,
+                incoming_counts.get(law_urn, 0),
+                outgoing_counts.get(law_urn, 0),
+            ))
+
         self.conn.commit()
         logger.info("Citation counts updated")
     
@@ -822,15 +1047,7 @@ class LawDatabase:
             stats['by_year'] = {row['year']: row['count'] for row in years}
             
             # Most cited laws
-            most_cited = self.conn.execute('''
-                SELECT l.urn, l.title, l.type, l.year, COUNT(c.citing_urn) as citation_count
-                FROM laws l
-                JOIN citations c ON c.cited_urn = l.urn
-                GROUP BY l.urn
-                ORDER BY citation_count DESC
-                LIMIT 20
-            ''').fetchall()
-            stats['most_cited'] = [dict(row) for row in most_cited]
+            stats['most_cited'] = self.get_most_cited_laws(limit=20)
             
             # Domain distribution 
             domains = self.conn.execute('''
@@ -912,7 +1129,11 @@ class LawDatabase:
                    COALESCE(ci.cnt, 0) as citations_in,
                    COALESCE(co.cnt, 0) as citations_out
             FROM laws l
-            LEFT JOIN (SELECT cited_urn, COUNT(*) cnt FROM citations GROUP BY cited_urn) ci ON ci.cited_urn = l.urn
+            LEFT JOIN (
+                SELECT URN_NORM(cited_urn) as cited_norm, COUNT(*) cnt
+                FROM citations
+                GROUP BY cited_norm
+            ) ci ON ci.cited_norm = URN_NORM(l.urn)
             LEFT JOIN (SELECT citing_urn, COUNT(*) cnt FROM citations GROUP BY citing_urn) co ON co.citing_urn = l.urn
             ORDER BY l.year DESC, l.title
         '''
@@ -938,20 +1159,33 @@ class LawDatabase:
             SELECT l.urn as id, l.title as label, l.type, l.year,
                    l.importance_score, COALESCE(ci.cnt, 0) as size
             FROM laws l
-            LEFT JOIN (SELECT cited_urn, COUNT(*) cnt FROM citations GROUP BY cited_urn) ci ON ci.cited_urn = l.urn
+            LEFT JOIN (
+                SELECT URN_NORM(cited_urn) as cited_norm, COUNT(*) cnt
+                FROM citations
+                GROUP BY cited_norm
+            ) ci ON ci.cited_norm = URN_NORM(l.urn)
             WHERE COALESCE(ci.cnt, 0) >= ?
             ORDER BY size DESC
         ''', (min_citations,)).fetchall()
         
         node_ids = {n['id'] for n in nodes}
         
-        edges = self.conn.execute('''
-            SELECT citing_urn as source, cited_urn as target, count as weight
-            FROM citations
-            WHERE citing_urn IN ({ids}) AND cited_urn IN ({ids})
-        '''.format(ids=','.join('?' * len(node_ids))),
-            list(node_ids) + list(node_ids)
-        ).fetchall() if node_ids else []
+        edges = []
+        if node_ids:
+            raw_edges = self.conn.execute('''
+                SELECT citing_urn as source, cited_urn as target, count as weight
+                FROM citations
+                WHERE citing_urn IN ({ids})
+            '''.format(ids=','.join('?' * len(node_ids))), list(node_ids)).fetchall()
+
+            for edge in raw_edges:
+                resolved_target = self.resolve_law_urn(edge['target']) or edge['target']
+                if resolved_target in node_ids:
+                    edges.append({
+                        'source': edge['source'],
+                        'target': resolved_target,
+                        'weight': edge['weight'],
+                    })
         
         graph = {
             'generated': datetime.now().isoformat(),
@@ -1000,15 +1234,48 @@ class LawDatabase:
         if bad_years:
             report['issues'].append(f'{bad_years} laws with invalid years')
         
-        # Check: orphan citations (cited URN doesn't exist)
-        orphans = self.conn.execute('''
-            SELECT COUNT(DISTINCT c.cited_urn) 
+        # Check: orphan citations (exact and normalized)
+        exact_orphans_distinct = self.conn.execute('''
+            SELECT COUNT(DISTINCT c.cited_urn)
             FROM citations c
             LEFT JOIN laws l ON l.urn = c.cited_urn
             WHERE l.urn IS NULL
         ''').fetchone()[0]
-        report['checks']['citation_integrity'] = True
-        report['orphan_citations'] = orphans
+        exact_orphans_rows = self.conn.execute('''
+            SELECT COUNT(*)
+            FROM citations c
+            LEFT JOIN laws l ON l.urn = c.cited_urn
+            WHERE l.urn IS NULL
+        ''').fetchone()[0]
+
+        law_norms = {
+            self._normalize_urn(r['urn'])
+            for r in self.conn.execute('SELECT urn FROM laws WHERE urn IS NOT NULL AND urn != ""').fetchall()
+        }
+        cited_groups = self.conn.execute(
+            'SELECT cited_urn, COUNT(*) AS cnt FROM citations GROUP BY cited_urn'
+        ).fetchall()
+
+        norm_orphans_distinct = 0
+        norm_orphans_rows = 0
+        for row in cited_groups:
+            cited_urn = row['cited_urn']
+            cnt = int(row['cnt'] or 0)
+            if self._normalize_urn(cited_urn) not in law_norms:
+                norm_orphans_distinct += 1
+                norm_orphans_rows += cnt
+
+        report['checks']['citation_integrity'] = norm_orphans_distinct == 0
+        report['orphan_citations'] = norm_orphans_distinct
+        report['orphan_citations_rows'] = norm_orphans_rows
+        report['orphan_citations_exact'] = exact_orphans_distinct
+        report['orphan_citations_exact_rows'] = exact_orphans_rows
+        report['orphan_citations_resolved_by_normalization'] = max(0, exact_orphans_distinct - norm_orphans_distinct)
+        if norm_orphans_distinct:
+            report['issues'].append(
+                f'{norm_orphans_distinct} unresolved citation targets after URN normalization '
+                f'({norm_orphans_rows} citation rows)'
+            )
         
         # Check: missing text
         no_text = self.conn.execute(

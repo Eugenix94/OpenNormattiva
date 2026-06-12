@@ -2,7 +2,7 @@
 
 Search, browse, and analyse **157,000+** Italian laws with full-text search (FTS5/BM25), citation graphs, PageRank importance, and legal domain classification.
 
-**Live**: [HuggingFace Space](https://huggingface.co/spaces/diatribe00/normattiva-search) · **Dataset**: [HuggingFace Dataset](https://huggingface.co/datasets/diatribe00/normattiva-data)
+**Live**: [HuggingFace Space](https://huggingface.co/spaces/diatribe00/italian-legal-lab) · **Dataset**: [HuggingFace Dataset](https://huggingface.co/datasets/diatribe00/italian-legal-lab-data)
 
 ---
 

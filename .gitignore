@@ -12,6 +12,23 @@ akn/
 manifests/
 metadata/
 
+# Local runtime artifacts
+logs/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local analysis and generated output
+AI_*.md
+benchmark_*.json
+benchmark_comparison.md
+*_report.json
+*_report.txt
+_root_*.py
+# Temporary root scripts
+_*.py
+
 # Environment
 .env
 .env.local
